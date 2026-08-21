@@ -25,7 +25,7 @@ Use this skill for the local macOS bridge published at `WRJ7391117/codex-feishu-
    - current LaunchAgent state
 2. Choose the relevant mode:
    - New Mac installation: read [setup.md](references/setup.md), then use `scripts/install-latest.sh` if the user authorizes installation.
-   - Existing installation: use the menu bar App first; use its installed `control.sh` only when automation is necessary.
+   - Existing installation: use the App's main control window first; the menu bar is a shortcut. Use its installed `control.sh` only when automation is necessary.
    - Diagnosis: read [troubleshooting.md](references/troubleshooting.md) and verify each layer independently.
    - Architecture explanation: read [architecture.md](references/architecture.md).
 3. After a mutation, verify separately:
