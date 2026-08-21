@@ -1,6 +1,6 @@
 # Codex 飞书桥接
 
-把飞书 Bot 变成 Codex Desktop 的移动入口：在飞书里选择桌面版左侧栏中的 Task，发送文字，接收“正在运行”和最终结果。
+把飞书 Bot 变成 Codex Desktop 的移动入口：在飞书里选择桌面版左侧栏中的 Task，发送文字，接收“正在运行”以及文字和图片结果。
 
 ## 能力
 
@@ -10,7 +10,7 @@
 - 指定飞书用户白名单，每位用户独立保持自己的当前 Task
 - 按 Codex 项目限制每位用户可查看和提交的 Task
 - 将飞书文字提交给同一个 Codex Desktop Task
-- 先回复运行状态，完成后再回复最终结果
+- 先回复运行状态，完成后先回复文字结果，再逐张回复 Codex 生成或引用的图片
 - 标准 macOS 主窗口集中显示状态、配置、诊断和日志入口
 - 菜单栏保留随时开启、关闭和快速打开控制中心的入口
 - 用户级 LaunchAgent 常驻，异常退出后自动重启
@@ -31,7 +31,7 @@
                          ↓
                   Codex 执行与输出
                          ↓
-       lark-cli 回复运行状态和最终结果
+       lark-cli 回复运行状态、文字和图片结果
                          ↓
                        飞书
 ```
@@ -77,7 +77,7 @@ App Secret 由 lark-cli / macOS Keychain 管理，不写入本仓库或桥接的
 在飞书开放平台中完成：
 
 1. 启用机器人能力，并把应用发布到当前租户。
-2. 开通消息收发所需权限；至少包括接收单聊消息、读取消息和发送消息。可根据 lark-cli 返回的 `missing_scopes` 精确补充。
+2. 开通消息收发所需权限；至少包括接收单聊消息、读取消息、发送消息和上传图片资源（`im:resource`）。可根据 lark-cli 返回的 `missing_scopes` 精确补充。
 3. 在“事件与回调”中启用长连接，并订阅：
    - `im.message.receive_v1`
    - `application.bot.menu_v6`
@@ -110,6 +110,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 - 点击 Bot 菜单“选择 Task” → 卡片下拉框显示 `项目 · Task 标题`
 - 选中一次后直接发送文字 → 始终继续当前 Task
+- Codex 返回图片 → Bot 先回复文字，再把图片回复在同一条消息下
 - 再次点击“选择 Task” → 切换到另一个 Task
 - 发送“当前” → 查看当前 Task
 - 发送“对话” → 在消息中重新打开 Task 卡片
@@ -153,6 +154,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 - 群聊必须显式列入允许列表，或先由同一用户通过受信任卡片建立状态
 - 消息按飞书 `message_id` 去重，回复使用幂等键
 - 提交结果不确定时不会自动重复执行，避免同一任务运行两次
+- 每轮最多发送 8 张结果图片；本地图片只接受 Codex 明确返回且实际存在的常见图片格式
 - 桥接不绕过 Codex 的权限、沙箱或用户确认
 - 公开仓库不包含任何 App Secret、Token、用户 ID、Chat ID 或本机 Task 数据
 

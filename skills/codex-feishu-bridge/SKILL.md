@@ -36,6 +36,7 @@ Use this skill for the local macOS bridge published at `WRJ7391117/codex-feishu-
    - authorized-user count and project filtering
    - three event consumers ready
    - an end-to-end Feishu message only when the user is present to perform it
+   - for image changes, a text-then-image round trip and the Bot's `im:resource` permission
 
 ## Standard commands
 

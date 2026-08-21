@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 from typing import Any, Callable
+from urllib.parse import unquote, urlsplit
 import uuid
 
 
@@ -142,6 +143,10 @@ ALLOWED_CHAT_IDS = {
 }
 MAX_PROMPT_CHARS = int(CONFIG.get("max_prompt_chars", 12000))
 MAX_REPLY_CHARS = int(CONFIG.get("max_reply_chars", 3000))
+MAX_RESULT_IMAGES = max(0, int(CONFIG.get("max_result_images", 8)))
+
+IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
+MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^)\n]+)\s*\)")
 
 EVENT_KEYS = (
     "im.message.receive_v1",
@@ -390,6 +395,112 @@ def reply(message_id: str, text: str, kind: str) -> bool:
             return True
         log(
             f"reply failed kind={kind} attempt={attempt} "
+            f"code={result.returncode}"
+        )
+    return False
+
+
+def normalized_image_reference(reference: str) -> str | None:
+    value = reference.strip()
+    if value.startswith("<") and value.endswith(">"):
+        value = value[1:-1].strip()
+    else:
+        value = re.split(r"\s+(?=[\"'])", value, maxsplit=1)[0].strip()
+
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() in {"http", "https"}:
+        return value if Path(parsed.path).suffix.lower() in IMAGE_SUFFIXES else None
+    if parsed.scheme.lower() == "file":
+        value = unquote(parsed.path)
+    elif parsed.scheme:
+        return None
+
+    path = Path(value).expanduser()
+    if (
+        not path.is_absolute()
+        or path.suffix.lower() not in IMAGE_SUFFIXES
+        or not path.is_file()
+    ):
+        return None
+    return str(path.resolve())
+
+
+def extract_result_images(text: str) -> tuple[str, list[str]]:
+    images: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        image = normalized_image_reference(match.group(1))
+        if image is None:
+            return "图片不可用"
+        if image not in images:
+            images.append(image)
+        return "图片见下方"
+
+    return MARKDOWN_IMAGE_PATTERN.sub(replace, text).strip(), images
+
+
+def prepare_result_images(
+    text: str,
+    rollout_images: list[str],
+) -> tuple[str, list[str]]:
+    clean_text, linked_images = extract_result_images(text)
+    if MAX_RESULT_IMAGES == 0:
+        return clean_text, []
+    images: list[str] = []
+    for reference in rollout_images + linked_images:
+        image = normalized_image_reference(reference)
+        if image is not None and image not in images:
+            images.append(image)
+        if len(images) >= MAX_RESULT_IMAGES:
+            break
+    if images and "图片见下方" not in clean_text:
+        clean_text = clean_text.rstrip() + "\n\n图片见下方。"
+    return clean_text, images
+
+
+def reply_image(message_id: str, image: str, index: int) -> bool:
+    parsed = urlsplit(image)
+    cwd: Path | None = None
+    image_argument = image
+    if parsed.scheme.lower() not in {"http", "https"}:
+        path = Path(image).resolve()
+        cwd = path.parent
+        image_argument = f"./{path.name}"
+    command = [
+        LARK_CLI,
+        "--profile",
+        LARK_PROFILE,
+        "im",
+        "+messages-reply",
+        "--message-id",
+        message_id,
+        "--image",
+        image_argument,
+        "--as",
+        "bot",
+        "--idempotency-key",
+        idempotency_key(message_id, f"image-{index}"),
+    ]
+    for attempt in range(1, 3):
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=lark_environment(),
+                cwd=cwd,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log(
+                f"image reply failed index={index} attempt={attempt} "
+                f"error={type(exc).__name__}"
+            )
+            continue
+        if lark_succeeded(result):
+            return True
+        log(
+            f"image reply failed index={index} attempt={attempt} "
             f"code={result.returncode}"
         )
     return False
@@ -821,8 +932,9 @@ def wait_for_desktop_turn(
     rollout_path: Path,
     start_offset: int,
     turn_id: str,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, list[str]]:
     deadline = time.monotonic() + 3600
+    images: list[str] = []
     with rollout_path.open("r", encoding="utf-8") as handle:
         handle.seek(start_offset)
         while time.monotonic() < deadline:
@@ -835,29 +947,64 @@ def wait_for_desktop_turn(
             except json.JSONDecodeError:
                 continue
             payload = record.get("payload")
-            if not isinstance(payload, dict) or payload.get("turn_id") != turn_id:
+            if not isinstance(payload, dict):
                 continue
             event_type = payload.get("type")
+            if event_type == "image_generation_end":
+                image = normalized_image_reference(str(payload.get("saved_path") or ""))
+                if image is not None and image not in images:
+                    images.append(image)
+                continue
+            if payload.get("turn_id") != turn_id:
+                continue
             if event_type == "task_complete":
                 message = str(payload.get("last_agent_message") or "").strip()
-                return True, message or "Codex 已完成，但没有返回文字结果。"
+                return (
+                    True,
+                    message or "Codex 已完成，但没有返回文字结果。",
+                    images,
+                )
             if event_type in {"task_failed", "turn_aborted"}:
-                return False, "Codex 没有完成这条消息，请在桌面版中查看具体原因。"
+                return (
+                    False,
+                    "Codex 没有完成这条消息，请在桌面版中查看具体原因。",
+                    [],
+                )
     return (
         False,
         "等待超过 60 分钟，尚未确认 task 完成；"
         "task 可能仍在 Codex Desktop 中运行，请在桌面版中查看。",
+        [],
     )
+
+
+def rollout_images_since(rollout_path: Path | None, start_offset: int) -> list[str]:
+    if rollout_path is None or not rollout_path.is_file():
+        return []
+    images: list[str] = []
+    with rollout_path.open("r", encoding="utf-8") as handle:
+        handle.seek(start_offset)
+        for line in handle:
+            try:
+                payload = json.loads(line).get("payload")
+            except (AttributeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or payload.get("type") != "image_generation_end":
+                continue
+            image = normalized_image_reference(str(payload.get("saved_path") or ""))
+            if image is not None and image not in images:
+                images.append(image)
+    return images
 
 
 def run_codex_via_desktop(
     thread_id: str,
     prompt: str,
     on_started: Callable[[], None] | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, list[str]]:
     rollout_path = rollout_path_for_task(thread_id)
     if not DESKTOP_IPC_SOCKET.exists() or not rollout_path or not rollout_path.exists():
-        return "unavailable", ""
+        return "unavailable", "", []
     start_offset = rollout_path.stat().st_size
     turn_request_attempted = False
     try:
@@ -921,8 +1068,9 @@ def run_codex_via_desktop(
                 "failed",
                 "已向 Codex Desktop 发出启动请求，但没有收到确认；"
                 "为避免重复执行，本条不会再次提交。请在桌面版查看该 task。",
+                [],
             )
-        return "unavailable", ""
+        return "unavailable", "", []
     except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         log(f"desktop IPC failed: {type(exc).__name__}: {exc}")
         if turn_request_attempted:
@@ -930,47 +1078,57 @@ def run_codex_via_desktop(
                 "failed",
                 "已向 Codex Desktop 发出启动请求，但没有收到确认；"
                 "为避免重复执行，本条不会再次提交。请在桌面版查看该 task。",
+                [],
             )
-        return "failed", "没有成功发送到 Codex Desktop。详细原因已记录到 Mac 的桥接日志。"
+        return (
+            "failed",
+            "没有成功发送到 Codex Desktop。详细原因已记录到 Mac 的桥接日志。",
+            [],
+        )
 
     if response.get("resultType") != "success":
         error = " ".join(str(response.get("error") or "unknown error").split())[-2000:]
         if error == "no-client-found":
-            return "unavailable", ""
+            return "unavailable", "", []
         log(f"desktop turn failed error={error}")
         if any(marker in error.lower() for marker in ("active turn", "already running", "busy")):
             return (
                 "failed",
                 "当前 task 正在运行；本条消息未发送、也未排队。"
                 "请等待当前运行结束后重试。",
+                [],
             )
-        return "failed", "没有成功发送到 Codex Desktop。详细原因已记录到 Mac 的桥接日志。"
+        return (
+            "failed",
+            "没有成功发送到 Codex Desktop。详细原因已记录到 Mac 的桥接日志。",
+            [],
+        )
 
     turn_id = str(
         response.get("result", {}).get("result", {}).get("turn", {}).get("id") or ""
     )
     if not turn_id:
         log("desktop turn failed error=missing turn id")
-        return "failed", "Codex Desktop 已接受消息，但没有返回 turn id。"
+        return "failed", "Codex Desktop 已接受消息，但没有返回 turn id。", []
     if on_started is not None:
         on_started()
     try:
         remember_bridge_turn(turn_id)
     except OSError as exc:
         log(f"remember bridge turn failed: {type(exc).__name__}: {exc}")
-    success, result = wait_for_desktop_turn(
+    success, result, images = wait_for_desktop_turn(
         rollout_path,
         start_offset,
         turn_id,
     )
-    return ("completed" if success else "failed"), result
+    return ("completed" if success else "failed"), result, images
 
 
 def run_codex(
     thread_id: str,
     prompt: str,
     on_started: Callable[[str], None] | None = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, list[str]]:
     started_notified = False
 
     def notify_started(status: str) -> None:
@@ -983,18 +1141,24 @@ def run_codex(
         except Exception as exc:
             log(f"running status reply failed: {type(exc).__name__}: {exc}")
 
-    desktop_status, desktop_result = run_codex_via_desktop(
+    desktop_status, desktop_result, desktop_images = run_codex_via_desktop(
         thread_id,
         prompt,
         lambda: notify_started("正在运行"),
     )
     if desktop_status == "completed":
-        return True, desktop_result
+        return True, desktop_result, desktop_images
     if desktop_status == "failed":
-        return False, desktop_result
+        return False, desktop_result, []
 
     environment = os.environ.copy()
     environment["CODEX_FEISHU_BRIDGE"] = "1"
+    rollout_path = rollout_path_for_task(thread_id)
+    rollout_offset = (
+        rollout_path.stat().st_size
+        if rollout_path and rollout_path.is_file()
+        else 0
+    )
     with tempfile.TemporaryDirectory(prefix="codex-feishu-") as directory:
         output_path = Path(directory) / "last-message.txt"
         command = [
@@ -1022,16 +1186,25 @@ def run_codex(
                 False,
                 "等待超过 60 分钟，尚未确认 task 完成；"
                 "task 可能仍在 Codex Desktop 中运行，请在桌面版中查看。",
+                [],
             )
         if result.returncode != 0:
             error = " ".join(result.stderr.strip().split())[-2000:] or "(empty)"
             log(f"codex resume failed code={result.returncode} stderr={error}")
-            return False, "没有成功发送到 Codex。详细原因已记录到 Mac 的桥接日志，请稍后重试。"
+            return (
+                False,
+                "没有成功发送到 Codex。详细原因已记录到 Mac 的桥接日志，请稍后重试。",
+                [],
+            )
         try:
             final_message = output_path.read_text(encoding="utf-8").strip()
         except OSError:
             final_message = ""
-        return True, final_message or "Codex 已完成，但没有返回文字结果。"
+        return (
+            True,
+            final_message or "Codex 已完成，但没有返回文字结果。",
+            rollout_images_since(rollout_path, rollout_offset),
+        )
 
 
 def mark_processed(state: dict[str, Any], key: str) -> bool:
@@ -1107,14 +1280,30 @@ def handle_message_event(event: dict[str, Any]) -> None:
         )
 
     try:
-        success, result = run_codex(task["id"], content, reply_task_status)
+        success, result, rollout_images = run_codex(
+            task["id"],
+            content,
+            reply_task_status,
+        )
     except Exception as exc:
         log(f"Codex bridge run failed: {type(exc).__name__}: {exc}")
         success = False
         result = "桥接运行异常，详细原因已记录到 Mac 的桥接日志。"
+        rollout_images = []
     status = "已完成" if success else "未完成"
     prefix = f"【Codex · {option_text(task)}】\n状态：{status}\n\n"
-    reply(message_id, prefix + result, "final")
+    clean_result, images = prepare_result_images(result, rollout_images)
+    reply(message_id, prefix + clean_result, "final")
+    failed_images = sum(
+        not reply_image(message_id, image, index)
+        for index, image in enumerate(images, start=1)
+    )
+    if failed_images:
+        reply(
+            message_id,
+            f"有 {failed_images} 张图片未能发送，请在 Codex Desktop 中查看。",
+            "image-error",
+        )
 
 
 def handle_card_event(event: dict[str, Any]) -> None:

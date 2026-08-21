@@ -19,3 +19,4 @@ Common interpretations:
 - “Task is running”: Codex rejected a concurrent turn. The bridge intentionally does not queue or duplicate it.
 - Start succeeds but no events arrive: a loaded LaunchAgent only proves the process exists; inspect ready markers and console subscriptions.
 - Reply fails after Codex completed: inspect lark-cli error envelopes and their `error.type`, `error.subtype`, `missing_scopes`, and `console_url`.
+- Text arrives but images do not: confirm the Bot has `im:resource`, then inspect the bridge log for `image reply failed`. Markdown alone cannot upload a Mac-local path; the bridge must send a separate image reply.
