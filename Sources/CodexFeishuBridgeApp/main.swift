@@ -7,6 +7,20 @@ private struct CommandResult {
     let output: String
 }
 
+private struct AuthorizedUserDraft: Identifiable {
+    let id: UUID
+    var name: String
+    var openID: String
+    var projects: String
+
+    init(id: UUID = UUID(), name: String = "", openID: String = "", projects: String = "*") {
+        self.id = id
+        self.name = name
+        self.openID = openID
+        self.projects = projects
+    }
+}
+
 private final class BridgeController {
     let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Codex Feishu Bridge", isDirectory: true)
@@ -93,6 +107,7 @@ private final class BridgeViewModel: ObservableObject {
 
     @Published var isRunning = false
     @Published var profileName = "codex-notify"
+    @Published var authorizedUserCount = 0
     @Published var showConfiguration = false
     @Published var showDiagnosis = false
     @Published var diagnosisPassed = false
@@ -101,7 +116,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var alertMessage: String?
 
     @Published var draftProfile = "codex-notify"
-    @Published var draftSender = ""
+    @Published var draftUsers = [AuthorizedUserDraft()]
     @Published var draftChats = ""
     @Published var draftEventKey = "select_task"
 
@@ -114,6 +129,7 @@ private final class BridgeViewModel: ObservableObject {
         isRunning = bridge.isRunning()
         let config = bridge.readConfig()
         profileName = String(describing: config["lark_profile"] ?? "codex-notify")
+        authorizedUserCount = configuredUsers(from: config).count
     }
 
     func toggleBridge() {
@@ -131,7 +147,10 @@ private final class BridgeViewModel: ObservableObject {
     func prepareConfiguration() {
         let config = bridge.readConfig()
         draftProfile = String(describing: config["lark_profile"] ?? "codex-notify")
-        draftSender = String(describing: config["allowed_sender_id"] ?? "")
+        draftUsers = configuredUsers(from: config)
+        if draftUsers.isEmpty {
+            draftUsers = [AuthorizedUserDraft()]
+        }
         draftChats = (config["allowed_chat_ids"] as? [String] ?? []).joined(separator: ",")
         draftEventKey = String(describing: config["task_menu_event_key"] ?? "select_task")
         showConfiguration = true
@@ -139,16 +158,53 @@ private final class BridgeViewModel: ObservableObject {
 
     func saveConfiguration() {
         let profile = draftProfile.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sender = draftSender.trimmingCharacters(in: .whitespacesAndNewlines)
         let eventKey = draftEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !profile.isEmpty else {
             presentError(title: "配置未保存", message: "lark-cli Profile 不能为空。")
             return
         }
-        guard sender.hasPrefix("ou_") else {
-            presentError(title: "配置未保存", message: "允许的用户 open_id 必须以 ou_ 开头。")
+        let users = draftUsers.enumerated().map { index, user in
+            (
+                name: user.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                openID: user.openID.trimmingCharacters(in: .whitespacesAndNewlines),
+                projects: user.projects
+                    .split(whereSeparator: { $0 == "," || $0 == "，" })
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty },
+                index: index
+            )
+        }
+        guard !users.isEmpty else {
+            presentError(title: "配置未保存", message: "至少需要保留一个授权用户。")
             return
         }
+        if let invalidUser = users.first(where: { !$0.openID.hasPrefix("ou_") }) {
+            presentError(
+                title: "配置未保存",
+                message: "第 \(invalidUser.index + 1) 个用户的 open_id 必须以 ou_ 开头。"
+            )
+            return
+        }
+        let openIDs = users.map(\.openID)
+        guard Set(openIDs).count == openIDs.count else {
+            presentError(title: "配置未保存", message: "用户 open_id 不能重复。")
+            return
+        }
+        if let emptyProjects = users.first(where: { $0.projects.isEmpty }) {
+            presentError(
+                title: "配置未保存",
+                message: "第 \(emptyProjects.index + 1) 个用户至少需要一个允许项目；全部项目请填写 *。"
+            )
+            return
+        }
+        saveConfiguration(profile: profile, users: users, eventKey: eventKey)
+    }
+
+    private func saveConfiguration(
+        profile: String,
+        users: [(name: String, openID: String, projects: [String], index: Int)],
+        eventKey: String
+    ) {
         guard !eventKey.isEmpty else {
             presentError(title: "配置未保存", message: "机器人菜单 Event Key 不能为空。")
             return
@@ -156,7 +212,14 @@ private final class BridgeViewModel: ObservableObject {
 
         var config = bridge.readConfig()
         config["lark_profile"] = profile
-        config["allowed_sender_id"] = sender
+        config["allowed_users"] = users.map { user in
+            [
+                "name": user.name.isEmpty ? "用户 \(user.index + 1)" : user.name,
+                "open_id": user.openID,
+                "allowed_projects": user.projects,
+            ] as [String: Any]
+        }
+        config["allowed_sender_id"] = users[0].openID
         config["allowed_chat_ids"] = draftChats
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -214,8 +277,39 @@ private final class BridgeViewModel: ObservableObject {
         NSWorkspace.shared.open(bridge.supportDirectory)
     }
 
-    var hasConfiguredSender: Bool {
-        String(describing: bridge.readConfig()["allowed_sender_id"] ?? "").hasPrefix("ou_")
+    var hasConfiguredUsers: Bool {
+        !configuredUsers(from: bridge.readConfig()).isEmpty
+    }
+
+    func addUser() {
+        draftUsers.append(AuthorizedUserDraft())
+    }
+
+    func removeUser(id: UUID) {
+        guard draftUsers.count > 1 else { return }
+        draftUsers.removeAll { $0.id == id }
+    }
+
+    private func configuredUsers(from config: [String: Any]) -> [AuthorizedUserDraft] {
+        if let users = config["allowed_users"] as? [[String: Any]] {
+            return users.compactMap { user in
+                guard let openID = user["open_id"] as? String,
+                      openID.hasPrefix("ou_"),
+                      let projects = user["allowed_projects"] as? [String],
+                      !projects.isEmpty else {
+                    return nil
+                }
+                return AuthorizedUserDraft(
+                    name: user["name"] as? String ?? "",
+                    openID: openID,
+                    projects: projects.joined(separator: ", ")
+                )
+            }
+        }
+        let legacySender = String(describing: config["allowed_sender_id"] ?? "")
+        return legacySender.hasPrefix("ou_")
+            ? [AuthorizedUserDraft(name: "现有用户", openID: legacySender, projects: "*")]
+            : []
     }
 
     private func presentError(title: String, message: String) {
@@ -328,6 +422,8 @@ private struct MainView: View {
             VStack(spacing: 12) {
                 infoRow(icon: "person.crop.circle", title: "lark-cli Profile", value: model.profileName)
                 Divider()
+                infoRow(icon: "person.2", title: "授权用户", value: "\(model.authorizedUserCount) 位")
+                Divider()
                 infoRow(icon: "dot.radiowaves.left.and.right", title: "飞书事件", value: "3 个监听器")
                 Divider()
                 infoRow(icon: "sidebar.left", title: "Task 来源", value: "Codex Desktop 左侧栏")
@@ -400,11 +496,44 @@ private struct ConfigurationView: View {
             }
             Form {
                 TextField("lark-cli Profile", text: $model.draftProfile)
-                TextField("允许的用户 open_id", text: $model.draftSender)
                 TextField("允许的群 Chat ID", text: $model.draftChats)
                 TextField("机器人菜单 Event Key", text: $model.draftEventKey)
             }
-            Text("多个群 Chat ID 使用英文逗号分隔；留空时优先使用与 Bot 的单聊。")
+
+            HStack {
+                Text("授权用户")
+                    .font(.headline)
+                Spacer()
+                Button("添加用户", systemImage: "plus") { model.addUser() }
+            }
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach($model.draftUsers) { $user in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                TextField("备注名", text: $user.name)
+                                Button {
+                                    model.removeUser(id: user.id)
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.red)
+                                .disabled(model.draftUsers.count == 1)
+                                .help("删除用户")
+                            }
+                            TextField("用户 open_id（ou_...）", text: $user.openID)
+                            TextField("允许项目（英文逗号分隔；* 表示全部）", text: $user.projects)
+                        }
+                        .padding(12)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+            .frame(minHeight: 180, maxHeight: 320)
+
+            Text("项目名必须与 Codex Desktop 左侧栏完全一致。多个群 Chat ID 使用英文逗号分隔；留空时优先使用与 Bot 的单聊。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
@@ -417,7 +546,7 @@ private struct ConfigurationView: View {
             }
         }
         .padding(26)
-        .frame(width: 590)
+        .frame(width: 680, height: 560)
     }
 }
 
@@ -481,7 +610,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.refreshStatus()
             }
         }
-        if !model.hasConfiguredSender {
+        if !model.hasConfiguredUsers {
             DispatchQueue.main.async { [weak self] in
                 self?.model.prepareConfiguration()
             }
