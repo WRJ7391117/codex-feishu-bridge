@@ -36,8 +36,23 @@ private final class BridgeController {
     }
 
     var isInstalled: Bool {
-        ["bridge.py", "control.sh", "diagnose.sh", "config.json"].allSatisfy {
-            FileManager.default.fileExists(atPath: supportDirectory.appendingPathComponent($0).path)
+        guard FileManager.default.fileExists(atPath: configURL.path),
+              let bundledBridgeDirectory else {
+            return false
+        }
+        let runtimeFiles = [
+            "feishu_codex_bridge.py": "bridge.py",
+            "control.sh": "control.sh",
+            "diagnose.sh": "diagnose.sh",
+        ]
+        return runtimeFiles.allSatisfy { bundledName, installedName in
+            let bundled = bundledBridgeDirectory.appendingPathComponent(bundledName)
+            let installed = supportDirectory.appendingPathComponent(installedName)
+            guard let bundledData = try? Data(contentsOf: bundled),
+                  let installedData = try? Data(contentsOf: installed) else {
+                return false
+            }
+            return bundledData == installedData
         }
     }
 
