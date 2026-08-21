@@ -83,7 +83,58 @@ CODEX_CLI = find_executable(
         "~/Applications/Codex.app/Contents/Resources/codex",
     ),
 )
-ALLOWED_SENDER_ID = str(CONFIG.get("allowed_sender_id") or "").strip()
+
+
+def configured_allowed_users() -> dict[str, set[str]]:
+    raw_users = CONFIG.get("allowed_users")
+    users: dict[str, set[str]] = {}
+    if isinstance(raw_users, list):
+        for item in raw_users:
+            if not isinstance(item, dict):
+                continue
+            open_id = str(item.get("open_id") or "").strip()
+            raw_projects = item.get("allowed_projects")
+            if not open_id or not isinstance(raw_projects, list):
+                continue
+            projects = {
+                str(project).strip()
+                for project in raw_projects
+                if str(project).strip()
+            }
+            if projects:
+                users[open_id] = projects
+        return users
+
+    legacy_sender = str(CONFIG.get("allowed_sender_id") or "").strip()
+    return {legacy_sender: {"*"}} if legacy_sender else {}
+
+
+def allowed_users_config_valid() -> bool:
+    raw_users = CONFIG.get("allowed_users")
+    if raw_users is None:
+        return str(CONFIG.get("allowed_sender_id") or "").strip().startswith("ou_")
+    if not isinstance(raw_users, list) or not raw_users:
+        return False
+    seen: set[str] = set()
+    for item in raw_users:
+        if not isinstance(item, dict):
+            return False
+        open_id = str(item.get("open_id") or "").strip()
+        projects = item.get("allowed_projects")
+        if (
+            not open_id.startswith("ou_")
+            or open_id in seen
+            or not isinstance(projects, list)
+            or not projects
+            or any(not str(project).strip() for project in projects)
+        ):
+            return False
+        seen.add(open_id)
+    return True
+
+
+ALLOWED_USERS = configured_allowed_users()
+PRIMARY_ALLOWED_USER = next(iter(ALLOWED_USERS), "")
 ALLOWED_CHAT_IDS = {
     str(value).strip()
     for value in CONFIG.get("allowed_chat_ids", [])
@@ -100,6 +151,19 @@ EVENT_KEYS = (
 TASK_MENU_EVENT_KEY = str(CONFIG.get("task_menu_event_key") or "select_task")
 
 _consumers: list[subprocess.Popen[str]] = []
+
+
+def authorized_user(open_id: str) -> bool:
+    return open_id in ALLOWED_USERS
+
+
+def allowed_projects_for(open_id: str) -> set[str]:
+    return ALLOWED_USERS.get(open_id, set())
+
+
+def user_can_access_task(open_id: str, task: dict[str, str]) -> bool:
+    projects = allowed_projects_for(open_id)
+    return "*" in projects or task["project"] in projects
 
 
 def state_db_path() -> Path:
@@ -168,7 +232,7 @@ def desktop_project_names() -> dict[str, str]:
     return names
 
 
-def recent_tasks() -> list[dict[str, str]]:
+def recent_tasks(user_id: str) -> list[dict[str, str]]:
     state_db = state_db_path()
     connection = sqlite3.connect(
         f"file:{DESKTOP_CATALOG_DB}?mode=ro",
@@ -197,7 +261,7 @@ def recent_tasks() -> list[dict[str, str]]:
     finally:
         connection.close()
     project_names = desktop_project_names()
-    return [
+    tasks = [
         {
             "id": str(row["id"]),
             "title": str(row["task_name"]),
@@ -205,9 +269,10 @@ def recent_tasks() -> list[dict[str, str]]:
         }
         for row in rows
     ]
+    return [task for task in tasks if user_can_access_task(user_id, task)]
 
 
-def task_by_id(thread_id: str) -> dict[str, str] | None:
+def task_by_id(thread_id: str, user_id: str) -> dict[str, str] | None:
     state_db = state_db_path()
     connection = sqlite3.connect(
         f"file:{DESKTOP_CATALOG_DB}?mode=ro",
@@ -239,11 +304,12 @@ def task_by_id(thread_id: str) -> dict[str, str] | None:
     if row is None:
         return None
     project_names = desktop_project_names()
-    return {
+    task = {
         "id": str(row["id"]),
         "title": str(row["task_name"]),
         "project": project_names.get(str(row["id"])) or "无项目",
     }
+    return task if user_can_access_task(user_id, task) else None
 
 
 def rollout_path_for_task(thread_id: str) -> Path | None:
@@ -494,6 +560,16 @@ def build_task_card(
                 "color": "green",
             }
         ]
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "markdown",
+            "content": (
+                "**请选择一个 Codex task**\n选中后，直接发送文字即可继续该 task。"
+                if tasks
+                else "当前没有你有权访问的 Codex task。请联系这台 Mac 的管理员。"
+            ),
+        }
+    ]
     selector: dict[str, Any] = {
         "tag": "select_static",
         "name": "task_selector",
@@ -509,6 +585,8 @@ def build_task_card(
     }
     if selected:
         selector["initial_option"] = selected["id"]
+    if tasks:
+        elements.append(selector)
     return {
         "schema": "2.0",
         "config": {
@@ -522,13 +600,7 @@ def build_task_card(
             "direction": "vertical",
             "padding": "12px 12px 20px 12px",
             "vertical_spacing": "12px",
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": "**请选择一个 Codex task**\n选中后，直接发送文字即可继续该 task。",
-                },
-                selector,
-            ],
+            "elements": elements,
         },
     }
 
@@ -627,38 +699,38 @@ def is_authorized_chat(state: dict[str, Any], user_id: str, chat_id: str) -> boo
     ).get(user_id, [])
 
 
-def selected_task(state_key: str, state: dict[str, Any]) -> dict[str, str] | None:
+def selected_task(user_id: str, state: dict[str, Any]) -> dict[str, str] | None:
     selected = state.setdefault("selected", {})
-    thread_id = selected.get(state_key)
-    if not thread_id and state_key == ALLOWED_SENDER_ID:
+    thread_id = selected.get(user_id)
+    if not thread_id and user_id == PRIMARY_ALLOWED_USER:
         for chat_id in ALLOWED_CHAT_IDS:
             thread_id = selected.get(chat_id)
             if thread_id:
-                selected[state_key] = thread_id
+                selected[user_id] = thread_id
                 save_state(state)
                 break
-    task = task_by_id(thread_id) if thread_id else None
+    task = task_by_id(thread_id, user_id) if thread_id else None
     if thread_id and not task:
-        selected.pop(state_key, None)
+        selected.pop(user_id, None)
         save_state(state)
     return task
 
 
-def task_card_for_state(state_key: str, state: dict[str, Any]) -> dict[str, Any]:
-    selected = selected_task(state_key, state)
-    tasks = recent_tasks()
-    if selected and all(task["id"] != selected["id"] for task in tasks):
-        tasks.insert(0, selected)
-    state.setdefault("last_lists", {})[state_key] = [task["id"] for task in tasks]
+def task_card_for_state(user_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    selected = selected_task(user_id, state)
+    tasks = recent_tasks(user_id)
+    state.setdefault("last_lists", {})[user_id] = [task["id"] for task in tasks]
     save_state(state)
     return build_task_card(tasks, selected["id"] if selected else None)
 
 
-def show_tasks(state_key: str, state: dict[str, Any]) -> str:
-    tasks = recent_tasks()
-    state.setdefault("last_lists", {})[state_key] = [task["id"] for task in tasks]
+def show_tasks(user_id: str, state: dict[str, Any]) -> str:
+    tasks = recent_tasks(user_id)
+    state.setdefault("last_lists", {})[user_id] = [task["id"] for task in tasks]
     save_state(state)
-    selected = state.get("selected", {}).get(state_key)
+    selected = state.get("selected", {}).get(user_id)
+    if not tasks:
+        return "当前没有你有权访问的 Codex task。请联系这台 Mac 的管理员。"
     lines = ["Codex tasks："]
     for index, task in enumerate(tasks, 1):
         marker = " ← 当前" if task["id"] == selected else ""
@@ -667,15 +739,15 @@ def show_tasks(state_key: str, state: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def select_task(state_key: str, choice: str, state: dict[str, Any]) -> str:
-    tasks = recent_tasks()
-    last_ids = state.get("last_lists", {}).get(state_key, [])
+def select_task(user_id: str, choice: str, state: dict[str, Any]) -> str:
+    tasks = recent_tasks(user_id)
+    last_ids = state.get("last_lists", {}).get(user_id, [])
     selected: dict[str, str] | None = None
 
     if choice.isdigit():
         index = int(choice) - 1
         if 0 <= index < len(last_ids):
-            selected = task_by_id(last_ids[index])
+            selected = task_by_id(last_ids[index], user_id)
         elif 0 <= index < len(tasks):
             selected = tasks[index]
     else:
@@ -689,13 +761,13 @@ def select_task(state_key: str, choice: str, state: dict[str, Any]) -> str:
 
     if not selected:
         return "没有找到该 task。请发送“对话”刷新列表。"
-    state.setdefault("selected", {})[state_key] = selected["id"]
+    state.setdefault("selected", {})[user_id] = selected["id"]
     save_state(state)
     return f"已选择：{selected['title']}（{selected['project']}）"
 
 
-def current_task(state_key: str, state: dict[str, Any]) -> str:
-    task = selected_task(state_key, state)
+def current_task(user_id: str, state: dict[str, Any]) -> str:
+    task = selected_task(user_id, state)
     if not task:
         return "尚未选择 Codex task。请点击机器人菜单中的“选择 Task”。"
     return f"当前：{task['title']}（{task['project']}）"
@@ -974,8 +1046,9 @@ def mark_processed(state: dict[str, Any], key: str) -> bool:
 
 def handle_message_event(event: dict[str, Any]) -> None:
     chat_id = str(event.get("chat_id") or "")
+    user_id = str(event.get("sender_id") or "")
     if (
-        event.get("sender_id") != ALLOWED_SENDER_ID
+        not authorized_user(user_id)
         or event.get("sender_type") != "user"
         or event.get("message_type") not in {"text", "post"}
     ):
@@ -987,8 +1060,8 @@ def handle_message_event(event: dict[str, Any]) -> None:
 
     state = load_state()
     if event.get("chat_type") == "p2p":
-        authorize_chat(state, ALLOWED_SENDER_ID, chat_id)
-    elif not is_authorized_chat(state, ALLOWED_SENDER_ID, chat_id):
+        authorize_chat(state, user_id, chat_id)
+    elif not is_authorized_chat(state, user_id, chat_id):
         return
     if not mark_processed(state, message_id):
         return
@@ -997,17 +1070,17 @@ def handle_message_event(event: dict[str, Any]) -> None:
         reply(message_id, help_text(), "help")
         return
     if content in {"对话", "任务", "/list", "list"}:
-        if not reply_task_card(message_id, ALLOWED_SENDER_ID, state):
-            reply(message_id, show_tasks(ALLOWED_SENDER_ID, state), "list-fallback")
+        if not reply_task_card(message_id, user_id, state):
+            reply(message_id, show_tasks(user_id, state), "list-fallback")
         return
     if content in {"当前", "/current", "current"}:
-        reply(message_id, current_task(ALLOWED_SENDER_ID, state), "current")
+        reply(message_id, current_task(user_id, state), "current")
         return
     match = re.fullmatch(r"(?:/)?(?:选择|使用|use)\s+(.+)", content, re.IGNORECASE)
     if match:
         reply(
             message_id,
-            select_task(ALLOWED_SENDER_ID, match.group(1).strip(), state),
+            select_task(user_id, match.group(1).strip(), state),
             "select",
         )
         return
@@ -1015,7 +1088,7 @@ def handle_message_event(event: dict[str, Any]) -> None:
         reply(message_id, f"消息超过 {MAX_PROMPT_CHARS} 字，请缩短后重试。", "too-long")
         return
 
-    task = selected_task(ALLOWED_SENDER_ID, state)
+    task = selected_task(user_id, state)
     if not task:
         reply(
             message_id,
@@ -1046,9 +1119,10 @@ def handle_message_event(event: dict[str, Any]) -> None:
 
 def handle_card_event(event: dict[str, Any]) -> None:
     chat_id = str(event.get("chat_id") or "")
+    user_id = str(event.get("operator_id") or "")
     action_name = str(event.get("action_name") or "")
     if (
-        event.get("operator_id") != ALLOWED_SENDER_ID
+        not authorized_user(user_id)
         or event.get("action_tag") != "select_static"
         or (action_name and action_name != "task_selector")
     ):
@@ -1058,21 +1132,21 @@ def handle_card_event(event: dict[str, Any]) -> None:
     selected_id = str(event.get("option") or "")
     if not event_id or not selected_id:
         return
-    selected = task_by_id(selected_id)
+    selected = task_by_id(selected_id, user_id)
     if not selected:
         if message_id:
             reply(message_id, "该 task 已归档或删除，请重新选择。", f"stale-{event_id}")
         return
     state = load_state()
     card = updated_task_card(str(event.get("card_content") or ""), selected)
-    if chat_id and not is_authorized_chat(state, ALLOWED_SENDER_ID, chat_id):
+    if chat_id and not is_authorized_chat(state, user_id, chat_id):
         if card is None:
             log("card ignored reason=unrecognized-chat-and-card")
             return
-        authorize_chat(state, ALLOWED_SENDER_ID, chat_id)
+        authorize_chat(state, user_id, chat_id)
     if not mark_processed(state, f"card:{event_id}"):
         return
-    state.setdefault("selected", {})[ALLOWED_SENDER_ID] = selected["id"]
+    state.setdefault("selected", {})[user_id] = selected["id"]
     save_state(state)
 
     token = str(event.get("token") or "")
@@ -1087,9 +1161,10 @@ def handle_card_event(event: dict[str, Any]) -> None:
 
 
 def handle_menu_event(event: dict[str, Any]) -> None:
+    user_id = str(event.get("operator_id") or "")
     if (
         event.get("event_key") != TASK_MENU_EVENT_KEY
-        or event.get("operator_id") != ALLOWED_SENDER_ID
+        or not authorized_user(user_id)
     ):
         return
     event_id = str(event.get("event_id") or "")
@@ -1098,7 +1173,7 @@ def handle_menu_event(event: dict[str, Any]) -> None:
     state = load_state()
     if not mark_processed(state, f"menu:{event_id}"):
         return
-    send_task_card(ALLOWED_SENDER_ID, state, event_id)
+    send_task_card(user_id, state, event_id)
 
 
 def dispatch_event(event: dict[str, Any]) -> None:
@@ -1132,7 +1207,7 @@ def stop(_signum: int, _frame: Any) -> None:
 def diagnostic_report() -> dict[str, Any]:
     checks = {
         "config_file": CONFIG_PATH.is_file(),
-        "allowed_sender_id": ALLOWED_SENDER_ID.startswith("ou_"),
+        "allowed_users": allowed_users_config_valid(),
         "lark_cli": bool(LARK_CLI and Path(LARK_CLI).is_file()),
         "codex_cli": bool(CODEX_CLI and Path(CODEX_CLI).is_file()),
         "codex_state_db": state_db_path().is_file(),
@@ -1149,6 +1224,7 @@ def diagnostic_report() -> dict[str, Any]:
             "codex_cli": CODEX_CLI,
         },
         "lark_profile": LARK_PROFILE,
+        "authorized_user_count": len(ALLOWED_USERS),
     }
 
 
@@ -1161,9 +1237,12 @@ def self_test() -> int:
     assert idempotency_key("om_test", "result") == idempotency_key("om_test", "result")
     assert sent_chat_id('{"data":{"chat_id":"oc_test"}}') == "oc_test"
     assert sent_chat_id('{"data":{"message":{"chat_id":"oc_nested"}}}') == "oc_nested"
-    tasks = recent_tasks()
+    assert PRIMARY_ALLOWED_USER
+    assert authorized_user(PRIMARY_ALLOWED_USER)
+    assert not authorized_user("ou_not_authorized_self_test")
+    tasks = recent_tasks(PRIMARY_ALLOWED_USER)
     assert tasks and all(task["id"] and task["title"] for task in tasks)
-    assert task_by_id(tasks[0]["id"]) == tasks[0]
+    assert task_by_id(tasks[0]["id"], PRIMARY_ALLOWED_USER) == tasks[0]
     card = build_task_card(tasks, tasks[0]["id"])
     assert card["schema"] == "2.0"
     assert card["body"]["elements"][1]["initial_option"] == tasks[0]["id"]
@@ -1172,10 +1251,23 @@ def self_test() -> int:
         for option in card["body"]["elements"][1]["options"]
     ] == [option_text(task) for task in tasks]
     assert card["header"]["subtitle"]["content"] == f"当前：{option_text(tasks[0])}"
-    updated = updated_task_card(json.dumps(card), tasks[1])
+    updated = updated_task_card(json.dumps(card), tasks[-1])
     assert updated is not None
     assert updated["header"]["template"] == "green"
-    assert updated["body"]["elements"][1]["initial_option"] == tasks[1]["id"]
+    assert updated["body"]["elements"][1]["initial_option"] == tasks[-1]["id"]
+
+    test_user = "ou_project_filter_self_test"
+    project = tasks[0]["project"]
+    ALLOWED_USERS[test_user] = {project}
+    try:
+        filtered = recent_tasks(test_user)
+        assert filtered and all(task["project"] == project for task in filtered)
+        assert task_by_id(filtered[0]["id"], test_user) == filtered[0]
+        hidden = next((task for task in tasks if task["project"] != project), None)
+        if hidden:
+            assert task_by_id(hidden["id"], test_user) is None
+    finally:
+        ALLOWED_USERS.pop(test_user, None)
     print(f"self-test passed; {len(tasks)} recent tasks visible")
     return 0
 
@@ -1191,7 +1283,7 @@ def main() -> int:
         state = load_state()
         print(
             json.dumps(
-                task_card_for_state(ALLOWED_SENDER_ID, state),
+                task_card_for_state(PRIMARY_ALLOWED_USER, state),
                 ensure_ascii=False,
             )
         )

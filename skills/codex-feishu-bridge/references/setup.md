@@ -22,7 +22,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
   --as bot --max-events 1 --timeout 2m
 ```
 
-Use the resulting `sender_id` in the App's configuration window.
+Use the resulting `sender_id` in the App's configuration window. Add each approved user separately and give them either `*` or an exact comma-separated list of Codex Desktop sidebar project names. Existing single-user configs are read as that user with `*`; saving from v1.2.0 migrates them to `allowed_users` while retaining the legacy sender field for rollback.
 
 ## Install
 

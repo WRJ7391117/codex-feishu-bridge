@@ -45,6 +45,15 @@ if legacy.is_file():
         match = re.search(pattern, text, re.MULTILINE)
         if match:
             template[key] = match.group(1)
+    sender = str(template.get("allowed_sender_id") or "").strip()
+    if sender:
+        template["allowed_users"] = [
+            {
+                "open_id": sender,
+                "name": "现有用户",
+                "allowed_projects": ["*"],
+            }
+        ]
     chat = re.search(r'^ALLOWED_CHAT_ID\s*=\s*["\']([^"\']+)', text, re.MULTILINE)
     if chat:
         template["allowed_chat_ids"] = [chat.group(1)]

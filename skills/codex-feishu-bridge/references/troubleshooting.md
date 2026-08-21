@@ -3,7 +3,7 @@
 Check the layers in order:
 
 1. `lark-cli --version` and `lark-cli --profile <profile> doctor`
-2. App config: required sender starts with `ou_`
+2. App config: at least one authorized user; every open_id starts with `ou_`, is unique, and has at least one project rule
 3. Codex paths: task state DB and desktop catalog DB exist
 4. `launchctl print gui/$(id -u)/com.deepori.codex-feishu-bridge`
 5. `~/.codex/log/feishu-bridge-launchd.log` contains ready markers for all three event keys
@@ -14,7 +14,8 @@ Common interpretations:
 
 - Listener starts but card selection does nothing: callback configuration is usually not enabled in the Feishu console.
 - Bot menu click does nothing: the menu action must be “push event” and its Event Key must match `task_menu_event_key`.
-- Every message asks to select again: inspect `state.json` ownership and ensure selection is keyed by the same allowed sender open_id.
+- Every message asks to select again: inspect `state.json` ownership, confirm selection is keyed by that user's open_id, and verify their project rule still includes the selected Task.
+- A user sees no Tasks: their project names must exactly match the Codex Desktop sidebar; use `*` only when the Mac owner intends to grant all projects.
 - “Task is running”: Codex rejected a concurrent turn. The bridge intentionally does not queue or duplicate it.
 - Start succeeds but no events arrive: a loaded LaunchAgent only proves the process exists; inspect ready markers and console subscriptions.
 - Reply fails after Codex completed: inspect lark-cli error envelopes and their `error.type`, `error.subtype`, `missing_scopes`, and `console_url`.

@@ -7,6 +7,8 @@
 - 飞书机器人菜单一键打开 Task 选择卡片
 - 按 `项目 · Task 标题` 显示所有未归档本地 Task，不限 10 条
 - 选中后持续保持当前 Task，直到主动切换
+- 指定飞书用户白名单，每位用户独立保持自己的当前 Task
+- 按 Codex 项目限制每位用户可查看和提交的 Task
 - 将飞书文字提交给同一个 Codex Desktop Task
 - 先回复运行状态，完成后再回复最终结果
 - 标准 macOS 主窗口集中显示状态、配置、诊断和日志入口
@@ -23,6 +25,7 @@
             ↓ NDJSON 事件
      本地 bridge.py
        ├─ 读取 Codex Desktop 本地 Task 目录
+       ├─ 检查“飞书用户 → 允许项目”权限
        ├─ 保存“飞书用户 → 当前 Task”状态
        └─ 通过 Codex Desktop IPC 继续同一个 Task
                          ↓
@@ -81,7 +84,7 @@ App Secret 由 lark-cli / macOS Keychain 管理，不写入本仓库或桥接的
 4. 在“回调配置”中启用卡片回调 `card.action.trigger`。只启动监听但未配置这里时，卡片选择不会产生事件。
 5. 在机器人菜单中添加“选择 Task”：动作选择“推送事件”，Event Key 填 `select_task`。
 
-可用下面的临时监听获得自己的 `open_id`。启动后给 Bot 发一条消息，输出中的 `sender_id` 即 `ou_...`：
+可用下面的临时监听获得用户的 `open_id`。启动后让该用户给 Bot 发一条消息，输出中的 `sender_id` 即 `ou_...`：
 
 ```bash
 lark-cli --profile codex-notify event consume im.message.receive_v1 \
@@ -93,7 +96,10 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 打开 `Codex 飞书桥接.app`，主控制窗口会自动出现：
 
 1. 点击“配置桥接”；
-2. 填入 lark-cli Profile 和允许的用户 `open_id`；
+2. 在“授权用户”中填写备注名、`open_id` 和允许项目；
+   - `*` 表示允许访问全部项目；
+   - 多个项目用逗号分隔，名称必须与 Codex Desktop 左侧栏完全一致；
+   - 点击“添加用户”可继续添加白名单用户；
 3. 群 Chat ID 可留空，先使用与 Bot 的单聊；
 4. 点击“开启桥接”；
 5. 点击飞书 Bot 菜单中的“选择 Task”。
@@ -123,7 +129,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 ~/.codex/log/feishu-bridge.log
 ```
 
-`config.json` 保存 Profile 名和身份白名单，不保存 App Secret。`state.json` 保存当前 Task、去重记录和授权过的单聊/群聊状态。
+`config.json` 保存 Profile 名、用户白名单和项目权限，不保存 App Secret。`state.json` 按用户分别保存当前 Task、最近列表和授权过的单聊/群聊状态。
 
 ## 从源码构建
 
@@ -141,7 +147,9 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 ## 安全边界
 
-- 默认只接受配置中的单个飞书 `open_id`
+- 默认只接受配置白名单中的飞书 `open_id`，不会自动开放给同租户其他用户
+- 每位用户只能查看和提交其 `allowed_projects` 中的项目；列表展示和提交前都会校验
+- 每位用户的当前 Task 独立保存；权限被移除后，原 Task 选择自动失效
 - 群聊必须显式列入允许列表，或先由同一用户通过受信任卡片建立状态
 - 消息按飞书 `message_id` 去重，回复使用幂等键
 - 提交结果不确定时不会自动重复执行，避免同一任务运行两次
