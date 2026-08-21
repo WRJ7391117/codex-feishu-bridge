@@ -9,7 +9,8 @@
 - 选中后持续保持当前 Task，直到主动切换
 - 将飞书文字提交给同一个 Codex Desktop Task
 - 先回复运行状态，完成后再回复最终结果
-- 菜单栏 App 随时开启、关闭、配置和诊断
+- 标准 macOS 主窗口集中显示状态、配置、诊断和日志入口
+- 菜单栏保留随时开启、关闭和快速打开控制中心的入口
 - 用户级 LaunchAgent 常驻，异常退出后自动重启
 - 支持 Apple Silicon 和 Intel Mac
 
@@ -89,13 +90,15 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 ### 5. 配置并开启桥接
 
-打开 `Codex 飞书桥接.app`，在 macOS 菜单栏点击双向箭头图标：
+打开 `Codex 飞书桥接.app`，主控制窗口会自动出现：
 
-1. 点击“配置…”；
+1. 点击“配置桥接”；
 2. 填入 lark-cli Profile 和允许的用户 `open_id`；
 3. 群 Chat ID 可留空，先使用与 Bot 的单聊；
 4. 点击“开启桥接”；
 5. 点击飞书 Bot 菜单中的“选择 Task”。
+
+关闭主窗口不会关闭后台桥接。再次点击 Dock 中的 App，或点击菜单栏双向箭头 →“打开控制中心”，即可重新打开窗口。
 
 ## 飞书里的日常操作
 
