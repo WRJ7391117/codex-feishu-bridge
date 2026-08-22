@@ -136,7 +136,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 ~/.codex/log/feishu-bridge.log
 ```
 
-`config.json` 保存 Profile 名、用户白名单和项目权限，不保存 App Secret。`state.json` 按用户分别保存当前 Task、最近列表和授权过的单聊/群聊状态。
+`config.json` 保存 Profile 名、用户白名单和项目权限，不保存 App Secret。`state.json` 按用户分别保存当前 Task、最近列表、授权过的单聊/群聊状态，以及尚未送达飞书的最终文字结果。待补发结果跨桥接重启保留，发送成功后自动清除。
 
 ## 从源码构建
 
@@ -159,6 +159,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 - 每位用户的当前 Task 独立保存；权限被移除后，原 Task 选择自动失效
 - 群聊必须显式列入允许列表，或先由同一用户通过受信任卡片建立状态
 - 消息按飞书 `message_id` 去重，回复使用幂等键
+- 最终文字回复失败时会记录脱敏原因并进入持久化补发队列；网络恢复后使用原幂等键自动补发
 - 提交结果不确定时不会自动重复执行，避免同一任务运行两次
 - 输入图片只从当前飞书消息的资源键下载，限制在本轮临时目录，并在回复完成后删除
 - 默认每轮最多输入 4 张图片、单张 20 MB，只接受实际内容为 PNG、JPEG、GIF 或 WebP 的文件

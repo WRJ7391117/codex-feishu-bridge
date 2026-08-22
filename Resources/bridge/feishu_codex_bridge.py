@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -177,6 +178,11 @@ EVENT_KEYS = (
     "application.bot.menu_v6",
 )
 TASK_MENU_EVENT_KEY = str(CONFIG.get("task_menu_event_key") or "select_task")
+REPLY_RETRY_DELAYS = (1.0, 2.0)
+PENDING_REPLY_DELAYS = (15, 30, 60, 120, 300, 600)
+MAX_PENDING_REPLIES = 50
+
+_last_reply_failure_reason = ""
 
 _consumers: list[subprocess.Popen[str]] = []
 
@@ -212,20 +218,24 @@ def state_db_path() -> Path:
 def log(message: str) -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with LOG_PATH.open("a", encoding="utf-8") as handle:
-        handle.write(message.rstrip() + "\n")
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        handle.write(f"{timestamp} {message.rstrip()}\n")
 
 
 def load_state() -> dict[str, Any]:
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {
-            "selected": {},
-            "last_lists": {},
-            "authorized_chats": {},
-            "processed": [],
-            "bridge_turns": [],
-        }
+        state = None
+    if isinstance(state, dict):
+        return state
+    return {
+        "selected": {},
+        "last_lists": {},
+        "authorized_chats": {},
+        "processed": [],
+        "bridge_turns": [],
+    }
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -459,7 +469,89 @@ def lark_succeeded(result: subprocess.CompletedProcess[str]) -> bool:
     return not isinstance(payload, dict) or payload.get("ok") is not False
 
 
+def lark_reply_failure_reason(
+    result: subprocess.CompletedProcess[str] | None = None,
+    error: BaseException | None = None,
+) -> str:
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "飞书 API 请求超时"
+    if isinstance(error, OSError):
+        return "本机无法调用 lark-cli"
+
+    raw = ""
+    envelope: dict[str, Any] = {}
+    if result is not None:
+        raw = "\n".join((result.stderr or "", result.stdout or "")).strip()
+        for candidate in (result.stderr, result.stdout):
+            try:
+                payload = json.loads(candidate)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                envelope = payload
+                break
+
+    details = envelope.get("error") if isinstance(envelope, dict) else None
+    if isinstance(details, dict):
+        if details.get("missing_scopes") or details.get("subtype") == "missing_scope":
+            return "机器人缺少飞书 API 权限"
+        error_type = str(details.get("type") or "").strip()
+        subtype = str(details.get("subtype") or "").strip()
+        if error_type == "authorization":
+            return "飞书 API 授权失败"
+        if error_type or subtype:
+            category = "/".join(value for value in (error_type, subtype) if value)
+            return f"飞书 API {category} 错误"
+
+    normalized = raw.lower()
+    if any(
+        marker in normalized
+        for marker in (
+            " eof",
+            "eof\n",
+            "unexpected_eof",
+            "connection reset",
+            "connection refused",
+            "network is unreachable",
+            "tls handshake timeout",
+            "temporary failure in name resolution",
+        )
+    ):
+        return "飞书 API 网络连接失败"
+    if "timeout" in normalized or "timed out" in normalized:
+        return "飞书 API 请求超时"
+    if result is not None:
+        return f"飞书 API 调用失败（退出码 {result.returncode}）"
+    return "飞书 API 调用失败"
+
+
+def lark_reply_failure_metadata(result: subprocess.CompletedProcess[str]) -> str:
+    details: dict[str, Any] = {}
+    for candidate in (result.stderr, result.stdout):
+        try:
+            payload = json.loads(candidate)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            details = error
+            break
+
+    fields = [f"exit_code={result.returncode}"]
+    for source, label in (("type", "api_type"), ("subtype", "api_subtype")):
+        value = re.sub(r"[^A-Za-z0-9_.-]", "_", str(details.get(source) or ""))[:80]
+        if value:
+            fields.append(f"{label}={value}")
+    api_code = details.get("code")
+    if isinstance(api_code, int):
+        fields.append(f"api_code={api_code}")
+    return " ".join(fields)
+
+
 def reply(message_id: str, text: str, kind: str) -> bool:
+    global _last_reply_failure_reason
+
+    _last_reply_failure_reason = ""
     content = text.strip() or "Codex 没有返回文字结果。"
     if len(content) > MAX_REPLY_CHARS:
         content = content[:MAX_REPLY_CHARS].rstrip() + "…"
@@ -479,7 +571,8 @@ def reply(message_id: str, text: str, kind: str) -> bool:
         "--idempotency-key",
         reply_key,
     ]
-    for attempt in range(1, 3):
+    attempts = len(REPLY_RETRY_DELAYS) + 1
+    for attempt in range(1, attempts + 1):
         try:
             result = subprocess.run(
                 command,
@@ -489,17 +582,130 @@ def reply(message_id: str, text: str, kind: str) -> bool:
                 env=lark_environment(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
+            _last_reply_failure_reason = lark_reply_failure_reason(error=exc)
             log(
                 f"reply failed kind={kind} attempt={attempt} "
-                f"error={type(exc).__name__}"
+                f"reason={_last_reply_failure_reason}"
             )
-            continue
-        if lark_succeeded(result):
-            return True
-        log(
-            f"reply failed kind={kind} attempt={attempt} "
-            f"code={result.returncode}"
+        else:
+            if lark_succeeded(result):
+                _last_reply_failure_reason = ""
+                return True
+            _last_reply_failure_reason = lark_reply_failure_reason(result=result)
+            log(
+                f"reply failed kind={kind} attempt={attempt} "
+                f"{lark_reply_failure_metadata(result)} "
+                f"reason={_last_reply_failure_reason}"
+            )
+        if attempt < attempts:
+            time.sleep(REPLY_RETRY_DELAYS[attempt - 1])
+    return False
+
+
+def pending_reply_delay(attempts: int) -> int:
+    index = min(max(attempts, 0), len(PENDING_REPLY_DELAYS) - 1)
+    return PENDING_REPLY_DELAYS[index]
+
+
+def queue_pending_reply(
+    message_id: str,
+    text: str,
+    kind: str,
+    reason: str,
+    now: float | None = None,
+) -> None:
+    state = load_state()
+    pending = state.setdefault("pending_replies", [])
+    if not isinstance(pending, list):
+        pending = []
+    timestamp = time.time() if now is None else now
+    entry = {
+        "message_id": message_id,
+        "text": text,
+        "kind": kind,
+        "reason": reason or "飞书 API 调用失败",
+        "attempts": 0,
+        "created_at": timestamp,
+        "next_attempt_at": timestamp + pending_reply_delay(0),
+    }
+    pending = [
+        item
+        for item in pending
+        if not (
+            isinstance(item, dict)
+            and item.get("message_id") == message_id
+            and item.get("kind") == kind
         )
+    ]
+    pending.append(entry)
+    state["pending_replies"] = pending[-MAX_PENDING_REPLIES:]
+    save_state(state)
+    log(f"reply queued kind={kind} reason={entry['reason']}")
+
+
+def reply_or_queue(message_id: str, text: str, kind: str) -> bool:
+    delivered = reply(message_id, text, kind)
+    if not delivered and kind == "final":
+        queue_pending_reply(
+            message_id,
+            text,
+            kind,
+            _last_reply_failure_reason or "飞书 API 调用失败",
+        )
+    return delivered
+
+
+def retry_pending_replies(now: float | None = None) -> bool:
+    global _last_reply_failure_reason
+
+    timestamp = time.time() if now is None else now
+    state = load_state()
+    pending = state.get("pending_replies")
+    if not isinstance(pending, list):
+        return False
+    for index, item in enumerate(pending):
+        if not isinstance(item, dict):
+            continue
+        try:
+            next_attempt_at = float(item.get("next_attempt_at") or 0)
+        except (TypeError, ValueError):
+            next_attempt_at = 0
+        if next_attempt_at > timestamp:
+            continue
+        message_id = str(item.get("message_id") or "")
+        text = str(item.get("text") or "")
+        kind = str(item.get("kind") or "final")
+        if not message_id or not text or kind != "final":
+            pending.pop(index)
+            state["pending_replies"] = pending
+            save_state(state)
+            return True
+        if reply(message_id, text, kind):
+            reason = str(item.get("reason") or "飞书 API 调用失败")
+            pending.pop(index)
+            state["pending_replies"] = pending
+            save_state(state)
+            log(f"pending reply delivered kind={kind} previous_reason={reason}")
+            reply(
+                message_id,
+                f"上一条结果曾因{reason}未能及时送达，连接恢复后已自动补发。",
+                f"{kind}-recovered",
+            )
+            return True
+        try:
+            attempts = int(item.get("attempts") or 0) + 1
+        except (TypeError, ValueError):
+            attempts = 1
+        item["attempts"] = attempts
+        item["reason"] = _last_reply_failure_reason or item.get("reason")
+        item["next_attempt_at"] = timestamp + pending_reply_delay(attempts)
+        state["pending_replies"] = pending
+        save_state(state)
+        log(
+            f"pending reply retry failed kind={kind} attempts={attempts} "
+            f"reason={item['reason']}"
+        )
+        return True
     return False
 
 
@@ -1589,7 +1795,7 @@ def handle_message_event(event: dict[str, Any]) -> None:
             )
             if image is None:
                 prefix = f"【Codex · {option_text(task)}】\n状态：未完成\n\n"
-                reply(message_id, prefix + error, "final")
+                reply_or_queue(message_id, prefix + error, "final")
                 return
             input_images.append(str(image))
 
@@ -1608,7 +1814,7 @@ def handle_message_event(event: dict[str, Any]) -> None:
         status = "已完成" if success else "未完成"
         prefix = f"【Codex · {option_text(task)}】\n状态：{status}\n\n"
         clean_result, images = prepare_result_images(result, rollout_images)
-        reply(message_id, prefix + clean_result, "final")
+        reply_or_queue(message_id, prefix + clean_result, "final")
         failed_images = sum(
             not reply_image(message_id, image, index)
             for index, image in enumerate(images, start=1)
@@ -1832,7 +2038,15 @@ def main() -> int:
             daemon=True,
         ).start()
 
+    next_pending_retry = 0.0
     while any(consumer.poll() is None for consumer in _consumers):
+        now = time.time()
+        if now >= next_pending_retry:
+            try:
+                retry_pending_replies(now)
+            except Exception as exc:
+                log(f"pending reply loop failed: {type(exc).__name__}: {exc}")
+            next_pending_retry = now + 1
         try:
             event = events.get(timeout=0.5)
         except queue.Empty:
