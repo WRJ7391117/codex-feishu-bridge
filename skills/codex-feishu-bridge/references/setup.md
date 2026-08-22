@@ -13,7 +13,7 @@ Run `lark-cli update` when the user has authorized an update. Configure a dedica
 
 Enable long-connection delivery and subscribe to `im.message.receive_v1` and `application.bot.menu_v6`. Enable callback configuration for `card.action.trigger`. Add a custom Bot menu item named “选择 Task”, choose the push-event action, and set its Event Key to `select_task`.
 
-The bot needs message receive/read/send permissions plus `im:resource` to upload result images. Follow `missing_scopes` from lark-cli rather than guessing broader permissions.
+The bot needs message receive/read/send permissions. Incoming image support also requires permission to read the matching message resource; `im:resource` is needed to upload result images. Follow `missing_scopes` from lark-cli rather than guessing broader permissions.
 
 To discover the permitted user's open_id, consume one bounded message event, then ask the user to send the Bot a test message:
 

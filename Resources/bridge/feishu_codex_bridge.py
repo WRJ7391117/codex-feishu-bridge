@@ -156,9 +156,20 @@ ALLOWED_CHAT_IDS = {
 MAX_PROMPT_CHARS = int(CONFIG.get("max_prompt_chars", 12000))
 MAX_REPLY_CHARS = int(CONFIG.get("max_reply_chars", 3000))
 MAX_RESULT_IMAGES = max(0, int(CONFIG.get("max_result_images", 8)))
+MAX_INPUT_IMAGES = max(1, int(CONFIG.get("max_input_images", 4)))
+MAX_INPUT_IMAGE_BYTES = max(
+    1,
+    int(CONFIG.get("max_input_image_bytes", 20 * 1024 * 1024)),
+)
 
 IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
 MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^)\n]+)\s*\)")
+IMAGE_KEY_PATTERN = r"img_[A-Za-z0-9_-]{3,512}"
+INPUT_IMAGE_MARKER_PATTERN = re.compile(
+    rf"!\[[^\]\n]*\]\(\s*({IMAGE_KEY_PATTERN})\s*\)"
+    rf"|\[Image:\s*({IMAGE_KEY_PATTERN})\]",
+    re.IGNORECASE,
+)
 
 EVENT_KEYS = (
     "im.message.receive_v1",
@@ -492,6 +503,184 @@ def reply(message_id: str, text: str, kind: str) -> bool:
     return False
 
 
+def input_image_keys(content: str) -> list[str]:
+    keys: list[str] = []
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        key = str(payload.get("image_key") or "")
+        if re.fullmatch(IMAGE_KEY_PATTERN, key):
+            keys.append(key)
+    for match in INPUT_IMAGE_MARKER_PATTERN.finditer(content):
+        key = next((group for group in match.groups() if group), "")
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def input_prompt(content: str, image_keys: list[str]) -> str:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        payload = None
+    text = "" if isinstance(payload, dict) and payload.get("image_key") else content
+    text = INPUT_IMAGE_MARKER_PATTERN.sub("", text)
+    normalized = normalized_content(text)
+    if normalized:
+        return normalized
+    return "用户从飞书发送了以下图片。" if image_keys else ""
+
+
+def detected_image_suffix(path: Path) -> str:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(12)
+    except OSError:
+        return ""
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return ".webp"
+    return ""
+
+
+def downloaded_image_path(
+    stdout: str,
+    directory: Path,
+    index: int,
+) -> tuple[Path | None, str]:
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None, "飞书没有返回有效的图片下载结果。"
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return None, "飞书没有确认图片下载成功。"
+    data = payload.get("data")
+    saved_path = str(data.get("saved_path") or "") if isinstance(data, dict) else ""
+    if not saved_path:
+        return None, "飞书没有返回图片保存路径。"
+    path = Path(saved_path)
+    if not path.is_absolute():
+        path = directory / path
+    try:
+        path = path.resolve()
+        path.relative_to(directory.resolve())
+        size = path.stat().st_size
+    except (OSError, ValueError):
+        return None, "图片下载位置不安全或文件不存在。"
+    if size == 0:
+        return None, "收到的图片文件为空。"
+    if size > MAX_INPUT_IMAGE_BYTES:
+        return None, f"图片超过 {MAX_INPUT_IMAGE_BYTES // (1024 * 1024)} MB 限制。"
+    suffix = detected_image_suffix(path)
+    if suffix not in IMAGE_SUFFIXES:
+        return None, "当前仅支持 PNG、JPEG、GIF 和 WebP 图片。"
+    normalized = directory / f"input-{index}{suffix}"
+    if path != normalized:
+        try:
+            path.replace(normalized)
+        except OSError:
+            return None, "无法准备下载后的图片。"
+    return normalized.resolve(), ""
+
+
+def image_download_failure(stderr: str) -> tuple[bool, str]:
+    try:
+        payload = json.loads(stderr)
+    except json.JSONDecodeError:
+        return True, "无法从飞书读取这张图片，请重新发送。"
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return False, "无法从飞书读取这张图片，请重新发送。"
+    if error.get("missing_scopes"):
+        return (
+            False,
+            "机器人缺少读取图片资源的权限，请联系这台 Mac 的管理员处理。",
+        )
+    return (
+        error.get("retryable") is True,
+        "这张飞书图片当前无法下载，请重新发送。",
+    )
+
+
+def download_input_image(
+    message_id: str,
+    image_key: str,
+    directory: Path,
+    index: int,
+) -> tuple[Path | None, str]:
+    if not re.fullmatch(IMAGE_KEY_PATTERN, image_key):
+        return None, "图片资源标识无效。"
+    command = [
+        LARK_CLI,
+        "--profile",
+        LARK_PROFILE,
+        "im",
+        "+messages-resources-download",
+        "--message-id",
+        message_id,
+        "--file-key",
+        image_key,
+        "--type",
+        "image",
+        "--output",
+        f"./download-{index}",
+        "--as",
+        "bot",
+        "--json",
+    ]
+    for attempt in range(1, 3):
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=lark_environment(),
+                cwd=directory,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log(
+                f"image download failed index={index} attempt={attempt} "
+                f"error={type(exc).__name__}"
+            )
+            continue
+        if result.returncode == 0:
+            path, error = downloaded_image_path(result.stdout, directory, index)
+            if path is not None:
+                return path, ""
+            log(f"image download invalid index={index} attempt={attempt}")
+            return None, error
+        log(
+            f"image download failed index={index} attempt={attempt} "
+            f"code={result.returncode}"
+        )
+        retryable, message = image_download_failure(result.stderr)
+        if not retryable:
+            return None, message
+    return (
+        None,
+        "无法从飞书读取这张图片。请确认机器人具有消息读取权限后重新发送。",
+    )
+
+
+def codex_turn_input(prompt: str, input_images: list[str]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = [
+        {"type": "text", "text": prompt, "text_elements": []}
+    ]
+    items.extend(
+        {"type": "localImage", "path": str(Path(image).resolve())}
+        for image in input_images
+    )
+    return items
+
+
 def normalized_image_reference(reference: str) -> str | None:
     value = reference.strip()
     if value.startswith("<") and value.endswith(">"):
@@ -729,7 +918,7 @@ def help_text() -> str:
         "选择 N —— 文字选择 task（备用）\n"
         "当前 —— 查看当前 task\n"
         "帮助 —— 显示本说明\n\n"
-        "选择后，其他文本会原样发送到该 Codex task。当前版本只接收文本。"
+        f"选择后，文字和图片会发送到该 Codex task。单次最多 {MAX_INPUT_IMAGES} 张图片。"
     )
 
 
@@ -1093,6 +1282,7 @@ def run_codex_via_desktop(
     thread_id: str,
     prompt: str,
     on_started: Callable[[], None] | None = None,
+    input_images: list[str] | None = None,
 ) -> tuple[str, str, list[str]]:
     rollout_path = rollout_path_for_task(thread_id)
     if not DESKTOP_IPC_SOCKET.exists() or not rollout_path or not rollout_path.exists():
@@ -1138,13 +1328,7 @@ def run_codex_via_desktop(
                         "turnStart": {
                             "request": {
                                 "threadId": thread_id,
-                                "input": [
-                                    {
-                                        "type": "text",
-                                        "text": prompt,
-                                        "text_elements": [],
-                                    }
-                                ],
+                                "input": codex_turn_input(prompt, input_images or []),
                             },
                             "context": {"inheritThreadSettings": True},
                         },
@@ -1220,6 +1404,7 @@ def run_codex(
     thread_id: str,
     prompt: str,
     on_started: Callable[[str], None] | None = None,
+    input_images: list[str] | None = None,
 ) -> tuple[bool, str, list[str]]:
     started_notified = False
 
@@ -1237,6 +1422,7 @@ def run_codex(
         thread_id,
         prompt,
         lambda: notify_started("正在运行"),
+        input_images or [],
     )
     if desktop_status == "completed":
         return True, desktop_result, desktop_images
@@ -1264,9 +1450,10 @@ def run_codex(
             "--skip-git-repo-check",
             "--output-last-message",
             str(output_path),
-            thread_id,
-            "-",
         ]
+        for image in input_images or []:
+            command.extend(["--image", str(Path(image).resolve())])
+        command.extend([thread_id, "-"])
         notify_started("正在通过本机 Codex 启动")
         try:
             result = subprocess.run(
@@ -1316,15 +1503,18 @@ def mark_processed(state: dict[str, Any], key: str) -> bool:
 def handle_message_event(event: dict[str, Any]) -> None:
     chat_id = str(event.get("chat_id") or "")
     user_id = str(event.get("sender_id") or "")
+    message_type = str(event.get("message_type") or "")
     if (
         not authorized_user(user_id)
         or event.get("sender_type") != "user"
-        or event.get("message_type") not in {"text", "post"}
+        or message_type not in {"text", "post", "image"}
     ):
         return
     message_id = str(event.get("message_id") or "")
-    content = normalized_content(str(event.get("content") or ""))
-    if not message_id or not content:
+    raw_content = str(event.get("content") or "")
+    image_keys = input_image_keys(raw_content) if message_type in {"post", "image"} else []
+    content = input_prompt(raw_content, image_keys)
+    if not message_id or (not content and not image_keys):
         return
 
     state = load_state()
@@ -1335,18 +1525,18 @@ def handle_message_event(event: dict[str, Any]) -> None:
     if not mark_processed(state, message_id):
         return
 
-    if content in {"帮助", "/help", "help"}:
+    if not image_keys and content in {"帮助", "/help", "help"}:
         reply(message_id, help_text(), "help")
         return
-    if content in {"对话", "任务", "/list", "list"}:
+    if not image_keys and content in {"对话", "任务", "/list", "list"}:
         if not reply_task_card(message_id, user_id, state):
             reply(message_id, show_tasks(user_id, state), "list-fallback")
         return
-    if content in {"当前", "/current", "current"}:
+    if not image_keys and content in {"当前", "/current", "current"}:
         reply(message_id, current_task(user_id, state), "current")
         return
     match = re.fullmatch(r"(?:/)?(?:选择|使用|use)\s+(.+)", content, re.IGNORECASE)
-    if match:
+    if not image_keys and match:
         reply(
             message_id,
             select_task(user_id, match.group(1).strip(), state),
@@ -1355,6 +1545,13 @@ def handle_message_event(event: dict[str, Any]) -> None:
         return
     if len(content) > MAX_PROMPT_CHARS:
         reply(message_id, f"消息超过 {MAX_PROMPT_CHARS} 字，请缩短后重试。", "too-long")
+        return
+    if len(image_keys) > MAX_INPUT_IMAGES:
+        reply(
+            message_id,
+            f"一次最多发送 {MAX_INPUT_IMAGES} 张图片，请分开发送。",
+            "too-many-images",
+        )
         return
 
     task = selected_task(user_id, state)
@@ -1375,31 +1572,53 @@ def handle_message_event(event: dict[str, Any]) -> None:
             "running",
         )
 
-    try:
-        success, result, rollout_images = run_codex(
-            task["id"],
-            content,
-            reply_task_status,
-        )
-    except Exception as exc:
-        log(f"Codex bridge run failed: {type(exc).__name__}: {exc}")
-        success = False
-        result = "桥接运行异常，详细原因已记录到 Mac 的桥接日志。"
-        rollout_images = []
-    status = "已完成" if success else "未完成"
-    prefix = f"【Codex · {option_text(task)}】\n状态：{status}\n\n"
-    clean_result, images = prepare_result_images(result, rollout_images)
-    reply(message_id, prefix + clean_result, "final")
-    failed_images = sum(
-        not reply_image(message_id, image, index)
-        for index, image in enumerate(images, start=1)
-    )
-    if failed_images:
+    if image_keys:
         reply(
             message_id,
-            f"有 {failed_images} 张图片未能发送，请在 Codex Desktop 中查看。",
-            "image-error",
+            f"【Codex · {option_text(task)}】\n状态：正在读取图片",
+            "image-downloading",
         )
+    with tempfile.TemporaryDirectory(prefix="codex-feishu-input-") as directory:
+        input_images: list[str] = []
+        for index, image_key in enumerate(image_keys, start=1):
+            image, error = download_input_image(
+                message_id,
+                image_key,
+                Path(directory),
+                index,
+            )
+            if image is None:
+                prefix = f"【Codex · {option_text(task)}】\n状态：未完成\n\n"
+                reply(message_id, prefix + error, "final")
+                return
+            input_images.append(str(image))
+
+        try:
+            success, result, rollout_images = run_codex(
+                task["id"],
+                content,
+                reply_task_status,
+                input_images,
+            )
+        except Exception as exc:
+            log(f"Codex bridge run failed: {type(exc).__name__}: {exc}")
+            success = False
+            result = "桥接运行异常，详细原因已记录到 Mac 的桥接日志。"
+            rollout_images = []
+        status = "已完成" if success else "未完成"
+        prefix = f"【Codex · {option_text(task)}】\n状态：{status}\n\n"
+        clean_result, images = prepare_result_images(result, rollout_images)
+        reply(message_id, prefix + clean_result, "final")
+        failed_images = sum(
+            not reply_image(message_id, image, index)
+            for index, image in enumerate(images, start=1)
+        )
+        if failed_images:
+            reply(
+                message_id,
+                f"有 {failed_images} 张图片未能发送，请在 Codex Desktop 中查看。",
+                "image-error",
+            )
 
 
 def handle_card_event(event: dict[str, Any]) -> None:
