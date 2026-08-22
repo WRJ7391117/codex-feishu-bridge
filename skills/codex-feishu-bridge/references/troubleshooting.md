@@ -22,4 +22,5 @@ Common interpretations:
 - `failed to read thread`, `thread-store internal error`, or `does not start with session metadata`: verify that the installed App is current and that it selects the Desktop-bundled CLI before PATH. The Task rollout may still be valid; do not rebuild the Task solely from this error.
 - Start succeeds but no events arrive: a loaded LaunchAgent only proves the process exists; inspect ready markers and console subscriptions.
 - Reply fails after Codex completed: inspect lark-cli error envelopes and their `error.type`, `error.subtype`, `missing_scopes`, and `console_url`.
-- Text arrives but images do not: confirm the Bot has `im:resource`, then inspect the bridge log for `image reply failed`. Markdown alone cannot upload a Mac-local path; the bridge must send a separate image reply.
+- Codex result text arrives but result images do not: confirm the Bot has `im:resource`, then inspect the bridge log for `image reply failed`. Markdown alone cannot upload a Mac-local path; the bridge must send a separate image reply.
+- An incoming Feishu image reports that it cannot be read: confirm the Bot can read that message resource, then inspect the bridge log for `image download failed`. The resource key must belong to the same `message_id`; the bridge intentionally refuses guessed, cross-message, oversized, unsupported, or path-escaping resources.
