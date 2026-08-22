@@ -51,20 +51,31 @@ def load_config() -> dict[str, Any]:
 CONFIG = load_config()
 
 
-def find_executable(config_key: str, names: tuple[str, ...], paths: tuple[str, ...]) -> str:
+def find_executable(
+    config_key: str,
+    names: tuple[str, ...],
+    paths: tuple[str, ...],
+    prefer_paths: bool = False,
+) -> str:
     configured = str(CONFIG.get(config_key) or "").strip()
     if configured:
         candidate = Path(configured).expanduser()
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
+    if prefer_paths:
+        for raw_path in paths:
+            candidate = Path(raw_path).expanduser()
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
     for name in names:
         found = shutil.which(name)
         if found:
             return found
-    for raw_path in paths:
-        candidate = Path(raw_path).expanduser()
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
+    if not prefer_paths:
+        for raw_path in paths:
+            candidate = Path(raw_path).expanduser()
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
     return configured
 
 
@@ -83,6 +94,7 @@ CODEX_CLI = find_executable(
         "~/Applications/ChatGPT.app/Contents/Resources/codex",
         "~/Applications/Codex.app/Contents/Resources/codex",
     ),
+    prefer_paths=True,
 )
 
 
@@ -332,6 +344,86 @@ def rollout_path_for_task(thread_id: str) -> Path | None:
     finally:
         connection.close()
     return Path(str(row[0])) if row and row[0] else None
+
+
+def version_tuple(version: str) -> tuple[int, int, int] | None:
+    match = re.search(r"\b(\d+)\.(\d+)\.(\d+)", version)
+    return tuple(map(int, match.groups())) if match else None
+
+
+def executable_version(executable: str) -> str:
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip().splitlines()[0] if result.returncode == 0 else ""
+
+
+def rollout_cli_version(rollout_path: Path | None) -> str:
+    if rollout_path is None or not rollout_path.is_file():
+        return ""
+    try:
+        with rollout_path.open("r", encoding="utf-8") as handle:
+            first_record = json.loads(handle.readline())
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(first_record, dict):
+        return ""
+    payload = first_record.get("payload")
+    if first_record.get("type") != "session_meta" or not isinstance(payload, dict):
+        return ""
+    return str(payload.get("cli_version") or "").strip()
+
+
+def cli_resume_preflight(rollout_path: Path | None) -> tuple[bool, str]:
+    task_version = rollout_cli_version(rollout_path)
+    if not task_version:
+        return (
+            False,
+            "Codex Desktop 当前未连接，且该 task 的本地记录无法由 CLI 安全继续。"
+            "请在 Mac 打开 Codex Desktop 后重试；无需删除或重新选择 task。",
+        )
+    cli_version = executable_version(CODEX_CLI)
+    parsed_task_version = version_tuple(task_version)
+    parsed_cli_version = version_tuple(cli_version)
+    if parsed_task_version is None or parsed_cli_version is None:
+        return (
+            False,
+            "Codex Desktop 当前未连接，且备用 Codex CLI 的兼容版本无法确认。"
+            "请在 Mac 打开 Codex Desktop 后重试；无需重新选择 task。",
+        )
+    if parsed_cli_version < parsed_task_version:
+        return (
+            False,
+            "Codex Desktop 当前未连接，且备用 Codex CLI 版本低于该 task 的记录版本。"
+            "请在 Mac 打开 Codex Desktop 后重试。",
+        )
+    return True, ""
+
+
+def codex_resume_failure_message(stderr: str) -> str:
+    normalized = stderr.lower()
+    if any(
+        marker in normalized
+        for marker in (
+            "failed to read thread",
+            "thread-store internal error",
+            "does not start with session metadata",
+        )
+    ):
+        return (
+            "Codex Desktop 当前未连接，且备用 CLI 无法读取这个 task。"
+            "请在 Mac 打开 Codex Desktop 后重试；无需重新选择 task。"
+        )
+    return (
+        "没有成功发送到 Codex。请确认 Mac 上的 Codex Desktop 已打开后重试。"
+        "详细原因已记录到桥接日志。"
+    )
 
 
 def idempotency_key(message_id: str, kind: str) -> str:
@@ -1154,6 +1246,10 @@ def run_codex(
     environment = os.environ.copy()
     environment["CODEX_FEISHU_BRIDGE"] = "1"
     rollout_path = rollout_path_for_task(thread_id)
+    compatible, compatibility_message = cli_resume_preflight(rollout_path)
+    if not compatible:
+        log(f"codex resume preflight blocked cli={CODEX_CLI}")
+        return False, compatibility_message, []
     rollout_offset = (
         rollout_path.stat().st_size
         if rollout_path and rollout_path.is_file()
@@ -1171,7 +1267,7 @@ def run_codex(
             thread_id,
             "-",
         ]
-        notify_started("正在启动")
+        notify_started("正在通过本机 Codex 启动")
         try:
             result = subprocess.run(
                 command,
@@ -1193,7 +1289,7 @@ def run_codex(
             log(f"codex resume failed code={result.returncode} stderr={error}")
             return (
                 False,
-                "没有成功发送到 Codex。详细原因已记录到 Mac 的桥接日志，请稍后重试。",
+                codex_resume_failure_message(result.stderr),
                 [],
             )
         try:
