@@ -40,6 +40,8 @@
 
 桥接在 Mac 本机运行，因此 Mac 必须开机、联网，Codex Desktop 的本地数据必须可用。飞书 Bot 本身不运行 Codex。
 
+提交时优先使用 Codex Desktop IPC。若 Desktop 暂时未连接，桥接只会在备用 Codex CLI 与该 Task 的本地记录版本兼容时回退；默认优先使用 Desktop App 内置 CLI，而不是 PATH 中可能过旧的全局 CLI。版本无法确认或不兼容时，Bot 会提示在 Mac 打开 Codex Desktop 后重试，当前 Task 选择不会丢失。
+
 ## 安装
 
 ### 1. 前置条件

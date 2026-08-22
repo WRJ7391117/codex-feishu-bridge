@@ -17,6 +17,9 @@ Common interpretations:
 - Every message asks to select again: inspect `state.json` ownership, confirm selection is keyed by that user's open_id, and verify their project rule still includes the selected Task.
 - A user sees no Tasks: their project names must exactly match the Codex Desktop sidebar; use `*` only when the Mac owner intends to grant all projects.
 - “Task is running”: Codex rejected a concurrent turn. The bridge intentionally does not queue or duplicate it.
+- “备用 Codex CLI 版本低于该 task”: Codex Desktop IPC was unavailable and a PATH CLI would be too old for the Task record. Open Codex Desktop and retry; do not delete or reselect the Task.
+- “备用 Codex CLI 的兼容版本无法确认”: open Codex Desktop and retry. The bridge blocks an unverifiable CLI fallback to avoid corrupting or misreading the Task record.
+- `failed to read thread`, `thread-store internal error`, or `does not start with session metadata`: verify that the installed App is current and that it selects the Desktop-bundled CLI before PATH. The Task rollout may still be valid; do not rebuild the Task solely from this error.
 - Start succeeds but no events arrive: a loaded LaunchAgent only proves the process exists; inspect ready markers and console subscriptions.
 - Reply fails after Codex completed: inspect lark-cli error envelopes and their `error.type`, `error.subtype`, `missing_scopes`, and `console_url`.
 - Text arrives but images do not: confirm the Bot has `im:resource`, then inspect the bridge log for `image reply failed`. Markdown alone cannot upload a Mac-local path; the bridge must send a separate image reply.
