@@ -482,7 +482,10 @@ def available_project_names(user_id: str) -> list[str]:
     )
 
 
-def recent_tasks(user_id: str) -> list[dict[str, str]]:
+def tasks_by_archive_state(
+    user_id: str,
+    archived: bool,
+) -> list[dict[str, str]]:
     state_db = state_db_path()
     connection = sqlite3.connect(
         f"file:{DESKTOP_CATALOG_DB}?mode=ro",
@@ -505,10 +508,11 @@ def recent_tasks(user_id: str) -> list[dict[str, str]]:
             JOIN state.threads ON state.threads.id = catalog.thread_id
             WHERE catalog.host_id = 'local'
               AND catalog.missing_candidate = 0
-              AND state.threads.archived = 0
+              AND state.threads.archived = ?
               AND state.threads.preview <> ''
             ORDER BY catalog.source_recency_at DESC, catalog.thread_id DESC
             """,
+            (int(archived),),
         ).fetchall()
     finally:
         connection.close()
@@ -534,6 +538,14 @@ def recent_tasks(user_id: str) -> list[dict[str, str]]:
         for row in rows
     ]
     return [task for task in tasks if user_can_access_task(user_id, task)]
+
+
+def recent_tasks(user_id: str) -> list[dict[str, str]]:
+    return tasks_by_archive_state(user_id, archived=False)
+
+
+def archived_tasks(user_id: str) -> list[dict[str, str]]:
+    return tasks_by_archive_state(user_id, archived=True)
 
 
 def task_by_id(thread_id: str, user_id: str) -> dict[str, str] | None:
@@ -564,6 +576,23 @@ def task_by_id(thread_id: str, user_id: str) -> dict[str, str] | None:
             """,
             (thread_id,),
         ).fetchone()
+        if row is None:
+            row = connection.execute(
+                """
+                SELECT state.threads.id AS id,
+                       COALESCE(
+                           NULLIF(state.threads.name, ''),
+                           NULLIF(state.threads.title, ''),
+                           '未命名 Task'
+                       ) AS task_name,
+                       state.threads.project_id AS project_id,
+                       state.threads.cwd AS cwd
+                FROM state.threads
+                WHERE state.threads.id = ?
+                  AND state.threads.archived = 0
+                """,
+                (thread_id,),
+            ).fetchone()
     finally:
         connection.close()
     if row is None:
@@ -604,6 +633,25 @@ def rollout_path_for_task(thread_id: str) -> Path | None:
     finally:
         connection.close()
     return Path(str(row[0])) if row and row[0] else None
+
+
+def task_working_directory(thread_id: str) -> str:
+    connection = sqlite3.connect(
+        f"file:{state_db_path()}?mode=ro",
+        uri=True,
+        timeout=2,
+    )
+    try:
+        row = connection.execute(
+            "SELECT cwd FROM threads WHERE id = ? AND archived = 0",
+            (thread_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if not row or not row[0]:
+        return ""
+    path = Path(str(row[0])).expanduser()
+    return str(path.resolve()) if path.is_dir() else ""
 
 
 def version_tuple(version: str) -> tuple[int, int, int] | None:
@@ -788,7 +836,12 @@ def lark_reply_failure_metadata(result: subprocess.CompletedProcess[str]) -> str
 
 
 def codex_app_server_requests(
-    requests: list[tuple[str, dict[str, Any]]],
+    requests: list[
+        tuple[
+            str,
+            dict[str, Any] | Callable[[list[dict[str, Any]]], dict[str, Any]],
+        ]
+    ],
     timeout: float = 15,
 ) -> list[dict[str, Any]]:
     process = subprocess.Popen(
@@ -847,7 +900,8 @@ def codex_app_server_requests(
         send({"method": "initialized", "params": {}})
         results: list[dict[str, Any]] = []
         for request_id, (method, params) in enumerate(requests, start=2):
-            send({"id": request_id, "method": method, "params": params})
+            resolved_params = params(results) if callable(params) else params
+            send({"id": request_id, "method": method, "params": resolved_params})
             results.append(receive(request_id))
         return results
     finally:
@@ -872,16 +926,25 @@ def create_codex_task(user_id: str, project_name: str, title: str) -> dict[str, 
     clean_title = " ".join(title.split())[:80]
     if not clean_title:
         raise RuntimeError("Task 标题不能为空。")
+    def name_params(results: list[dict[str, Any]]) -> dict[str, Any]:
+        thread = results[0].get("thread") if results else None
+        thread_id = str(thread.get("id") or "") if isinstance(thread, dict) else ""
+        try:
+            uuid.UUID(thread_id)
+        except ValueError as exc:
+            raise RuntimeError("Codex 没有返回有效的 Task 标识。") from exc
+        return {"threadId": thread_id, "name": clean_title}
+
     results = codex_app_server_requests(
         [
             (
                 "thread/start",
                 {
                     "cwd": project["root"],
-                    "projectId": project["id"],
                     "ephemeral": False,
                 },
             ),
+            ("thread/name/set", name_params),
         ]
     )
     thread = results[0].get("thread") if results else None
@@ -890,9 +953,6 @@ def create_codex_task(user_id: str, project_name: str, title: str) -> dict[str, 
         uuid.UUID(thread_id)
     except ValueError as exc:
         raise RuntimeError("Codex 没有返回有效的 Task 标识。") from exc
-    codex_app_server_requests(
-        [("thread/name/set", {"threadId": thread_id, "name": clean_title})]
-    )
     return {"id": thread_id, "title": clean_title, "project": project_name}
 
 
@@ -901,6 +961,14 @@ def archive_codex_task(user_id: str, task: dict[str, str]) -> None:
         raise RuntimeError("你没有归档这个 Task 的权限。")
     codex_app_server_requests(
         [("thread/archive", {"threadId": str(task["id"])})]
+    )
+
+
+def restore_codex_task(user_id: str, task: dict[str, str]) -> None:
+    if not user_can_access_task(user_id, task):
+        raise RuntimeError("你没有恢复这个 Task 的权限。")
+    codex_app_server_requests(
+        [("thread/unarchive", {"threadId": str(task["id"])})]
     )
 
 
@@ -914,9 +982,19 @@ def complete_task_creation(
         task = create_codex_task(user_id, project_name, title)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         log(f"task creation failed error={type(exc).__name__}")
+        reason = str(exc)
+        if reason.startswith(("你没有", "找不到", "Task 标题")):
+            message = reason
+        elif isinstance(exc, RuntimeError):
+            message = (
+                "Codex Desktop 没有接受新建 Task 请求。"
+                "桥接协议可能不兼容或 Desktop 暂不可用，请更新桥接后重试。"
+            )
+        else:
+            message = "没有成功新建 Task，请在 Mac 上确认 Codex Desktop 正在运行后重试。"
         reply(
             message_id,
-            "没有成功新建 Task，请确认 Codex Desktop 已登录并在桌面版中重试。",
+            message,
             "new-task-error",
         )
         return
@@ -926,12 +1004,44 @@ def complete_task_creation(
         state.setdefault("last_projects", {})[user_id] = task["project"]
         state.setdefault("task_pages", {})[user_id] = 0
         state.setdefault("task_queries", {}).pop(user_id, None)
+        state.setdefault("pending_task_names", {})[user_id] = {
+            "task_id": task["id"],
+            "title": task["title"],
+        }
         save_state(state)
     reply(
         message_id,
         f"已新建并选择：{option_text(task)}\n现在发送的下一条消息会进入这个 Task。",
         "new-task-created",
     )
+
+
+def restore_pending_task_name(user_id: str, task_id: str) -> bool:
+    with _state_lock:
+        state = load_state()
+        pending = state.setdefault("pending_task_names", {}).get(user_id)
+        if (
+            not isinstance(pending, dict)
+            or str(pending.get("task_id") or "") != task_id
+        ):
+            return False
+        title = str(pending.get("title") or "").strip()
+    if not title:
+        return False
+    try:
+        codex_app_server_requests(
+            [("thread/name/set", {"threadId": task_id, "name": title})]
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        log(f"task name restore failed error={type(exc).__name__}")
+        return False
+    with _state_lock:
+        state = load_state()
+        current = state.setdefault("pending_task_names", {}).get(user_id)
+        if isinstance(current, dict) and str(current.get("task_id") or "") == task_id:
+            state["pending_task_names"].pop(user_id, None)
+            save_state(state)
+    return True
 
 
 def reply(message_id: str, text: str, kind: str) -> bool:
@@ -3124,9 +3234,9 @@ def normalized_content(content: str) -> str:
 def help_text() -> str:
     return (
         "可用命令：\n"
-        "机器人菜单“选择 Task” —— 打开 Task 选择卡片\n"
+        "机器人菜单“选择 Task” —— 选择当前 Task 或恢复已归档 Task\n"
         "机器人菜单“新建 Task” —— 选择项目并新建 Task\n"
-        "机器人菜单“归档 Task” —— 二次确认后归档当前 Task\n"
+        "机器人菜单“归档 Task” —— 可取消或二次确认归档当前 Task\n"
         "对话 —— 用文字打开 Task 选择卡片（备用）\n"
         "选择 N —— 文字选择 task（备用）\n"
         "搜索 关键词 —— 按标题搜索当前项目的 Task\n"
@@ -3148,6 +3258,7 @@ def build_task_card(
     project_filter: str | None = None,
     page: int = 0,
     search_query: str = "",
+    archived: bool = False,
 ) -> dict[str, Any]:
     selected = next((task for task in tasks if task["id"] == selected_id), None)
     projects = list(dict.fromkeys(task["project"] for task in tasks))
@@ -3171,41 +3282,57 @@ def build_task_card(
     active_page = min(max(page, 0), page_count - 1)
     start = active_page * TASKS_PER_PAGE
     visible_tasks = project_tasks[start : start + TASKS_PER_PAGE]
+    card_title = "恢复已归档 Task" if archived else "选择 Codex task"
     header: dict[str, Any] = {
-        "title": {"tag": "plain_text", "content": "选择 Codex task"},
+        "title": {"tag": "plain_text", "content": card_title},
         "subtitle": {
             "tag": "plain_text",
             "content": (
-                f"当前：{option_text(selected)}"
+                f"待恢复：{option_text(selected)}"
+                if archived and selected
+                else f"当前：{option_text(selected)}"
                 if selected
+                else "选择后确认恢复该 Task"
+                if archived
                 else "选择后，后续文字会发送到该 task"
             ),
         },
-        "template": "green" if selected else "blue",
+        "template": "yellow" if archived and selected else "green" if selected else "blue",
         "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
     }
     if selected:
         header["text_tag_list"] = [
             {
                 "tag": "text_tag",
-                "text": {"tag": "plain_text", "content": "已选择"},
-                "color": "green",
+                "text": {
+                    "tag": "plain_text",
+                    "content": "待恢复" if archived else "已选择",
+                },
+                "color": "yellow" if archived else "green",
             }
         ]
     elements: list[dict[str, Any]] = [
         {
             "tag": "markdown",
             "content": (
-                "**先选项目，再选 Task**\n选中后，后续消息会持续发送到该 Task。"
+                (
+                    "**先选项目，再选已归档 Task**\n选中后点击“恢复这个 Task”。"
+                    if archived
+                    else "**先选项目，再选 Task**\n选中后，后续消息会持续发送到该 Task。"
+                )
                 + (f"\n当前搜索：`{card_markdown_escape(search_query[:80])}`" if query else "")
                 if tasks
-                else "当前没有你有权访问的 Codex task。请联系这台 Mac 的管理员。"
+                else (
+                    "当前没有你有权恢复的已归档 Task。"
+                    if archived
+                    else "当前没有你有权访问的 Codex task。请联系这台 Mac 的管理员。"
+                )
             ),
         }
     ]
     project_selector: dict[str, Any] = {
         "tag": "select_static",
-        "name": "project_selector",
+        "name": "archived_project_selector" if archived else "project_selector",
         "placeholder": {"tag": "plain_text", "content": "筛选项目"},
         "options": [
             {
@@ -3219,8 +3346,11 @@ def build_task_card(
     }
     selector: dict[str, Any] = {
         "tag": "select_static",
-        "name": "task_selector",
-        "placeholder": {"tag": "plain_text", "content": "选择一个 Task"},
+        "name": "archived_task_selector" if archived else "task_selector",
+        "placeholder": {
+            "tag": "plain_text",
+            "content": "选择一个已归档 Task" if archived else "选择一个 Task",
+        },
         "options": [
             {
                 "text": {"tag": "plain_text", "content": option_text(task)},
@@ -3254,7 +3384,10 @@ def build_task_card(
                     "behaviors": [
                         {
                             "type": "callback",
-                            "value": {"action": "task_page", "page": active_page - 1},
+                            "value": {
+                                "action": "archived_task_page" if archived else "task_page",
+                                "page": active_page - 1,
+                            },
                         }
                     ],
                 }
@@ -3268,12 +3401,15 @@ def build_task_card(
                     "behaviors": [
                         {
                             "type": "callback",
-                            "value": {"action": "task_page", "page": active_page + 1},
+                            "value": {
+                                "action": "archived_task_page" if archived else "task_page",
+                                "page": active_page + 1,
+                            },
                         }
                     ],
                 }
             )
-        if query:
+        if query and not archived:
             elements.append(
                 {
                     "tag": "button",
@@ -3284,13 +3420,62 @@ def build_task_card(
                     ],
                 }
             )
+    if archived:
+        if selected:
+            elements.append(
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "恢复这个 Task"},
+                    "type": "primary_filled",
+                    "width": "fill",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "restore_task",
+                                "task_id": str(selected["id"]),
+                            },
+                        }
+                    ],
+                    "confirm": {
+                        "title": {"tag": "plain_text", "content": "确认恢复这个 Task？"},
+                        "text": {
+                            "tag": "plain_text",
+                            "content": option_text(selected),
+                        },
+                    },
+                }
+            )
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "返回当前 Task"},
+                "type": "default",
+                "width": "fill",
+                "behaviors": [
+                    {"type": "callback", "value": {"action": "show_task_selector"}}
+                ],
+            }
+        )
+    else:
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "查看已归档 Task"},
+                "type": "default",
+                "width": "fill",
+                "behaviors": [
+                    {"type": "callback", "value": {"action": "show_archived_tasks"}}
+                ],
+            }
+        )
     return {
         "schema": "2.0",
         "config": {
             "update_multi": True,
             "width_mode": "default",
             "enable_forward": False,
-            "summary": {"content": "选择 Codex task"},
+            "summary": {"content": card_title},
         },
         "header": header,
         "body": {
@@ -3385,11 +3570,23 @@ def build_archive_task_card(
     task: dict[str, str] | None,
     busy: bool = False,
     archived: bool = False,
+    canceled: bool = False,
+    restored: bool = False,
 ) -> dict[str, Any]:
     if task is None:
         status = "尚未选择 Task。请先点击机器人菜单中的“选择 Task”。"
     elif archived:
-        status = f"已归档：**{card_markdown_escape(option_text(task))}**\n\n可在 Codex Desktop 中恢复。"
+        status = f"已归档：**{card_markdown_escape(option_text(task))}**\n\n可在下方立即撤销归档。"
+    elif canceled:
+        status = (
+            f"已取消归档：**{card_markdown_escape(option_text(task))}**\n\n"
+            "当前 Task 保持选中，没有执行归档。"
+        )
+    elif restored:
+        status = (
+            f"已恢复并选择：**{card_markdown_escape(option_text(task))}**\n\n"
+            "后续消息会继续发送到这个 Task。"
+        )
     elif busy:
         status = (
             f"当前 Task：**{card_markdown_escape(option_text(task))}**\n\n"
@@ -3398,33 +3595,114 @@ def build_archive_task_card(
     else:
         status = (
             f"当前 Task：**{card_markdown_escape(option_text(task))}**\n\n"
-            "归档后会从未归档列表移除，可在 Codex Desktop 中恢复。"
+            "归档后会从未归档列表移除，可在飞书或 Codex Desktop 中恢复。"
         )
     elements: list[dict[str, Any]] = [{"tag": "markdown", "content": status}]
-    if task is not None and not busy and not archived:
-        elements.append(
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "归档这个 Task…"},
-                "type": "danger",
-                "width": "fill",
-                "behaviors": [
-                    {
-                        "type": "callback",
-                        "value": {
-                            "action": "archive_task",
-                            "task_id": str(task["id"]),
+    if task is not None and not busy and not archived and not canceled:
+        elements.extend(
+            [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "归档这个 Task…"},
+                    "type": "danger",
+                    "width": "fill",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "archive_task",
+                                "task_id": str(task["id"]),
+                            },
+                        }
+                    ],
+                    "confirm": {
+                        "title": {
+                            "tag": "plain_text",
+                            "content": "确认归档这个 Task？",
                         },
-                    }
-                ],
-                "confirm": {
-                    "title": {"tag": "plain_text", "content": "确认归档这个 Task？"},
-                    "text": {
-                        "tag": "plain_text",
-                        "content": option_text(task),
+                        "text": {
+                            "tag": "plain_text",
+                            "content": option_text(task),
+                        },
                     },
                 },
-            }
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "取消，不归档"},
+                    "type": "default",
+                    "width": "fill",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "cancel_archive",
+                                "task_id": str(task["id"]),
+                            },
+                        }
+                    ],
+                },
+            ]
+        )
+    if task is not None and archived:
+        elements.extend(
+            [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "撤销归档"},
+                    "type": "primary_filled",
+                    "width": "fill",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "restore_task",
+                                "task_id": str(task["id"]),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "选择其他 Task"},
+                    "type": "default",
+                    "width": "fill",
+                    "behaviors": [
+                        {"type": "callback", "value": {"action": "show_task_selector"}}
+                    ],
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "新建 Task"},
+                    "type": "default",
+                    "width": "fill",
+                    "behaviors": [
+                        {"type": "callback", "value": {"action": "show_new_task"}}
+                    ],
+                },
+            ]
+        )
+    elif task is not None and restored:
+        elements.extend(
+            [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "选择其他 Task"},
+                    "type": "default",
+                    "width": "fill",
+                    "behaviors": [
+                        {"type": "callback", "value": {"action": "show_task_selector"}}
+                    ],
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "新建 Task"},
+                    "type": "default",
+                    "width": "fill",
+                    "behaviors": [
+                        {"type": "callback", "value": {"action": "show_new_task"}}
+                    ],
+                },
+            ]
         )
     return {
         "schema": "2.0",
@@ -3440,7 +3718,15 @@ def build_archive_task_card(
                 "tag": "plain_text",
                 "content": option_text(task) if task else "没有当前 Task",
             },
-            "template": "grey" if archived else "red" if task and not busy else "yellow",
+            "template": (
+                "green"
+                if restored
+                else "grey"
+                if archived or canceled
+                else "red"
+                if task and not busy
+                else "yellow"
+            ),
             "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
             "text_tag_list": (
                 [
@@ -3448,12 +3734,26 @@ def build_archive_task_card(
                         "tag": "text_tag",
                         "text": {
                             "tag": "plain_text",
-                            "content": "已归档" if archived else "运行中",
+                            "content": (
+                                "已恢复"
+                                if restored
+                                else "已归档"
+                                if archived
+                                else "已取消"
+                                if canceled
+                                else "运行中"
+                            ),
                         },
-                        "color": "neutral" if archived else "yellow",
+                        "color": (
+                            "green"
+                            if restored
+                            else "neutral"
+                            if archived or canceled
+                            else "yellow"
+                        ),
                     }
                 ]
-                if archived or busy
+                if archived or canceled or restored or busy
                 else []
             ),
         },
@@ -3687,6 +3987,25 @@ def task_card_for_state(user_id: str, state: dict[str, Any]) -> dict[str, Any]:
             str(project_filter) if project_filter else None,
             page,
             query,
+        )
+
+
+def archived_task_card_for_state(
+    user_id: str,
+    state: dict[str, Any],
+    selected_id: str | None = None,
+) -> dict[str, Any]:
+    with _state_lock:
+        tasks = archived_tasks(user_id)
+        project_filter = state.setdefault("archived_last_projects", {}).get(user_id)
+        page = int(state.setdefault("archived_task_pages", {}).get(user_id) or 0)
+        save_state(state)
+        return build_task_card(
+            tasks,
+            selected_id,
+            str(project_filter) if project_filter else None,
+            page,
+            archived=True,
         )
 
 
@@ -4611,6 +4930,17 @@ def run_codex_via_desktop(
             client_id = initialize_desktop_connection(connection)
 
             request_id = str(uuid.uuid4())
+            turn_request = {
+                "threadId": thread_id,
+                "input": codex_turn_input(
+                    prompt,
+                    input_images or [],
+                    input_files or [],
+                ),
+            }
+            working_directory = task_working_directory(thread_id)
+            if working_directory:
+                turn_request["cwd"] = working_directory
             turn_request_attempted = True
             send_ipc_message(
                 connection,
@@ -4623,14 +4953,7 @@ def run_codex_via_desktop(
                     "params": {
                         "conversationId": thread_id,
                         "turnStart": {
-                            "request": {
-                                "threadId": thread_id,
-                                "input": codex_turn_input(
-                                    prompt,
-                                    input_images or [],
-                                    input_files or [],
-                                ),
-                            },
+                            "request": turn_request,
                             "context": {
                                 "inheritThreadSettings": True,
                                 "attachments": codex_attachments(input_files or []),
@@ -5046,6 +5369,11 @@ def process_message_run(
                 ),
                 on_ipc_response=lambda response: complete_run_ipc_response(run, response),
             )
+            if success:
+                restore_pending_task_name(
+                    str(run["user_id"]),
+                    str(task["id"]),
+                )
     except InterruptedError:
         run["cancel_confirmed"].set()
         success = False
@@ -5366,7 +5694,18 @@ def handle_card_event(event: dict[str, Any]) -> None:
             refresh_queued_cards(task_id)
             log("queued input canceled")
             return
-        if action in {"task_page", "clear_task_search", "new_task", "archive_task"}:
+        if action in {
+            "task_page",
+            "archived_task_page",
+            "clear_task_search",
+            "new_task",
+            "archive_task",
+            "cancel_archive",
+            "restore_task",
+            "show_task_selector",
+            "show_archived_tasks",
+            "show_new_task",
+        }:
             with _state_lock:
                 state = load_state()
                 if not mark_processed(state, f"card:{event_id}"):
@@ -5379,11 +5718,33 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     state.setdefault("task_pages", {})[user_id] = page
                     save_state(state)
                     card = task_card_for_state(user_id, state)
+                elif action == "archived_task_page":
+                    try:
+                        page = max(0, int(payload.get("page") or 0))
+                    except (TypeError, ValueError):
+                        page = 0
+                    state.setdefault("archived_task_pages", {})[user_id] = page
+                    save_state(state)
+                    card = archived_task_card_for_state(user_id, state)
                 elif action == "clear_task_search":
                     state.setdefault("task_queries", {}).pop(user_id, None)
                     state.setdefault("task_pages", {})[user_id] = 0
                     save_state(state)
                     card = task_card_for_state(user_id, state)
+                elif action == "show_task_selector":
+                    save_state(state)
+                    card = task_card_for_state(user_id, state)
+                elif action == "show_archived_tasks":
+                    state.setdefault("archived_task_pages", {})[user_id] = 0
+                    save_state(state)
+                    card = archived_task_card_for_state(user_id, state)
+                elif action == "show_new_task":
+                    projects = available_project_names(user_id)
+                    selected_project = str(
+                        state.setdefault("last_projects", {}).get(user_id) or ""
+                    )
+                    save_state(state)
+                    card = build_new_task_card(projects, selected_project)
                 elif action == "new_task":
                     project = str(payload.get("project") or "")
                     projects = set(available_project_names(user_id))
@@ -5397,6 +5758,49 @@ def handle_card_event(event: dict[str, Any]) -> None:
                         f"new-task-ready-{event_id}",
                     )
                     return
+                elif action == "cancel_archive":
+                    task = selected_task(user_id, state)
+                    save_state(state)
+                    card = build_archive_task_card(task, canceled=True)
+                    log("task archive canceled")
+                elif action == "restore_task":
+                    requested_task_id = str(payload.get("task_id") or "")
+                    task = next(
+                        (
+                            candidate
+                            for candidate in archived_tasks(user_id)
+                            if str(candidate["id"]) == requested_task_id
+                        ),
+                        None,
+                    )
+                    if task is None:
+                        reply(
+                            message_id,
+                            "该 Task 已经恢复、删除或当前用户已无权访问。",
+                            f"restore-stale-{event_id}",
+                        )
+                        return
+                    try:
+                        restore_codex_task(user_id, task)
+                    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                        log(f"task restore failed error={type(exc).__name__}")
+                        reply(
+                            message_id,
+                            "没有成功恢复 Task，请在 Codex Desktop 中重试。",
+                            f"restore-error-{event_id}",
+                        )
+                        return
+                    state = load_state()
+                    state.setdefault("selected", {})[user_id] = task["id"]
+                    state.setdefault("last_projects", {})[user_id] = task["project"]
+                    state.setdefault("task_pages", {})[user_id] = 0
+                    save_state(state)
+                    card = build_archive_task_card(task, restored=True)
+                    reply(
+                        message_id,
+                        f"已恢复并选择：{option_text(task)}",
+                        f"restored-{event_id}",
+                    )
                 else:
                     task = selected_task(user_id, state)
                     if task is None:
@@ -5514,6 +5918,74 @@ def handle_card_event(event: dict[str, Any]) -> None:
             state.setdefault("last_projects", {})[user_id] = selected_value
             save_state(state)
             card = build_new_task_card(projects, selected_value)
+        token = str(event.get("token") or "")
+        if token and update_card(token, card):
+            return
+        if message_id:
+            patch_card(message_id, card)
+        return
+
+    recognized_archived_card = any(
+        isinstance(element, dict)
+        and element.get("tag") == "select_static"
+        and element.get("name")
+        in {"archived_project_selector", "archived_task_selector"}
+        for element in elements
+    )
+    if action_tag == "select_static" and (
+        action_name in {"archived_project_selector", "archived_task_selector"}
+        or (not action_name and recognized_archived_card)
+    ):
+        archived = archived_tasks(user_id)
+        projects = {task["project"] for task in archived}
+        task_ids = {task["id"] for task in archived}
+        if not action_name:
+            if selected_value in projects:
+                action_name = "archived_project_selector"
+            elif selected_value in task_ids:
+                action_name = "archived_task_selector"
+            else:
+                log("card ignored reason=unknown-archived-selector")
+                return
+        with _state_lock:
+            state = load_state()
+            if chat_id and not is_authorized_chat(state, user_id, chat_id):
+                if not recognized_archived_card:
+                    log("card ignored reason=unrecognized-chat-and-card")
+                    return
+                authorize_chat(state, user_id, chat_id)
+            if not mark_processed(state, f"card:{event_id}"):
+                return
+            if action_name == "archived_project_selector":
+                if selected_value not in projects:
+                    log("card ignored reason=unknown-archived-project")
+                    return
+                state.setdefault("archived_last_projects", {})[user_id] = selected_value
+                state.setdefault("archived_task_pages", {})[user_id] = 0
+                save_state(state)
+                card = archived_task_card_for_state(user_id, state)
+            else:
+                selected = next(
+                    (task for task in archived if task["id"] == selected_value),
+                    None,
+                )
+                if selected is None:
+                    if message_id:
+                        reply(
+                            message_id,
+                            "该 Task 已经恢复或删除，请重新选择。",
+                            f"archived-stale-{event_id}",
+                        )
+                    return
+                state.setdefault("archived_last_projects", {})[user_id] = selected[
+                    "project"
+                ]
+                save_state(state)
+                card = archived_task_card_for_state(
+                    user_id,
+                    state,
+                    selected["id"],
+                )
         token = str(event.get("token") or "")
         if token and update_card(token, card):
             return

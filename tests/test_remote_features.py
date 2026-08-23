@@ -176,6 +176,47 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.assertNotIn("新建 Task", button_labels)
         self.assertNotIn("归档当前 Task…", button_labels)
+        self.assertIn("查看已归档 Task", button_labels)
+
+    def test_archived_task_card_requires_selection_before_restore(self):
+        initial = self.bridge.build_task_card(
+            self.tasks(),
+            None,
+            "deepori",
+            archived=True,
+        )
+        selected = self.bridge.build_task_card(
+            self.tasks(),
+            "task-a",
+            "deepori",
+            archived=True,
+        )
+
+        initial_buttons = [
+            item["text"]["content"]
+            for item in initial["body"]["elements"]
+            if item.get("tag") == "button"
+        ]
+        selected_buttons = [
+            item["text"]["content"]
+            for item in selected["body"]["elements"]
+            if item.get("tag") == "button"
+        ]
+        self.assertEqual(initial_buttons, ["返回当前 Task"])
+        self.assertEqual(
+            selected_buttons,
+            ["恢复这个 Task", "返回当前 Task"],
+        )
+        restore = next(
+            item
+            for item in selected["body"]["elements"]
+            if item.get("text", {}).get("content") == "恢复这个 Task"
+        )
+        self.assertEqual(
+            restore["behaviors"][0]["value"],
+            {"action": "restore_task", "task_id": "task-a"},
+        )
+        self.assertIn("confirm", restore)
 
     def test_new_task_menu_card_only_lists_authorized_desktop_projects(self):
         self.bridge.ALLOWED_USERS["ou_admin"] = {"deepori"}
@@ -289,15 +330,61 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         card = sent[0][1]
         self.assertEqual(card["header"]["subtitle"]["content"], "deepori · Home")
-        button = next(
+        buttons = [
             item for item in card["body"]["elements"]
             if item.get("tag") == "button"
+        ]
+        self.assertEqual(
+            [button["text"]["content"] for button in buttons],
+            ["归档这个 Task…", "取消，不归档"],
         )
+        button = buttons[0]
         self.assertEqual(
             button["behaviors"][0]["value"],
             {"action": "archive_task", "task_id": "task-a"},
         )
         self.assertIn("confirm", button)
+        self.assertEqual(
+            buttons[1]["behaviors"][0]["value"],
+            {"action": "cancel_archive", "task_id": "task-a"},
+        )
+        self.assertNotIn("confirm", buttons[1])
+
+    def test_cancel_archive_keeps_current_task_selected(self):
+        task = self.tasks()[0]
+        self.bridge.STATE_PATH.write_text(
+            json.dumps({"selected": {"ou_admin": "task-a"}}),
+            encoding="utf-8",
+        )
+        self.bridge.selected_task = lambda user_id, state: task
+        self.bridge.archive_codex_task = mock.Mock()
+        self.bridge.update_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-archive-cancel",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "message_id": "om_archive_card",
+                "token": "token-test",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "cancel_archive", "task_id": "task-a"}
+                ),
+            }
+        )
+
+        self.bridge.archive_codex_task.assert_not_called()
+        self.assertEqual(
+            self.bridge.load_state()["selected"]["ou_admin"],
+            "task-a",
+        )
+        canceled = self.bridge.update_card.call_args.args[1]
+        self.assertIn("已取消归档", canceled["body"]["elements"][0]["content"])
+        self.assertEqual(
+            canceled["header"]["text_tag_list"][0]["text"]["content"],
+            "已取消",
+        )
 
     def test_archive_callback_clears_selection_only_after_success(self):
         task = self.tasks()[0]
@@ -332,6 +419,116 @@ class RemoteFeatureTests(unittest.TestCase):
         )
         completed = self.bridge.update_card.call_args.args[1]
         self.assertEqual(completed["header"]["text_tag_list"][0]["text"]["content"], "已归档")
+        self.assertEqual(
+            [
+                item["text"]["content"]
+                for item in completed["body"]["elements"]
+                if item.get("tag") == "button"
+            ],
+            ["撤销归档", "选择其他 Task", "新建 Task"],
+        )
+
+    def test_restore_callback_restores_and_selects_archived_task(self):
+        task = self.tasks()[0]
+        self.bridge.STATE_PATH.write_text("{}", encoding="utf-8")
+        self.bridge.archived_tasks = lambda user_id: [task]
+        self.bridge.restore_codex_task = mock.Mock()
+        self.bridge.reply = mock.Mock(return_value=True)
+        self.bridge.update_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-restore-confirm",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "message_id": "om_archive_card",
+                "token": "token-test",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "restore_task", "task_id": "task-a"}
+                ),
+            }
+        )
+
+        self.bridge.restore_codex_task.assert_called_once_with("ou_admin", task)
+        state = self.bridge.load_state()
+        self.assertEqual(state["selected"]["ou_admin"], "task-a")
+        self.assertEqual(state["last_projects"]["ou_admin"], "deepori")
+        restored = self.bridge.update_card.call_args.args[1]
+        self.assertEqual(
+            restored["header"]["text_tag_list"][0]["text"]["content"],
+            "已恢复",
+        )
+
+    def test_restore_codex_task_uses_desktop_unarchive_protocol(self):
+        task = self.tasks()[0]
+        self.bridge.codex_app_server_requests = mock.Mock(return_value=[{}])
+
+        self.bridge.restore_codex_task("ou_admin", task)
+
+        self.bridge.codex_app_server_requests.assert_called_once_with(
+            [("thread/unarchive", {"threadId": "task-a"})]
+        )
+
+    def test_show_archived_tasks_opens_restore_selector(self):
+        self.bridge.STATE_PATH.write_text("{}", encoding="utf-8")
+        self.bridge.archived_tasks = lambda user_id: self.tasks()
+        self.bridge.update_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-show-archived",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "message_id": "om_task_card",
+                "token": "token-test",
+                "action_tag": "button",
+                "action_value": json.dumps({"action": "show_archived_tasks"}),
+            }
+        )
+
+        card = self.bridge.update_card.call_args.args[1]
+        selector_names = {
+            item.get("name")
+            for item in card["body"]["elements"]
+            if item.get("tag") == "select_static"
+        }
+        self.assertEqual(
+            selector_names,
+            {"archived_project_selector", "archived_task_selector"},
+        )
+
+    def test_archived_task_selection_adds_restore_button(self):
+        tasks = self.tasks()
+        original = self.bridge.build_task_card(
+            tasks,
+            None,
+            "deepori",
+            archived=True,
+        )
+        self.bridge.archived_tasks = lambda user_id: tasks
+        self.bridge.update_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-select-archived",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "action_tag": "select_static",
+                "action_name": "archived_task_selector",
+                "option": "task-a",
+                "token": "token-test",
+                "card_content": json.dumps(original),
+            }
+        )
+
+        card = self.bridge.update_card.call_args.args[1]
+        self.assertTrue(
+            any(
+                item.get("text", {}).get("content") == "恢复这个 Task"
+                for item in card["body"]["elements"]
+            )
+        )
 
     def test_archive_callback_blocks_an_active_task(self):
         task = self.tasks()[0]
@@ -377,10 +574,7 @@ class RemoteFeatureTests(unittest.TestCase):
         ]
         task_id = "019ff634-60a0-7c22-a011-111111111111"
         self.bridge.codex_app_server_requests = mock.Mock(
-            side_effect=[
-                [{"thread": {"id": task_id}}],
-                [{}],
-            ]
+            return_value=[{"thread": {"id": task_id}}, {}]
         )
 
         task = self.bridge.create_codex_task("ou_admin", "deepori", " Ori Home ")
@@ -389,19 +583,54 @@ class RemoteFeatureTests(unittest.TestCase):
             task,
             {"id": task_id, "title": "Ori Home", "project": "deepori"},
         )
-        first_request = self.bridge.codex_app_server_requests.call_args_list[0].args[0]
+        self.bridge.codex_app_server_requests.assert_called_once()
+        first_request = self.bridge.codex_app_server_requests.call_args.args[0]
         self.assertEqual(first_request[0][0], "thread/start")
         self.assertEqual(first_request[0][1]["cwd"], "/tmp/deepori")
-        second_request = self.bridge.codex_app_server_requests.call_args_list[1].args[0]
+        self.assertNotIn("projectId", first_request[0][1])
+        second_request = first_request[1]
         self.assertEqual(
-            second_request,
-            [("thread/name/set", {"threadId": task_id, "name": "Ori Home"})],
+            second_request[0],
+            "thread/name/set",
+        )
+        self.assertEqual(
+            second_request[1]([{"thread": {"id": task_id}}]),
+            {"threadId": task_id, "name": "Ori Home"},
         )
 
     def test_create_task_rejects_project_outside_user_scope(self):
         self.bridge.ALLOWED_USERS["ou_admin"] = {"deepori"}
         with self.assertRaisesRegex(RuntimeError, "没有.*权限"):
             self.bridge.create_codex_task("ou_admin", "thesis", "Paper")
+
+    def test_first_completed_turn_restores_requested_task_name_once(self):
+        self.bridge.save_state(
+            {
+                "pending_task_names": {
+                    "ou_admin": {
+                        "task_id": "task-a",
+                        "title": "飞书桥接验收-临时",
+                    }
+                }
+            }
+        )
+        self.bridge.codex_app_server_requests = mock.Mock(return_value=[{}])
+
+        restored = self.bridge.restore_pending_task_name("ou_admin", "task-a")
+
+        self.assertTrue(restored)
+        self.bridge.codex_app_server_requests.assert_called_once_with(
+            [
+                (
+                    "thread/name/set",
+                    {"threadId": "task-a", "name": "飞书桥接验收-临时"},
+                )
+            ]
+        )
+        self.assertNotIn(
+            "ou_admin",
+            self.bridge.load_state().get("pending_task_names", {}),
+        )
 
     def test_project_selector_updates_same_card_and_persists_filter(self):
         tasks = self.tasks()

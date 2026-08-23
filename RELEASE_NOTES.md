@@ -1,5 +1,16 @@
 # Release Notes
 
+## 1.5.8 (build 20)
+
+- Creates and names a new Codex Task in one app-server session, using the current `thread/start` contract without the removed `projectId` field.
+- Keeps the requested project working directory on the first Feishu turn and restores the user-supplied Task title after Codex generates its first automatic title.
+- Resolves a newly created empty Task directly from the Codex state database while the Desktop sidebar catalog is still refreshing.
+- Adds an explicit “取消，不归档” action that leaves the current Task selected and performs no Codex archive call.
+- Lists authorized archived Tasks from the existing Task card and restores them through the official `thread/unarchive` app-server method.
+- Adds “撤销归档”“选择其他 Task”“新建 Task” actions to the completed archive card so users do not end in an unselected dead end.
+- Adds regression coverage for new-Task naming/directory preservation, active-versus-archived catalog filtering, cancel semantics, restore callbacks, and post-archive actions.
+- Supersedes the local-only `1.5.4`—`1.5.7` builds and public `1.5.3 (build 15)`; do not publish these fixes under a reused version/build pair.
+
 ## 1.5.3 (build 15)
 
 - Makes the durable WorkflowStore decision the only correctness authority before any auxiliary event deduplication, so a transient state failure or crash cannot consume a Feishu retry without resuming the workflow.

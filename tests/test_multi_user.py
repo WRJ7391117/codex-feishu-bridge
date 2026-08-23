@@ -1,6 +1,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest import mock
@@ -86,6 +87,146 @@ class MultiUserTests(unittest.TestCase):
 
         self.assertIsNone(self.bridge.selected_task("ou_member", state))
         self.assertNotIn("ou_member", state["selected"])
+
+    def test_new_empty_task_is_resolved_from_state_before_catalog_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.db"
+            state_db = Path(directory) / "state.db"
+            project_root = Path(directory) / "evolution"
+            project_root.mkdir()
+            resolved_project_root = str(project_root.resolve())
+            with sqlite3.connect(catalog) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE local_thread_catalog (
+                        thread_id TEXT,
+                        display_title TEXT,
+                        project_id TEXT,
+                        cwd TEXT,
+                        host_id TEXT,
+                        missing_candidate INTEGER
+                    )
+                    """
+                )
+            with sqlite3.connect(state_db) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE threads (
+                        id TEXT,
+                        name TEXT,
+                        title TEXT,
+                        project_id TEXT,
+                        cwd TEXT,
+                        archived INTEGER
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        "task-new",
+                        None,
+                        "飞书新建 Task",
+                        None,
+                        resolved_project_root,
+                        0,
+                    ),
+                )
+            self.bridge.DESKTOP_CATALOG_DB = catalog
+            self.bridge.state_db_path = lambda: state_db
+            self.bridge.desktop_project_names = lambda: {}
+            self.bridge.desktop_projects = lambda: [
+                {
+                    "id": "project-1",
+                    "name": "Evolution",
+                    "root": resolved_project_root,
+                }
+            ]
+
+            task = self.bridge.task_by_id("task-new", "ou_admin")
+
+        self.assertEqual(
+            task,
+            {
+                "id": "task-new",
+                "title": "飞书新建 Task",
+                "project": "Evolution",
+            },
+        )
+
+    def test_task_working_directory_uses_active_thread_cwd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_db = Path(directory) / "state.db"
+            project_root = Path(directory) / "evolution"
+            project_root.mkdir()
+            with sqlite3.connect(state_db) as connection:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT, cwd TEXT, archived INTEGER)"
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES (?, ?, ?)",
+                    ("task-new", str(project_root), 0),
+                )
+            self.bridge.state_db_path = lambda: state_db
+
+            working_directory = self.bridge.task_working_directory("task-new")
+
+        self.assertEqual(working_directory, str(project_root.resolve()))
+
+    def test_task_lists_separate_active_and_archived_threads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.db"
+            state_db = Path(directory) / "state.db"
+            project_root = Path(directory) / "evolution"
+            project_root.mkdir()
+            with sqlite3.connect(catalog) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE local_thread_catalog (
+                        thread_id TEXT,
+                        display_title TEXT,
+                        project_id TEXT,
+                        cwd TEXT,
+                        host_id TEXT,
+                        missing_candidate INTEGER,
+                        source_recency_at INTEGER
+                    )
+                    """
+                )
+                connection.executemany(
+                    "INSERT INTO local_thread_catalog VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        ("task-active", "Active", "project-1", str(project_root), "local", 0, 2),
+                        ("task-archived", "Archived", "project-1", str(project_root), "local", 0, 1),
+                    ],
+                )
+            with sqlite3.connect(state_db) as connection:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT, archived INTEGER, preview TEXT)"
+                )
+                connection.executemany(
+                    "INSERT INTO threads VALUES (?, ?, ?)",
+                    [
+                        ("task-active", 0, "preview"),
+                        ("task-archived", 1, "preview"),
+                    ],
+                )
+            self.bridge.DESKTOP_CATALOG_DB = catalog
+            self.bridge.state_db_path = lambda: state_db
+            self.bridge.desktop_project_names = lambda: {}
+            self.bridge.desktop_projects = lambda: [
+                {
+                    "id": "project-1",
+                    "name": "Evolution",
+                    "root": str(project_root.resolve()),
+                }
+            ]
+
+            active = self.bridge.recent_tasks("ou_admin")
+            archived = self.bridge.archived_tasks("ou_admin")
+
+        self.assertEqual([task["id"] for task in active], ["task-active"])
+        self.assertEqual([task["id"] for task in archived], ["task-archived"])
 
     def test_unauthorized_user_events_are_ignored(self):
         self.bridge.load_state = lambda: self.fail("unauthorized event read state")
