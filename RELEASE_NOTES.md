@@ -1,5 +1,13 @@
 # Release Notes
 
+## 1.5.9 (build 21)
+
+- Adds a visible “取消新建” button to the new-Task card and clears any pending title request without creating a Task.
+- Persists the type of each Bot menu card by message so project selectors still route correctly when Feishu omits both the control name and original card content.
+- Makes “在此项目新建” use the latest server-confirmed project selection, preventing a stale button payload from creating the Task in the previous project while a card patch is delayed.
+- Adds regression coverage for cancel semantics, missing selector metadata, and stale-button project selection.
+- Supersedes `1.5.8 (build 20)`; do not publish these fixes under a reused version/build pair.
+
 ## 1.5.8 (build 20)
 
 - Creates and names a new Codex Task in one app-server session, using the current `thread/start` contract without the removed `projectId` field.

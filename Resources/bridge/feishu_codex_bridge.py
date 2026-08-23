@@ -2136,7 +2136,7 @@ def send_card(
     user_id: str,
     card: dict[str, Any],
     kind: str,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, str | None]:
     command = [
         LARK_CLI,
         "--profile",
@@ -2163,8 +2163,8 @@ def send_card(
     )
     if not lark_succeeded(result):
         log(f"card send failed kind={kind} code={result.returncode}")
-        return False, None
-    return True, sent_chat_id(result.stdout)
+        return False, None, None
+    return True, sent_chat_id(result.stdout), sent_message_id(result.stdout)
 
 
 def update_card(token: str, card: dict[str, Any]) -> bool:
@@ -3490,6 +3490,7 @@ def build_task_card(
 def build_new_task_card(
     projects: list[str],
     selected_project: str | None = None,
+    canceled: bool = False,
 ) -> dict[str, Any]:
     active_project = (
         selected_project
@@ -3500,13 +3501,16 @@ def build_new_task_card(
         {
             "tag": "markdown",
             "content": (
+                "已取消新建流程，不会再等待 Task 标题。已经创建的 Task 不受影响。"
+                if canceled
+                else
                 "**选择新 Task 所属项目**\n确认项目后，Bot 会等待你发送 Task 标题。"
                 if projects
                 else "当前没有可用于新建 Task 的本地项目，请联系这台 Mac 的管理员。"
             ),
         }
     ]
-    if active_project:
+    if active_project and not canceled:
         elements.extend(
             [
                 {
@@ -3538,7 +3542,28 @@ def build_new_task_card(
                         }
                     ],
                 },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "取消新建"},
+                    "type": "default",
+                    "width": "fill",
+                    "behaviors": [
+                        {"type": "callback", "value": {"action": "cancel_new_task"}}
+                    ],
+                },
             ]
+        )
+    elif canceled:
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "返回 Task 选择"},
+                "type": "default",
+                "width": "fill",
+                "behaviors": [
+                    {"type": "callback", "value": {"action": "show_task_selector"}}
+                ],
+            }
         )
     return {
         "schema": "2.0",
@@ -3552,10 +3577,27 @@ def build_new_task_card(
             "title": {"tag": "plain_text", "content": "新建 Codex Task"},
             "subtitle": {
                 "tag": "plain_text",
-                "content": f"当前项目：{active_project}" if active_project else "没有可用项目",
+                "content": (
+                    "已取消"
+                    if canceled
+                    else f"当前项目：{active_project}"
+                    if active_project
+                    else "没有可用项目"
+                ),
             },
-            "template": "blue",
+            "template": "grey" if canceled else "blue",
             "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
+            "text_tag_list": (
+                [
+                    {
+                        "tag": "text_tag",
+                        "text": {"tag": "plain_text", "content": "已取消"},
+                        "color": "neutral",
+                    }
+                ]
+                if canceled
+                else []
+            ),
         },
         "body": {
             "direction": "vertical",
@@ -3844,6 +3886,55 @@ def send_task_card(
     )
 
 
+def card_context_type(card: dict[str, Any]) -> str:
+    elements = card.get("body", {}).get("elements", [])
+    names = {
+        str(element.get("name") or "")
+        for element in elements
+        if isinstance(element, dict) and element.get("tag") == "select_static"
+    }
+    if "new_task_project_selector" in names:
+        return "new_task"
+    if names & {"archived_project_selector", "archived_task_selector"}:
+        return "archived_tasks"
+    if names & {"project_selector", "task_selector"}:
+        return "tasks"
+    title = str(card.get("header", {}).get("title", {}).get("content") or "")
+    return "archive_task" if title == "归档 Codex Task" else ""
+
+
+def remember_card_context(
+    state: dict[str, Any],
+    user_id: str,
+    message_id: str,
+    card: dict[str, Any],
+) -> None:
+    context_type = card_context_type(card)
+    if not message_id.startswith("om_") or not context_type:
+        return
+    contexts = state.setdefault("card_contexts", {})
+    if not isinstance(contexts, dict):
+        contexts = {}
+    contexts.pop(message_id, None)
+    contexts[message_id] = {
+        "user_id": user_id,
+        "type": context_type,
+    }
+    state["card_contexts"] = dict(list(contexts.items())[-100:])
+    save_state(state)
+
+
+def card_context_for_event(
+    state: dict[str, Any],
+    user_id: str,
+    message_id: str,
+) -> str:
+    context = state.get("card_contexts", {}).get(message_id)
+    if not isinstance(context, dict) or context.get("user_id") != user_id:
+        return ""
+    return str(context.get("type") or "")
+
+
 def send_menu_card(
     user_id: str,
     state: dict[str, Any],
@@ -3851,13 +3942,15 @@ def send_menu_card(
     kind: str,
 ) -> bool:
     with _state_lock:
-        success, chat_id = send_card(
+        success, chat_id, message_id = send_card(
             user_id,
             card,
             kind,
         )
         if success and chat_id:
             authorize_chat(state, user_id, chat_id)
+        if success and message_id:
+            remember_card_context(state, user_id, message_id, card)
         return success
 
 
@@ -5699,6 +5792,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
             "archived_task_page",
             "clear_task_search",
             "new_task",
+            "cancel_new_task",
             "archive_task",
             "cancel_archive",
             "restore_task",
@@ -5745,9 +5839,22 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     )
                     save_state(state)
                     card = build_new_task_card(projects, selected_project)
+                elif action == "cancel_new_task":
+                    state.setdefault("pending_task_creations", {}).pop(user_id, None)
+                    save_state(state)
+                    card = build_new_task_card([], canceled=True)
+                    log("new task creation canceled")
                 elif action == "new_task":
-                    project = str(payload.get("project") or "")
+                    requested_project = str(payload.get("project") or "")
                     projects = set(available_project_names(user_id))
+                    latest_project = str(
+                        state.setdefault("last_projects", {}).get(user_id) or ""
+                    )
+                    project = (
+                        latest_project
+                        if latest_project in projects
+                        else requested_project
+                    )
                     if project not in projects:
                         return
                     state.setdefault("pending_task_creations", {})[user_id] = project
@@ -5845,6 +5952,10 @@ def handle_card_event(event: dict[str, Any]) -> None:
                         f"archived-{event_id}",
                     )
             token = str(event.get("token") or "")
+            if message_id:
+                with _state_lock:
+                    current_state = load_state()
+                    remember_card_context(current_state, user_id, message_id, card)
             if token and update_card(token, card):
                 return
             if message_id:
@@ -5887,6 +5998,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
         original_card = json.loads(str(event.get("card_content") or ""))
     except json.JSONDecodeError:
         original_card = None
+    with _state_lock:
+        context_type = card_context_for_event(load_state(), user_id, message_id)
     elements = (
         original_card.get("body", {}).get("elements", [])
         if isinstance(original_card, dict)
@@ -5897,7 +6010,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         and element.get("tag") == "select_static"
         and element.get("name") == "new_task_project_selector"
         for element in elements
-    )
+    ) or context_type == "new_task"
     if action_tag == "select_static" and (
         action_name == "new_task_project_selector"
         or (not action_name and recognized_new_task_card)
@@ -5918,6 +6031,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
             state.setdefault("last_projects", {})[user_id] = selected_value
             save_state(state)
             card = build_new_task_card(projects, selected_value)
+            if message_id:
+                remember_card_context(state, user_id, message_id, card)
         token = str(event.get("token") or "")
         if token and update_card(token, card):
             return
@@ -5931,7 +6046,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         and element.get("name")
         in {"archived_project_selector", "archived_task_selector"}
         for element in elements
-    )
+    ) or context_type == "archived_tasks"
     if action_tag == "select_static" and (
         action_name in {"archived_project_selector", "archived_task_selector"}
         or (not action_name and recognized_archived_card)
@@ -5986,6 +6101,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     state,
                     selected["id"],
                 )
+            if message_id:
+                remember_card_context(state, user_id, message_id, card)
         token = str(event.get("token") or "")
         if token and update_card(token, card):
             return
@@ -5999,7 +6116,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         and element.get("tag") == "select_static"
         and element.get("name") in {"project_selector", "task_selector"}
         for element in elements
-    )
+    ) or context_type == "tasks"
     if action_tag != "select_static":
         log(
             "card ignored reason=unsupported-action "
@@ -6060,6 +6177,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
             state.setdefault("last_projects", {})[user_id] = selected["project"]
             save_state(state)
             card = build_task_card(tasks, selected["id"], selected["project"])
+        if message_id:
+            remember_card_context(state, user_id, message_id, card)
     visible_count = len(
         tasks
         if action_name != "project_selector"

@@ -228,6 +228,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.send_card = lambda user_id, card, kind: (
             sent.append((user_id, card, kind)) or True,
             "oc_test",
+            "om_new_task_card",
         )
 
         self.bridge.handle_menu_event(
@@ -247,6 +248,12 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(
             [option["value"] for option in selector["options"]],
             ["deepori"],
+        )
+        self.assertTrue(
+            any(
+                item.get("text", {}).get("content") == "取消新建"
+                for item in sent[0][1]["body"]["elements"]
+            )
         )
 
     def test_new_task_card_project_selection_updates_creation_target(self):
@@ -283,6 +290,111 @@ class RemoteFeatureTests(unittest.TestCase):
         payload = button["behaviors"][0]["value"]
         self.assertEqual(payload, {"action": "new_task", "project": "thesis"})
 
+    def test_new_task_project_is_inferred_from_persisted_card_context(self):
+        self.bridge.ALLOWED_USERS["ou_admin"] = {"deepori", "Evolution"}
+        self.bridge.desktop_projects = lambda: [
+            {"id": "project-1", "name": "deepori", "root": "/tmp/deepori"},
+            {"id": "project-2", "name": "Evolution", "root": "/tmp/evolution"},
+        ]
+        self.bridge.save_state(
+            {
+                "card_contexts": {
+                    "om_new_task_card": {
+                        "user_id": "ou_admin",
+                        "type": "new_task",
+                    }
+                }
+            }
+        )
+        self.bridge.update_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-new-task-project-without-card",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "message_id": "om_new_task_card",
+                "action_tag": "select_static",
+                "option": "Evolution",
+                "token": "token-test",
+            }
+        )
+
+        state = self.bridge.load_state()
+        self.assertEqual(state["last_projects"]["ou_admin"], "Evolution")
+        updated = self.bridge.update_card.call_args.args[1]
+        self.assertEqual(
+            updated["header"]["subtitle"]["content"],
+            "当前项目：Evolution",
+        )
+        create = next(
+            item
+            for item in updated["body"]["elements"]
+            if item.get("text", {}).get("content") == "在此项目新建"
+        )
+        self.assertEqual(
+            create["behaviors"][0]["value"]["project"],
+            "Evolution",
+        )
+
+    def test_new_task_button_prefers_latest_selected_project(self):
+        self.bridge.ALLOWED_USERS["ou_admin"] = {"deepori", "Evolution"}
+        self.bridge.desktop_projects = lambda: [
+            {"id": "project-1", "name": "deepori", "root": "/tmp/deepori"},
+            {"id": "project-2", "name": "Evolution", "root": "/tmp/evolution"},
+        ]
+        self.bridge.save_state({"last_projects": {"ou_admin": "Evolution"}})
+        self.bridge.reply = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-new-task-stale-button",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "message_id": "om_new_task_card",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "new_task", "project": "deepori"}
+                ),
+            }
+        )
+
+        self.assertEqual(
+            self.bridge.load_state()["pending_task_creations"]["ou_admin"],
+            "Evolution",
+        )
+        self.assertIn("Evolution", self.bridge.reply.call_args.args[1])
+
+    def test_cancel_new_task_button_clears_pending_creation(self):
+        self.bridge.save_state(
+            {"pending_task_creations": {"ou_admin": "Evolution"}}
+        )
+        self.bridge.update_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-cancel-new-task",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "message_id": "om_new_task_card",
+                "token": "token-test",
+                "action_tag": "button",
+                "action_value": json.dumps({"action": "cancel_new_task"}),
+            }
+        )
+
+        state = self.bridge.load_state()
+        self.assertNotIn(
+            "ou_admin",
+            state.get("pending_task_creations", {}),
+        )
+        canceled = self.bridge.update_card.call_args.args[1]
+        self.assertEqual(canceled["header"]["subtitle"]["content"], "已取消")
+        self.assertIn(
+            "不会再等待 Task 标题",
+            canceled["body"]["elements"][0]["content"],
+        )
+
     def test_new_task_card_confirmation_waits_for_title(self):
         self.bridge.ALLOWED_USERS["ou_admin"] = {"deepori"}
         self.bridge.desktop_projects = lambda: [
@@ -317,6 +429,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.send_card = lambda user_id, card, kind: (
             sent.append((user_id, card, kind)) or True,
             "oc_test",
+            "om_archive_task_card",
         )
 
         self.bridge.handle_menu_event(
@@ -554,7 +667,9 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertIn("正在运行", self.bridge.reply.call_args.args[1])
 
     def test_task_management_menus_ignore_unauthorized_users(self):
-        self.bridge.send_card = mock.Mock(return_value=(True, "oc_test"))
+        self.bridge.send_card = mock.Mock(
+            return_value=(True, "oc_test", "om_task_card")
+        )
 
         for index, event_key in enumerate(("select_task", "new_task", "archive_task")):
             self.bridge.handle_menu_event(
