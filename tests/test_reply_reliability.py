@@ -142,6 +142,29 @@ class ReplyReliabilityTests(unittest.TestCase):
         self.assertEqual(pending[0]["text"], "最终结果")
         self.assertEqual(pending[0]["reason"], "飞书 API 网络连接失败")
 
+    def test_workflow_choice_queue_fsyncs_private_state_and_directory(self):
+        real_fsync = os.fsync
+        with mock.patch.object(
+            self.bridge.os,
+            "fsync",
+            side_effect=real_fsync,
+        ) as fsync:
+            self.bridge.queue_pending_reply(
+                "om_test",
+                "已记录你的选择",
+                "workflow-choice",
+                "飞书 API 网络连接失败",
+                now=100,
+            )
+
+        self.assertGreaterEqual(fsync.call_count, 2)
+        self.assertEqual(self.bridge.STATE_PATH.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.bridge.STATE_PATH.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(
+            list(self.bridge.STATE_PATH.parent.glob(f".{self.bridge.STATE_PATH.name}.*.tmp")),
+            [],
+        )
+
     def test_runtime_status_failure_is_not_persisted(self):
         with mock.patch.object(self.bridge, "reply", return_value=False):
             self.assertFalse(
@@ -195,6 +218,213 @@ class ReplyReliabilityTests(unittest.TestCase):
         self.assertEqual(item["attempts"], 1)
         self.assertEqual(item["reason"], "飞书 API 请求超时")
         self.assertEqual(item["next_attempt_at"], 145)
+
+    def test_failed_card_patch_is_persisted(self):
+        with mock.patch.object(
+            self.bridge.subprocess,
+            "run",
+            return_value=self.failure(
+                'API call failed: Get "https://open.feishu.cn/open-apis/im": EOF'
+            ),
+        ), mock.patch.object(self.bridge.time, "sleep"):
+            self.assertFalse(
+                self.bridge.patch_card("om_progress", {"version": "latest"})
+            )
+
+        pending = self.bridge.load_state()["pending_replies"]
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["operation"], "card_patch")
+        self.assertEqual(pending[0]["message_id"], "om_progress")
+        self.assertEqual(pending[0]["card"], {"version": "latest"})
+        self.assertEqual(pending[0]["reason"], "飞书 API 网络连接失败")
+
+    def test_card_patch_queue_keeps_only_latest_card_for_message(self):
+        self.bridge.queue_pending_card_patch(
+            "om_progress",
+            {"version": "old"},
+            "网络失败",
+            now=100,
+        )
+        self.bridge.queue_pending_card_patch(
+            "om_progress",
+            {"version": "latest"},
+            "网络失败",
+            now=101,
+        )
+
+        pending = self.bridge.load_state()["pending_replies"]
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["card"], {"version": "latest"})
+        self.assertEqual(pending[0]["created_at"], 100)
+        self.assertEqual(pending[0]["next_attempt_at"], 115)
+
+    def test_due_card_patch_is_delivered_and_removed(self):
+        self.bridge.queue_pending_card_patch(
+            "om_progress",
+            {"version": "latest"},
+            "网络失败",
+            now=100,
+        )
+
+        with mock.patch.object(
+            self.bridge,
+            "patch_card",
+            return_value=True,
+        ) as patch:
+            self.assertTrue(self.bridge.retry_pending_replies(now=115))
+
+        patch.assert_called_once_with(
+            "om_progress",
+            {"version": "latest"},
+            persist=False,
+        )
+        self.assertEqual(self.bridge.load_state()["pending_replies"], [])
+
+    def test_failed_background_card_patch_uses_backoff_without_text_reply(self):
+        self.bridge.queue_pending_card_patch(
+            "om_progress",
+            {"version": "latest"},
+            "网络失败",
+            now=100,
+        )
+
+        with mock.patch.object(
+            self.bridge,
+            "patch_card",
+            return_value=False,
+        ), mock.patch.object(self.bridge, "reply") as text_reply:
+            self.assertTrue(self.bridge.retry_pending_replies(now=115))
+
+        text_reply.assert_not_called()
+        item = self.bridge.load_state()["pending_replies"][0]
+        self.assertEqual(item["attempts"], 1)
+        self.assertEqual(item["next_attempt_at"], 145)
+
+    def test_due_queue_card_sets_progress_message_id(self):
+        entry = {
+            "queue_id": "queue-1",
+            "source_message_id": "om_source",
+            "task": {"id": "task-1", "project": "DeepOri", "title": "Ori Home"},
+            "image_keys": [],
+            "file_keys": [],
+            "ready": True,
+        }
+        self.bridge.save_state({"pending_inputs": [entry]})
+        self.bridge.queue_pending_queue_card(
+            "queue-1",
+            "om_source",
+            "网络失败",
+            now=100,
+        )
+
+        with mock.patch.object(
+            self.bridge,
+            "reply_card_message",
+            return_value=(True, "om_progress"),
+        ):
+            self.assertTrue(self.bridge.retry_pending_replies(now=115))
+
+        state = self.bridge.load_state()
+        self.assertEqual(state["pending_replies"], [])
+        self.assertEqual(
+            state["pending_inputs"][0]["progress_message_id"],
+            "om_progress",
+        )
+
+    def test_failed_background_queue_card_uses_backoff_without_text_reply(self):
+        entry = {
+            "queue_id": "queue-1",
+            "source_message_id": "om_source",
+            "task": {"id": "task-1", "project": "DeepOri", "title": "Ori Home"},
+            "image_keys": [],
+            "file_keys": [],
+            "ready": True,
+        }
+        self.bridge.save_state({"pending_inputs": [entry]})
+        self.bridge.queue_pending_queue_card(
+            "queue-1",
+            "om_source",
+            "网络失败",
+            now=100,
+        )
+
+        with mock.patch.object(
+            self.bridge,
+            "reply_card_message",
+            return_value=(False, None),
+        ), mock.patch.object(self.bridge, "reply") as text_reply:
+            self.assertTrue(self.bridge.retry_pending_replies(now=115))
+
+        text_reply.assert_not_called()
+        item = self.bridge.load_state()["pending_replies"][0]
+        self.assertEqual(item["attempts"], 1)
+        self.assertEqual(item["next_attempt_at"], 145)
+
+    def test_queue_card_is_discarded_after_input_has_started(self):
+        self.bridge.queue_pending_queue_card(
+            "queue-1",
+            "om_source",
+            "网络失败",
+            now=100,
+        )
+
+        with mock.patch.object(self.bridge, "reply_card_message") as reply_card:
+            self.assertTrue(self.bridge.retry_pending_replies(now=115))
+
+        reply_card.assert_not_called()
+        self.assertEqual(self.bridge.load_state()["pending_replies"], [])
+
+    def test_failed_local_image_is_copied_to_spool_and_retried(self):
+        source = Path(self.temporary.name) / "result.png"
+        source.write_bytes(b"\x89PNG\r\n\x1a\nresult")
+
+        self.assertTrue(
+            self.bridge.queue_pending_image(
+                "om_source",
+                str(source),
+                1,
+                "飞书 API 网络连接失败",
+                now=100,
+            )
+        )
+        pending = self.bridge.load_state()["pending_replies"]
+        spooled = Path(pending[0]["image"])
+        self.assertEqual(pending[0]["operation"], "image_reply")
+        self.assertNotEqual(spooled, source)
+        self.assertTrue(spooled.is_file())
+
+        source.unlink()
+        with mock.patch.object(self.bridge, "reply_image", return_value=True) as send:
+            self.assertTrue(self.bridge.retry_pending_replies(now=115))
+
+        send.assert_called_once_with("om_source", str(spooled), 1)
+        self.assertEqual(self.bridge.load_state()["pending_replies"], [])
+        self.assertFalse(spooled.exists())
+
+    def test_failed_image_retry_keeps_spool_and_advances_backoff(self):
+        source = Path(self.temporary.name) / "result.jpg"
+        source.write_bytes(b"\xff\xd8\xffresult")
+        self.bridge.queue_pending_image(
+            "om_source",
+            str(source),
+            2,
+            "飞书 API 调用失败",
+            now=100,
+        )
+        spooled = Path(self.bridge.load_state()["pending_replies"][0]["image"])
+
+        def fail(*_args):
+            self.bridge._last_reply_failure_reason = "飞书 API 请求超时"
+            return False
+
+        with mock.patch.object(self.bridge, "reply_image", side_effect=fail):
+            self.assertTrue(self.bridge.retry_pending_replies(now=115))
+
+        item = self.bridge.load_state()["pending_replies"][0]
+        self.assertEqual(item["attempts"], 1)
+        self.assertEqual(item["reason"], "飞书 API 请求超时")
+        self.assertEqual(item["next_attempt_at"], 145)
+        self.assertTrue(spooled.is_file())
 
 
 if __name__ == "__main__":

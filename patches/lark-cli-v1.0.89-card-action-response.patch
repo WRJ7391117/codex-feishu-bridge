@@ -1,0 +1,374 @@
+diff --git a/internal/event/adapter/lark/websocket/feishu.go b/internal/event/adapter/lark/websocket/feishu.go
+index 3c92c7a..74dfacc 100644
+--- a/internal/event/adapter/lark/websocket/feishu.go
++++ b/internal/event/adapter/lark/websocket/feishu.go
+@@ -4,23 +4,43 @@
+ package websocket
+ 
+ import (
++	"bytes"
+ 	"context"
++	"crypto/sha256"
+ 	"encoding/json"
+ 	"fmt"
+ 	"log"
++	"os"
++	"path/filepath"
+ 	"regexp"
+ 	"strings"
++	"syscall"
+ 	"time"
+ 
+ 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+ 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
+ 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
++	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
+ 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
+ 
+ 	"github.com/larksuite/cli/internal/event"
+ )
+ 
+ const maxEventBodyBytes = 1 << 20 // bound per-subscriber sendCh memory under runaway payloads
++const workflowDecisionInboxEnv = "CODEX_FEISHU_WORKFLOW_DECISION_INBOX"
++
++var syncWorkflowDecisionInbox = func(directory string) error {
++	directoryHandle, err := os.Open(directory)
++	if err != nil {
++		return err
++	}
++	err = directoryHandle.Sync()
++	closeErr := directoryHandle.Close()
++	if err == nil {
++		err = closeErr
++	}
++	return err
++}
+ 
+ type FeishuSource struct {
+ 	AppID     string
+@@ -36,9 +56,7 @@ func (s *FeishuSource) Start(ctx context.Context, eventTypes []string, emit func
+ 
+ 	rawHandler := s.buildRawHandler(emit)
+ 
+-	for _, et := range eventTypes {
+-		d.OnCustomizedEvent(et, rawHandler)
+-	}
++	s.registerHandlers(d, eventTypes, rawHandler)
+ 
+ 	opts := []larkws.ClientOption{larkws.WithEventHandler(d)}
+ 	if s.Domain != "" {
+@@ -65,6 +83,136 @@ func (s *FeishuSource) Start(ctx context.Context, eventTypes []string, emit func
+ 	}
+ }
+ 
++func (s *FeishuSource) registerHandlers(
++	d *dispatcher.EventDispatcher,
++	eventTypes []string,
++	rawHandler func(context.Context, *larkevent.EventReq) error,
++) {
++	for _, et := range eventTypes {
++		if et == "card.action.trigger" {
++			d.OnP2CardActionTrigger(func(
++				ctx context.Context,
++				event *callback.CardActionTriggerEvent,
++			) (*callback.CardActionTriggerResponse, error) {
++				if err := s.persistWorkflowDecision(event.EventReq); err != nil {
++					return nil, err
++				}
++				if err := rawHandler(ctx, event.EventReq); err != nil {
++					return nil, err
++				}
++				return &callback.CardActionTriggerResponse{}, nil
++			})
++			continue
++		}
++		d.OnCustomizedEvent(et, rawHandler)
++	}
++}
++
++func (s *FeishuSource) persistWorkflowDecision(e *larkevent.EventReq) error {
++	directory := os.Getenv(workflowDecisionInboxEnv)
++	if directory == "" || e.Body == nil {
++		return nil
++	}
++	var envelope struct {
++		Header struct {
++			EventID   string `json:"event_id"`
++			EventType string `json:"event_type"`
++		} `json:"header"`
++		Event struct {
++			Action struct {
++				Value map[string]interface{} `json:"value"`
++			} `json:"action"`
++		} `json:"event"`
++	}
++	if err := json.Unmarshal(e.Body, &envelope); err != nil {
++		return fmt.Errorf("parse workflow decision callback: %w", err)
++	}
++	if envelope.Event.Action.Value["action"] != "workflow_decision" {
++		return nil
++	}
++	if envelope.Header.EventType != "card.action.trigger" ||
++		envelope.Header.EventID == "" || len(envelope.Header.EventID) > 512 ||
++		strings.IndexFunc(envelope.Header.EventID, func(character rune) bool {
++			return character < 32
++		}) >= 0 || len(e.Body) > maxEventBodyBytes {
++		return fmt.Errorf("invalid workflow decision callback")
++	}
++	directoryInfo, err := os.Lstat(directory)
++	if err != nil {
++		return fmt.Errorf("open workflow decision inbox: %w", err)
++	}
++	directoryStat, ok := directoryInfo.Sys().(*syscall.Stat_t)
++	if !ok || !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 ||
++		directoryInfo.Mode().Perm() != 0700 || directoryStat.Uid != uint32(os.Getuid()) {
++		return fmt.Errorf("workflow decision inbox is unsafe")
++	}
++	digest := sha256.Sum256([]byte(envelope.Header.EventID))
++	destination := filepath.Join(directory, fmt.Sprintf("%x.json", digest))
++	validateExisting := func() error {
++		info, statErr := os.Lstat(destination)
++		if statErr != nil {
++			return statErr
++		}
++		fileStat, validOwner := info.Sys().(*syscall.Stat_t)
++		if !validOwner || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
++			info.Mode().Perm() != 0600 || fileStat.Uid != uint32(os.Getuid()) {
++			return fmt.Errorf("workflow decision inbox entry is unsafe")
++		}
++		existing, readErr := os.ReadFile(destination)
++		if readErr != nil || !bytes.Equal(existing, e.Body) {
++			return fmt.Errorf("workflow decision inbox event conflicts")
++		}
++		return nil
++	}
++	if _, err := os.Lstat(destination); err == nil {
++		if err := validateExisting(); err != nil {
++			return err
++		}
++		if err := syncWorkflowDecisionInbox(directory); err != nil {
++			return fmt.Errorf("sync workflow decision inbox: %w", err)
++		}
++		return nil
++	} else if !os.IsNotExist(err) {
++		return fmt.Errorf("inspect workflow decision inbox: %w", err)
++	}
++	temporary, err := os.CreateTemp(directory, ".workflow-decision-*.tmp")
++	if err != nil {
++		return fmt.Errorf("create workflow decision inbox entry: %w", err)
++	}
++	temporaryPath := temporary.Name()
++	defer os.Remove(temporaryPath)
++	err = temporary.Chmod(0600)
++	if err == nil {
++		_, err = temporary.Write(e.Body)
++	}
++	if err == nil {
++		err = temporary.Sync()
++	}
++	closeErr := temporary.Close()
++	if err == nil {
++		err = closeErr
++	}
++	if err != nil {
++		return fmt.Errorf("write workflow decision inbox entry: %w", err)
++	}
++	if err := os.Link(temporaryPath, destination); err != nil {
++		if os.IsExist(err) {
++			if err := validateExisting(); err != nil {
++				return err
++			}
++			if err := syncWorkflowDecisionInbox(directory); err != nil {
++				return fmt.Errorf("sync workflow decision inbox: %w", err)
++			}
++			return nil
++		}
++		return fmt.Errorf("publish workflow decision inbox entry: %w", err)
++	}
++	if err := syncWorkflowDecisionInbox(directory); err != nil {
++		return fmt.Errorf("sync workflow decision inbox: %w", err)
++	}
++	return nil
++}
++
+ // buildRawHandler is extracted from Start so unit tests can exercise it without a WS client.
+ func (s *FeishuSource) buildRawHandler(emit func(*event.RawEvent)) func(context.Context, *larkevent.EventReq) error {
+ 	return func(_ context.Context, e *larkevent.EventReq) error {
+diff --git a/internal/event/adapter/lark/websocket/feishu_ingress_test.go b/internal/event/adapter/lark/websocket/feishu_ingress_test.go
+index 49c9e4c..0c10d69 100644
+--- a/internal/event/adapter/lark/websocket/feishu_ingress_test.go
++++ b/internal/event/adapter/lark/websocket/feishu_ingress_test.go
+@@ -5,13 +5,173 @@ package websocket
+ 
+ import (
+ 	"context"
++	"crypto/sha256"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
+ 	"testing"
+ 
+ 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
++	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
++	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
+ 
+ 	event "github.com/larksuite/cli/internal/event"
+ )
+ 
++func TestCardActionUsesCallbackResponse(t *testing.T) {
++	s := &FeishuSource{}
++	d := dispatcher.NewEventDispatcher("", "")
++	var received *event.RawEvent
++	s.registerHandlers(
++		d,
++		[]string{"card.action.trigger"},
++		s.buildRawHandler(func(raw *event.RawEvent) { received = raw }),
++	)
++
++	payload := []byte(`{
++        "schema":"2.0",
++        "header":{"event_id":"evt-card","event_type":"card.action.trigger","create_time":"1"},
++        "event":{"operator":{"open_id":"ou_test"},"token":"token","action":{"tag":"select_static","option":"task"}}
++    }`)
++	response, err := d.Do(context.Background(), payload)
++	if err != nil {
++		t.Fatalf("dispatch card action: %v", err)
++	}
++	if received == nil || received.EventID != "evt-card" {
++		t.Fatalf("card action was not emitted: %#v", received)
++	}
++	if _, ok := response.(*callback.CardActionTriggerResponse); !ok {
++		t.Fatalf("response type = %T, want *callback.CardActionTriggerResponse", response)
++	}
++	body, err := json.Marshal(response)
++	if err != nil {
++		t.Fatalf("marshal response: %v", err)
++	}
++	if string(body) != `{}` {
++		t.Fatalf("response = %s, want {}", body)
++	}
++}
++
++func TestWorkflowCardActionIsDurableBeforeCallbackResponse(t *testing.T) {
++	directory := t.TempDir()
++	if err := os.Chmod(directory, 0700); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv(workflowDecisionInboxEnv, directory)
++	s := &FeishuSource{}
++	d := dispatcher.NewEventDispatcher("", "")
++	var received *event.RawEvent
++	s.registerHandlers(
++		d,
++		[]string{"card.action.trigger"},
++		s.buildRawHandler(func(raw *event.RawEvent) { received = raw }),
++	)
++	payload := []byte(`{
++        "schema":"2.0",
++        "header":{"event_id":"evt-workflow","event_type":"card.action.trigger","create_time":"1"},
++        "event":{"operator":{"open_id":"ou_test"},"action":{"tag":"button","value":{"action":"workflow_decision"}}}
++    }`)
++	response, err := d.Do(context.Background(), payload)
++	if err != nil {
++		t.Fatalf("dispatch workflow card action: %v", err)
++	}
++	if received == nil {
++		t.Fatal("workflow card action was not emitted")
++	}
++	if _, ok := response.(*callback.CardActionTriggerResponse); !ok {
++		t.Fatalf("response type = %T", response)
++	}
++	digest := sha256.Sum256([]byte("evt-workflow"))
++	path := filepath.Join(directory, fmt.Sprintf("%x.json", digest))
++	stored, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatalf("read durable workflow callback: %v", err)
++	}
++	if string(stored) != string(payload) {
++		t.Fatal("durable workflow callback does not match received payload")
++	}
++	info, err := os.Stat(path)
++	if err != nil {
++		t.Fatalf("stat durable workflow callback: %v", err)
++	}
++	if info.Mode().Perm() != 0600 {
++		t.Fatalf("durable workflow callback permissions = %v", info.Mode().Perm())
++	}
++	if _, err := d.Do(context.Background(), payload); err != nil {
++		t.Fatalf("duplicate workflow callback: %v", err)
++	}
++	entries, err := os.ReadDir(directory)
++	if err != nil || len(entries) != 1 {
++		t.Fatalf("durable workflow callback entries = %d, err = %v", len(entries), err)
++	}
++}
++
++func TestDuplicateWorkflowCardActionDoesNotACKWhenDirectorySyncFails(t *testing.T) {
++	directory := t.TempDir()
++	if err := os.Chmod(directory, 0700); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv(workflowDecisionInboxEnv, directory)
++	s := &FeishuSource{}
++	d := dispatcher.NewEventDispatcher("", "")
++	emitted := 0
++	s.registerHandlers(
++		d,
++		[]string{"card.action.trigger"},
++		s.buildRawHandler(func(_ *event.RawEvent) { emitted++ }),
++	)
++	payload := []byte(`{
++        "schema":"2.0",
++        "header":{"event_id":"evt-workflow-existing","event_type":"card.action.trigger","create_time":"1"},
++        "event":{"action":{"tag":"button","value":{"action":"workflow_decision"}}}
++    }`)
++	if _, err := d.Do(context.Background(), payload); err != nil {
++		t.Fatalf("first workflow callback: %v", err)
++	}
++
++	originalSync := syncWorkflowDecisionInbox
++	syncWorkflowDecisionInbox = func(string) error {
++		return fmt.Errorf("forced directory sync failure")
++	}
++	defer func() { syncWorkflowDecisionInbox = originalSync }()
++	response, err := d.Do(context.Background(), payload)
++	if err == nil || response != nil {
++		t.Fatalf("duplicate callback response = %T, err = %v", response, err)
++	}
++	if emitted != 1 {
++		t.Fatalf("duplicate callback emitted after failed directory sync: %d", emitted)
++	}
++}
++
++func TestWorkflowCardActionDoesNotACKWhenDurableInboxIsUnsafe(t *testing.T) {
++	directory := t.TempDir()
++	if err := os.Chmod(directory, 0755); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv(workflowDecisionInboxEnv, directory)
++	s := &FeishuSource{}
++	d := dispatcher.NewEventDispatcher("", "")
++	emitted := false
++	s.registerHandlers(
++		d,
++		[]string{"card.action.trigger"},
++		s.buildRawHandler(func(_ *event.RawEvent) { emitted = true }),
++	)
++	payload := []byte(`{
++        "schema":"2.0",
++        "header":{"event_id":"evt-workflow-unsafe","event_type":"card.action.trigger","create_time":"1"},
++        "event":{"action":{"tag":"button","value":{"action":"workflow_decision"}}}
++    }`)
++	response, err := d.Do(context.Background(), payload)
++	if err == nil || response != nil {
++		t.Fatalf("unsafe inbox response = %T, err = %v", response, err)
++	}
++	if emitted {
++		t.Fatal("workflow callback was emitted before durable persistence")
++	}
++}
++
+ // The websocket ingress is the only place that parses the envelope header;
+ // every canonical fact consumers rely on must be captured here, once.
+ func TestBuildRawHandler_ParsesCanonicalHeaderOnce(t *testing.T) {

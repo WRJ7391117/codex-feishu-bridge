@@ -299,16 +299,32 @@ class ImageReplyTests(unittest.TestCase):
             self.bridge.rollout_path_for_task = lambda thread_id: None
             self.bridge.cli_resume_preflight = lambda rollout: (True, "")
 
-            def complete(command, **kwargs):
-                output = Path(command[command.index("--output-last-message") + 1])
-                output.write_text("完成", encoding="utf-8")
-                return subprocess.CompletedProcess(command, 0, "", "")
+            class Process:
+                returncode = 0
+
+                def __init__(self, command):
+                    self.command = command
+
+                def communicate(self, **kwargs):
+                    output = Path(
+                        self.command[
+                            self.command.index("--output-last-message") + 1
+                        ]
+                    )
+                    output.write_text("完成", encoding="utf-8")
+                    return "", ""
+
+                def terminate(self):
+                    pass
+
+                def kill(self):
+                    pass
 
             with mock.patch.object(
                 self.bridge.subprocess,
-                "run",
-                side_effect=complete,
-            ) as run:
+                "Popen",
+                side_effect=lambda command, **kwargs: Process(command),
+            ) as popen:
                 success, message, images = self.bridge.run_codex(
                     "task-id",
                     "请分析",
@@ -318,7 +334,7 @@ class ImageReplyTests(unittest.TestCase):
             self.assertTrue(success)
             self.assertEqual(message, "完成")
             self.assertEqual(images, [])
-            command = run.call_args.args[0]
+            command = popen.call_args.args[0]
             self.assertEqual(command[command.index("--image") + 1], str(image.resolve()))
 
     def test_image_event_reaches_selected_task_and_temporary_file_is_cleaned(self):
@@ -335,6 +351,9 @@ class ImageReplyTests(unittest.TestCase):
         self.bridge.reply = lambda message_id, text, kind: replies.append(
             (kind, text)
         ) or True
+        self.bridge.reply_or_queue = self.bridge.reply
+        self.bridge.reply_card_message = lambda *args, **kwargs: (True, "om_progress")
+        self.bridge.patch_card = lambda *args, **kwargs: True
         downloaded = []
 
         def download(message_id, image_key, directory, index):
@@ -343,12 +362,12 @@ class ImageReplyTests(unittest.TestCase):
             downloaded.append(path)
             return path, ""
 
-        def run(thread_id, prompt, on_started, input_images):
+        def run(thread_id, prompt, **kwargs):
             self.assertEqual(thread_id, "task-id")
             self.assertEqual(prompt, "用户从飞书发送了以下图片。")
-            self.assertEqual(input_images, [str(downloaded[0])])
+            self.assertEqual(kwargs["input_images"], [str(downloaded[0])])
             self.assertTrue(downloaded[0].is_file())
-            on_started("正在运行")
+            kwargs["on_started"]("正在运行")
             return True, "图片已收到", []
 
         self.bridge.download_input_image = download
@@ -366,11 +385,12 @@ class ImageReplyTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual([kind for kind, _ in replies], [
-            "image-downloading",
-            "running",
-            "final",
-        ])
+        for _ in range(100):
+            if any(kind == "final" for kind, _ in replies):
+                break
+            self.bridge.time.sleep(0.01)
+
+        self.assertEqual([kind for kind, _ in replies], ["final"])
         self.assertIn("状态：已完成", replies[-1][1])
         self.assertFalse(downloaded[0].exists())
 

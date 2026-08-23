@@ -4,14 +4,18 @@
 
 - macOS 13+
 - Codex Desktop with at least one local Task
-- current `lark-cli`
+- current system `lark-cli` for Profile setup; the App bundles its patched runtime CLI
 - a Feishu custom app with Bot capability
 
 Run `lark-cli update` when the user has authorized an update. Configure a dedicated bot profile with `lark-cli config init --name codex-notify`; never pass an App Secret in process arguments.
 
+The installed bridge prefers its bundled `lark-cli 1.0.89-codex-feishu.2`. It registers `card.action.trigger` with the SDK's card-action handler and durably spools Ori One workflow decisions before returning Feishu's synchronous callback response. The system CLI and bundled CLI share the same Profile and Keychain credentials. General bridge use may explicitly override `lark_cli_path`, but workflow mode fails closed unless it uses the bundled CLI.
+
+Source release `1.5.3 (build 15)` supersedes `1.5.2 (build 14)`, installed baseline `1.5.1 (build 13)`, and the earlier planned `1.4.3` upgrade. Do not downgrade it or overwrite it with a different build carrying the same version.
+
 ## Feishu console
 
-Enable long-connection delivery and subscribe to `im.message.receive_v1` and `application.bot.menu_v6`. Enable callback configuration for `card.action.trigger`. Add a custom Bot menu item named “选择 Task”, choose the push-event action, and set its Event Key to `select_task`.
+Enable long-connection delivery and subscribe to `im.message.receive_v1` and `application.bot.menu_v6`. Enable callback configuration for `card.action.trigger`. Add three custom Bot menu items, all using the push-event action: “选择 Task” with Event Key `select_task`, “新建 Task” with `new_task`, and “归档 Task” with `archive_task`. Keep the same three values in the Mac App configuration.
 
 The bot needs message receive/read/send permissions. Incoming image support also requires permission to read the matching message resource; `im:resource` is needed to upload result images. Follow `missing_scopes` from lark-cli rather than guessing broader permissions.
 
@@ -24,8 +28,43 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 Use the resulting `sender_id` in the App's configuration window. Add each approved user separately and give them either `*` or an exact comma-separated list of Codex Desktop sidebar project names. Existing single-user configs are read as that user with `*`; saving from v1.2.0 migrates them to `allowed_users` while retaining the legacy sender field for rollback.
 
+When self-service access requests are enabled, an unknown user may message the Bot in P2P. This records a pending request only. The Mac owner must open the App, choose “配置授权”, and assign exact projects before saving; never populate `*` automatically.
+
 ## Install
 
 Run `scripts/install-latest.sh` from this skill after explicit authorization, or download the latest release manually. The installer places the App in `/Applications` when writable, otherwise in `~/Applications`. The App installs runtime files under `~/Library/Application Support/Codex Feishu Bridge/` and preserves an existing config and Task state.
 
 On an existing legacy installation, first launch migrates the old Profile/sender/chat settings and replaces `com.openai.codex.feishu-bridge` with `com.deepori.codex-feishu-bridge`. The old plist is retained as a `.migrated-backup` file.
+
+The installer also replaces the legacy `~/.codex/hooks/feishu_bridge_control.sh` wrapper with the current `com.deepori.codex-feishu-bridge` control script. Before copying any runtime file, it validates every required package resource, the bundled CLI, and all existing config/state/log/runtime destinations with lstat/open checks. Unsafe symlinks, non-regular files, or foreign ownership stop installation. It restricts private directories and files to `0700`/`0600`, then stages runtime files as a complete set and rolls them back on replacement failure. It does not start a bridge that was previously stopped.
+
+## Optional workflow notifications
+
+Keep workflow notifications disabled until the dedicated Codex Task exists. Do not use generic `jq` or command arguments to edit local identifiers. The installed `workflow-config --enable` reads only the dedicated Task UUID from stdin, selects the existing legacy sender only when it is already allowlisted, and leaves Chat unguessed. A returned Chat is associated with the durable notification record after the first card is sent.
+
+```bash
+support="$HOME/Library/Application Support/Codex Feishu Bridge"
+"$support/workflow-config" --status
+read -r workflow_task_id
+printf '%s\n' "$workflow_task_id" | "$support/workflow-config" --enable
+unset workflow_task_id
+```
+
+The config tool prints only `configured`, `disabled`, or `invalid`. `workflow-config --disable` writes the disabled state while preserving any existing local binding. The bridge reads config only at process start, so restart it once from the App control window after either enabling or disabling before checking health.
+
+Validate before a real send:
+
+```bash
+support="$HOME/Library/Application Support/Codex Feishu Bridge"
+"$support/workflow-notify" --health
+"$support/workflow-notify" --dry-run < event.json
+"$support/workflow-notify" --status
+```
+
+Only the final command without `--dry-run` enqueues a new proactive notification. `--retry-outbox` can cause a due queued item to make a real API/IPC attempt, so treat it as a state-changing operation.
+
+With the user present for the required end-to-end check, run `workflow-notify --roundtrip-test`. It creates a unique `TEST-ROUNDTRIP` card. Its reply enters the fixed Codex Task once, patches the completed card once, and only reports a test receipt: it must not call Neon, `resolve-attention`, or the orchestrator; edit files; or lease/advance a `ONE-*` task.
+
+The bridge alone owns the one 24-hour reminder for an unanswered decision. Keep reminder generation disabled in Neon and the deterministic runner.
+
+The App automatically checks the latest GitHub Release when its control window opens. Source builds are ad-hoc by default. A release operator with a Developer ID certificate and a `notarytool` Keychain profile can set `CODE_SIGN_IDENTITY` and `NOTARY_PROFILE`; the build then enables hardened runtime, waits for notarization, staples the ticket, and regenerates the archive plus SHA-256 manifest. Never claim notarization when those credentials were not used.

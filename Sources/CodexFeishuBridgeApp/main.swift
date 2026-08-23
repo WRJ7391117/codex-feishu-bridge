@@ -21,11 +21,21 @@ private struct AuthorizedUserDraft: Identifiable {
     }
 }
 
+private struct AccessRequestDraft: Identifiable {
+    var id: String { openID }
+    let name: String
+    let openID: String
+}
+
 private final class BridgeController {
     let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Codex Feishu Bridge", isDirectory: true)
 
     var configURL: URL { supportDirectory.appendingPathComponent("config.json") }
+    var stateURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/feishu-bridge/state.json")
+    }
     var logURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/log/feishu-bridge.log")
@@ -42,8 +52,12 @@ private final class BridgeController {
         }
         let runtimeFiles = [
             "feishu_codex_bridge.py": "bridge.py",
+            "workflow_notifications.py": "workflow_notifications.py",
+            "workflow_notify.py": "workflow-notify",
+            "workflow_config.py": "workflow-config",
             "control.sh": "control.sh",
             "diagnose.sh": "diagnose.sh",
+            "lark-cli": "lark-cli",
         ]
         return runtimeFiles.allSatisfy { bundledName, installedName in
             let bundled = bundledBridgeDirectory.appendingPathComponent(bundledName)
@@ -92,6 +106,46 @@ private final class BridgeController {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
     }
 
+    func pendingAccessRequests() -> [AccessRequestDraft] {
+        guard let data = try? Data(contentsOf: stateURL),
+              let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let requests = state["access_requests"] as? [[String: Any]] else {
+            return []
+        }
+        return requests.compactMap { request in
+            guard let openID = request["open_id"] as? String,
+                  openID.hasPrefix("ou_") else {
+                return nil
+            }
+            return AccessRequestDraft(
+                name: request["name"] as? String ?? "",
+                openID: openID
+            )
+        }
+    }
+
+    func removeAccessRequests(openIDs: Set<String>) throws {
+        guard !openIDs.isEmpty,
+              let data = try? Data(contentsOf: stateURL),
+              var state = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let requests = state["access_requests"] as? [[String: Any]] else {
+            return
+        }
+        state["access_requests"] = requests.filter { request in
+            guard let openID = request["open_id"] as? String else { return false }
+            return !openIDs.contains(openID)
+        }
+        let encoded = try JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys])
+        var payload = encoded
+        payload.append(0x0A)
+        try FileManager.default.createDirectory(
+            at: stateURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try payload.write(to: stateURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
+    }
+
     private func run(_ executable: String, _ arguments: [String]) -> CommandResult {
         guard FileManager.default.isExecutableFile(atPath: executable) else {
             return CommandResult(status: 1, output: "找不到可执行文件：\(executable)")
@@ -123,17 +177,22 @@ private final class BridgeViewModel: ObservableObject {
     @Published var isRunning = false
     @Published var profileName = "codex-notify"
     @Published var authorizedUserCount = 0
+    @Published var pendingAccessRequests: [AccessRequestDraft] = []
     @Published var showConfiguration = false
     @Published var showDiagnosis = false
     @Published var diagnosisPassed = false
     @Published var diagnosisText = ""
     @Published var alertTitle = ""
     @Published var alertMessage: String?
+    @Published var availableVersion = ""
+    @Published var updateURL: URL?
 
     @Published var draftProfile = "codex-notify"
     @Published var draftUsers = [AuthorizedUserDraft()]
     @Published var draftChats = ""
     @Published var draftEventKey = "select_task"
+    @Published var draftNewTaskEventKey = "new_task"
+    @Published var draftArchiveTaskEventKey = "archive_task"
 
     init(bridge: BridgeController) {
         self.bridge = bridge
@@ -145,6 +204,62 @@ private final class BridgeViewModel: ObservableObject {
         let config = bridge.readConfig()
         profileName = String(describing: config["lark_profile"] ?? "codex-notify")
         authorizedUserCount = configuredUsers(from: config).count
+        pendingAccessRequests = bridge.pendingAccessRequests()
+    }
+
+    func checkForUpdates(manual: Bool = false) {
+        guard let url = URL(string: "https://api.github.com/repos/WRJ7391117/codex-feishu-bridge/releases/latest") else {
+            return
+        }
+        var request = URLRequest(url: url)
+        request.setValue("Codex-Feishu-Bridge", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
+            guard let self else { return }
+            guard error == nil,
+                  let data,
+                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rawTag = payload["tag_name"] as? String else {
+                if manual {
+                    Task { @MainActor in
+                        self.presentError(
+                            title: "检查更新失败",
+                            message: "无法读取 GitHub Releases，请稍后重试。"
+                        )
+                    }
+                }
+                return
+            }
+            let latest = rawTag.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+            let current = Bundle.main.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString"
+            ) as? String ?? "0.0.0"
+            let assets = payload["assets"] as? [[String: Any]] ?? []
+            let assetURL = assets.first(where: {
+                ($0["name"] as? String) == "Codex-Feishu-Bridge-macOS-universal.zip"
+            })?["browser_download_url"] as? String
+            let releaseURL = assetURL ?? payload["html_url"] as? String
+            Task { @MainActor in
+                if latest.compare(current, options: .numeric) == .orderedDescending {
+                    self.availableVersion = latest
+                    self.updateURL = releaseURL.flatMap(URL.init(string:))
+                    if manual {
+                        self.alertTitle = "发现新版本 v\(latest)"
+                        self.alertMessage = "可从 GitHub Releases 下载正式安装包。"
+                    }
+                } else if manual {
+                    self.alertTitle = "已是最新版本"
+                    self.alertMessage = "当前版本 v\(current)。"
+                }
+            }
+        }.resume()
+    }
+
+    func openUpdate() {
+        if let updateURL {
+            NSWorkspace.shared.open(updateURL)
+        } else {
+            checkForUpdates(manual: true)
+        }
     }
 
     func toggleBridge() {
@@ -161,6 +276,7 @@ private final class BridgeViewModel: ObservableObject {
 
     func prepareConfiguration() {
         let config = bridge.readConfig()
+        pendingAccessRequests = bridge.pendingAccessRequests()
         draftProfile = String(describing: config["lark_profile"] ?? "codex-notify")
         draftUsers = configuredUsers(from: config)
         if draftUsers.isEmpty {
@@ -168,12 +284,20 @@ private final class BridgeViewModel: ObservableObject {
         }
         draftChats = (config["allowed_chat_ids"] as? [String] ?? []).joined(separator: ",")
         draftEventKey = String(describing: config["task_menu_event_key"] ?? "select_task")
+        draftNewTaskEventKey = String(
+            describing: config["new_task_menu_event_key"] ?? "new_task"
+        )
+        draftArchiveTaskEventKey = String(
+            describing: config["archive_task_menu_event_key"] ?? "archive_task"
+        )
         showConfiguration = true
     }
 
     func saveConfiguration() {
         let profile = draftProfile.trimmingCharacters(in: .whitespacesAndNewlines)
         let eventKey = draftEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newTaskEventKey = draftNewTaskEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let archiveTaskEventKey = draftArchiveTaskEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !profile.isEmpty else {
             presentError(title: "配置未保存", message: "lark-cli Profile 不能为空。")
             return
@@ -212,16 +336,29 @@ private final class BridgeViewModel: ObservableObject {
             )
             return
         }
-        saveConfiguration(profile: profile, users: users, eventKey: eventKey)
+        saveConfiguration(
+            profile: profile,
+            users: users,
+            eventKey: eventKey,
+            newTaskEventKey: newTaskEventKey,
+            archiveTaskEventKey: archiveTaskEventKey
+        )
     }
 
     private func saveConfiguration(
         profile: String,
         users: [(name: String, openID: String, projects: [String], index: Int)],
-        eventKey: String
+        eventKey: String,
+        newTaskEventKey: String,
+        archiveTaskEventKey: String
     ) {
-        guard !eventKey.isEmpty else {
-            presentError(title: "配置未保存", message: "机器人菜单 Event Key 不能为空。")
+        let menuEventKeys = [eventKey, newTaskEventKey, archiveTaskEventKey]
+        guard menuEventKeys.allSatisfy({ !$0.isEmpty }) else {
+            presentError(title: "配置未保存", message: "三个机器人菜单 Event Key 都不能为空。")
+            return
+        }
+        guard Set(menuEventKeys).count == menuEventKeys.count else {
+            presentError(title: "配置未保存", message: "三个机器人菜单 Event Key 不能重复。")
             return
         }
 
@@ -240,12 +377,15 @@ private final class BridgeViewModel: ObservableObject {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         config["task_menu_event_key"] = eventKey
+        config["new_task_menu_event_key"] = newTaskEventKey
+        config["archive_task_menu_event_key"] = archiveTaskEventKey
         config["max_prompt_chars"] = config["max_prompt_chars"] ?? 12000
         config["max_reply_chars"] = config["max_reply_chars"] ?? 3000
 
         do {
             let wasRunning = bridge.isRunning()
             try bridge.writeConfig(config)
+            try bridge.removeAccessRequests(openIDs: Set(users.map(\.openID)))
             if wasRunning {
                 let result = bridge.control("restart")
                 if result.status != 0 {
@@ -282,9 +422,11 @@ private final class BridgeViewModel: ObservableObject {
     func openLog() {
         let directory = bridge.logURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         if !FileManager.default.fileExists(atPath: bridge.logURL.path) {
             FileManager.default.createFile(atPath: bridge.logURL.path, contents: nil)
         }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: bridge.logURL.path)
         NSWorkspace.shared.open(bridge.logURL)
     }
 
@@ -303,6 +445,27 @@ private final class BridgeViewModel: ObservableObject {
     func removeUser(id: UUID) {
         guard draftUsers.count > 1 else { return }
         draftUsers.removeAll { $0.id == id }
+    }
+
+    func prepareAccessRequest(_ request: AccessRequestDraft) {
+        if !draftUsers.contains(where: { $0.openID == request.openID }) {
+            draftUsers.append(
+                AuthorizedUserDraft(
+                    name: request.name,
+                    openID: request.openID,
+                    projects: ""
+                )
+            )
+        }
+    }
+
+    func denyAccessRequest(_ request: AccessRequestDraft) {
+        do {
+            try bridge.removeAccessRequests(openIDs: [request.openID])
+            pendingAccessRequests = bridge.pendingAccessRequests()
+        } catch {
+            presentError(title: "申请未处理", message: error.localizedDescription)
+        }
     }
 
     private func configuredUsers(from config: [String: Any]) -> [AuthorizedUserDraft] {
@@ -371,7 +534,10 @@ private struct MainView: View {
         } message: {
             Text(model.alertMessage ?? "")
         }
-        .onAppear { model.refresh() }
+        .onAppear {
+            model.refresh()
+            model.checkForUpdates()
+        }
     }
 
     private var header: some View {
@@ -439,6 +605,12 @@ private struct MainView: View {
                 Divider()
                 infoRow(icon: "person.2", title: "授权用户", value: "\(model.authorizedUserCount) 位")
                 Divider()
+                infoRow(
+                    icon: "person.badge.clock",
+                    title: "待审批申请",
+                    value: "\(model.pendingAccessRequests.count) 条"
+                )
+                Divider()
                 infoRow(icon: "dot.radiowaves.left.and.right", title: "飞书事件", value: "3 个监听器")
                 Divider()
                 infoRow(icon: "sidebar.left", title: "Task 来源", value: "Codex Desktop 左侧栏")
@@ -455,6 +627,18 @@ private struct MainView: View {
                 actionButton("运行诊断", icon: "stethoscope") { model.runDiagnosis() }
                 actionButton("安装/更新后台组件", icon: "arrow.triangle.2.circlepath") {
                     model.installComponents()
+                }
+                actionButton(
+                    model.availableVersion.isEmpty
+                        ? "检查 App 更新"
+                        : "下载 App 更新 v\(model.availableVersion)",
+                    icon: "arrow.down.app"
+                ) {
+                    if model.availableVersion.isEmpty {
+                        model.checkForUpdates(manual: true)
+                    } else {
+                        model.openUpdate()
+                    }
                 }
                 HStack(spacing: 10) {
                     Button("打开日志") { model.openLog() }
@@ -512,7 +696,41 @@ private struct ConfigurationView: View {
             Form {
                 TextField("lark-cli Profile", text: $model.draftProfile)
                 TextField("允许的群 Chat ID", text: $model.draftChats)
-                TextField("机器人菜单 Event Key", text: $model.draftEventKey)
+                TextField("选择 Task Event Key", text: $model.draftEventKey)
+                TextField("新建 Task Event Key", text: $model.draftNewTaskEventKey)
+                TextField("归档 Task Event Key", text: $model.draftArchiveTaskEventKey)
+            }
+
+            if !model.pendingAccessRequests.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("待审批访问申请")
+                        .font(.headline)
+                    ForEach(model.pendingAccessRequests) { request in
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(request.name.isEmpty ? "飞书用户" : request.name)
+                                Text(request.openID)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                            Spacer()
+                            Button("拒绝", role: .destructive) {
+                                model.denyAccessRequest(request)
+                            }
+                            Button("配置授权") {
+                                model.prepareAccessRequest(request)
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        .padding(10)
+                        .background(Color.orange.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    Text("点击“配置授权”后，必须填写明确项目并保存；留空不会获得权限。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             HStack {
@@ -561,7 +779,7 @@ private struct ConfigurationView: View {
             }
         }
         .padding(26)
-        .frame(width: 680, height: 560)
+        .frame(width: 680, height: model.pendingAccessRequests.isEmpty ? 560 : 680)
     }
 }
 

@@ -1,32 +1,52 @@
 # Architecture
 
-The bridge has five independent layers:
+The bridge has six independent layers:
 
 1. Feishu app: Bot permissions, events, callbacks, and the custom menu.
-2. lark-cli: one bot profile and three long-running event consumers.
+2. bundled lark-cli: one bot profile and three long-running event consumers.
 3. `bridge.py`: user/chat allowlist, project authorization, task catalog, per-user state, deduplication, and replies.
 4. Codex Desktop: local task catalog, task rollout files, and desktop IPC.
 5. macOS runtime: menu bar App and user LaunchAgent.
+6. optional local workflow ingress: two 0600 Unix sockets for exact-schema notification submission and safe health/status/retry control.
 
 Event flow:
 
 ```text
-Feishu -> lark-cli event consume -> bridge.py -> optional image download -> Codex Desktop IPC
-Feishu <- lark-cli text/image reply <- bridge.py <- Codex task result
+Feishu -> lark-cli event consume -> bridge.py -> optional attachment download -> Codex Desktop IPC
+Feishu <- lark-cli card patch + text/image reply <- bridge.py <- Codex task state/result
+
+local deterministic runner -> workflow-notify -> durable workflow outbox -> Feishu card
+Feishu decision -> identity/chat/token check -> durable recovery -> fixed Codex Task IPC
 ```
 
 The bridge consumes:
 
-- `im.message.receive_v1` for text
-- `card.action.trigger` for the Task selector
-- `application.bot.menu_v6` for the “选择 Task” menu item
+- `im.message.receive_v1` for text, image, file, and audio input
+- `card.action.trigger` for project/Task selection, Task creation/archive confirmation, stop, and one-time approval decisions
+- `application.bot.menu_v6` for the separate “选择 Task”, “新建 Task”, and “归档 Task” menu items
 
-Selection is stored by permitted Feishu user, not by individual incoming message. It therefore persists across turns until the user selects a different Task. `state.json` also stores recent message IDs and bridge turn IDs for deduplication.
+Workflow ingress is disabled by default. Its notification socket accepts exactly seven top-level fields and only two statuses; it never accepts a recipient, Chat ID, App credential, or Codex Task ID from the caller. The workflow ID is fixed to `ori-one-mind`, action objects use the exact five-field contract, and the workbench URL is restricted to the private DeepOri automation page. The local 0600 config binds the workflow to one recipient and one dedicated Codex Task. A separate control socket exposes only health, aggregate status, and explicit outbox retry.
+
+Accepted workflow events are written to `workflow-state.json` before any Feishu API call. The workflow/event pair is the idempotency identity; a conflicting payload is rejected. The state file is a current-user `0600` regular file written with atomic replacement plus file and directory fsync. Existing-file read, JSON, schema, owner, mode, or symlink failures close the ingress rather than constructing an empty outbox. Network failures remain in the outbox and use the same Feishu idempotency key. A pending action request schedules exactly one reminder after 24 hours; the bridge is the sole reminder owner, so Neon and the runner must not create another reminder.
+
+Decision cards combine allowlisted identity, expected Chat, event identity, and a random one-time token. The bundled `lark-cli` first writes each workflow callback as a private, fsynced per-event inbox file and only then returns Feishu's callback ACK; bridge startup and its retry loop replay remaining files. The response is committed before the card patch or Desktop IPC, and the source event identity permits unfinished side effects to resume without creating a second recovery. Once the required card patches and any text reply are delivered or durably queued, auxiliary processed-state deduplication completes and the inbox file is removed. A direct reply to the card uses the Feishu parent message as its one-time correlation. A normal recovery record targets only the configured dedicated Task and tells it to run `resolve-attention` with the exact request, action label, and resolution before continuing. The isolated `TEST-ROUNDTRIP` record instead tells that Task to report a receipt only and explicitly forbids Neon, orchestrator, repository, and `ONE-*` task actions. Recovery messages retry in strict `created_at` FIFO order when that Task is busy or Desktop is offline. An uncertain recovery does not block unrelated initial notifications and is reconciled only by finding the same test or request/action/resolution signature in a user input in that Task's rollout; without evidence it is never submitted again blindly.
+
+Card actions differ from ordinary events at the WebSocket ingress. The bundled CLI registers `card.action.trigger` with `OnP2CardActionTrigger`, forwards the unchanged raw event into the local bus, and immediately returns a valid empty `CardActionTriggerResponse`. This synchronous response prevents Feishu error `108002`; the later complete-card update remains a separate delayed-update API call.
+
+Selection is stored by permitted Feishu user, not by individual incoming message. It therefore persists across turns until the user selects a different Task. The selection card only switches Tasks; creation and archive use separate Bot menu entries and dedicated cards. Archive requires a second confirmation and revalidates the current Task before changing state. `state.json` also stores recent message IDs, bridge turn IDs, access requests, Task search/page state, pending Task inputs, failed final replies/images, and undelivered queue/progress card updates. Its file mode is restricted to the current macOS user.
 
 Each allowlisted user has `allowed_projects`. `*` grants all projects; otherwise names match Codex Desktop sidebar project names exactly. Task access is checked when building the list and again immediately before selection or submission. Removing project access therefore invalidates a previously selected Task. Text, card, and Bot-menu events use their own `sender_id` or `operator_id`, so users do not share selection state.
 
-Text and image messages share the same authorization, selection, and deduplication path. For an image, the bridge extracts only resource keys rendered from that exact Feishu message, downloads each resource as the Bot into a per-turn temporary directory, validates containment, size, and image signature, and deletes the directory after the reply. The default limits are four input images and 20 MB per image.
+Text, image, file, and audio messages share the same authorization, selection, and deduplication path. Attachments are downloaded from resource keys belonging to that exact Feishu message into a per-turn temporary directory, checked for directory containment, size, and supported type, and deleted after the turn. The defaults are four images at 20 MB each and four files at 50 MB each; archives and executables are not accepted.
 
-The primary submission path uses Codex Desktop IPC so the new turn appears in the same desktop Task. Local images are represented as native `localImage` input items. If desktop IPC is unavailable, the bridge prefers the Desktop App's bundled Codex CLI over a PATH installation, passes images with `--image`, and reads the rollout's `session_meta.cli_version` before considering `codex exec resume`. It only uses the fallback when both versions are recognizable and the fallback CLI is not older than the Task record. An incompatible or unverifiable fallback is blocked without clearing the user's selected Task.
+Each accepted turn runs in a background worker so the event loop remains available for card callbacks. A run registry enforces one active turn per Task and a configurable global limit, defaulting to two concurrent Tasks. Later inputs enter a bounded persistent FIFO queue, retain their original Feishu reply target and attachment resource references, and start automatically when both limits allow. Their cards show queue position and allow cancellation. The first status reply is a Card 2.0 message; later phases patch that same message with immediate retry. If Feishu remains unreachable, the bridge persists the missing queue card or latest patch and retries it in the background without rerunning Codex. Patches for the same message are coalesced to the newest card, and an undelivered queue card is discarded once that queued input has started. A stop callback sets the local cancellation flag and, for Desktop runs, sends `thread-follower-interrupt-turn`. The bridge reports a run as stopped only after local CLI termination or Desktop confirmation.
 
-For results, the bridge sends text first and images afterward. It recognizes local or remote Markdown image references in the final message and also collects `image_generation_end.saved_path` events written during the current rollout segment. These image events do not contain a turn ID, so the bridge scopes them by the rollout byte offset recorded immediately before starting the only active turn. Local images are uploaded from their parent directory because lark-cli requires a relative `--image` path. The default per-turn limit is eight images.
+After a Desktop turn starts, the bridge follows its state and immediately asks the owner window to load and broadcast the complete history. Another Codex Desktop window may still show a writer-conflict notice while Feishu owns the active turn, but the Task history and live updates remain available as a read-only view.
+
+Desktop state snapshots can expose command, file-change, and permission requests. The bridge creates a separate approval card and forwards only an explicit one-time allow or deny response. It never grants a session-wide or permanent permission from Feishu.
+
+The primary submission path uses Codex Desktop IPC so the new turn appears in the same desktop Task. Local images use `localImage`, audio uses `localAudio`, and ordinary files use a local `mention` plus attachment context. If desktop IPC is unavailable, the bridge prefers the Desktop App's bundled Codex CLI over a PATH installation, passes images with `--image`, and supplies validated temporary file paths in a controlled prompt appendix. It reads the rollout's `session_meta.cli_version` before considering `codex exec resume`; incompatible or unverifiable fallbacks are blocked without clearing the selected Task.
+
+For results, the bridge sends text first and images afterward. It recognizes local or remote Markdown image references in the final message and also collects `image_generation_end.saved_path` events written during the current rollout segment. These image events do not contain a turn ID, so the bridge scopes them by the rollout byte offset recorded immediately before starting the only active turn. Local images are uploaded from their parent directory because lark-cli requires a relative `--image` path. A local image that cannot reach Feishu is copied to a private bounded spool, retried with the original idempotency key, and deleted only after confirmed delivery. The default per-turn limit is eight images.
+
+Task creation, naming, search, and archive use the published Codex app-server JSON-RPC protocol. The bridge still reads the Desktop catalog for the sidebar-facing project and Task list. Pinning is deliberately not implemented because the current app-server schema has no supported pin method; the bridge never writes Codex SQLite or Electron state directly.

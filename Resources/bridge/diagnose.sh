@@ -13,7 +13,9 @@ bridge="${support_dir}/bridge.py"
 print "Codex 飞书桥接诊断"
 print "=================="
 
-if [[ -x /opt/homebrew/bin/lark-cli ]]; then
+if [[ -x "${support_dir}/lark-cli" ]]; then
+    lark_cli="${support_dir}/lark-cli"
+elif [[ -x /opt/homebrew/bin/lark-cli ]]; then
     lark_cli=/opt/homebrew/bin/lark-cli
 elif [[ -x /usr/local/bin/lark-cli ]]; then
     lark_cli=/usr/local/bin/lark-cli
@@ -67,6 +69,23 @@ except Exception:
 active = max([int(app.get("active_consumers", 0)) for app in apps] + [0])
 raise SystemExit(0 if active == 3 else 1)
 PY
+
+    if [[ -x "${support_dir}/workflow-config" ]]; then
+        workflow_status="$("${support_dir}/workflow-config" --status 2>&1)" || result=1
+        print "workflow config: ${workflow_status}"
+    else
+        workflow_status="missing"
+        print "workflow config: missing client"
+        result=1
+    fi
+    if [[ "${workflow_status}" == "configured" ]]; then
+        if [[ -x "${support_dir}/workflow-notify" ]]; then
+            "${support_dir}/workflow-notify" --health 2>&1 || result=1
+        else
+            print "workflow endpoint: missing client"
+            result=1
+        fi
+    fi
 fi
 
 exit "${result}"

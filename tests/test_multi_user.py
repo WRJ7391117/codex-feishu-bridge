@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 BRIDGE_PATH = (
@@ -107,6 +108,52 @@ class MultiUserTests(unittest.TestCase):
                 "event_key": self.bridge.TASK_MENU_EVENT_KEY,
             }
         )
+
+    def test_unauthorized_p2p_user_creates_request_without_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.bridge.STATE_PATH = Path(directory) / "state.json"
+            self.bridge.LOG_PATH = Path(directory) / "bridge.log"
+            with mock.patch.object(self.bridge, "reply_card", return_value=True) as reply:
+                self.bridge.handle_message_event(
+                    {
+                        "sender_id": "ou_requester",
+                        "sender_name": "Miller",
+                        "sender_type": "user",
+                        "chat_type": "p2p",
+                        "chat_id": "oc_private",
+                        "message_id": "om_request",
+                        "message_type": "text",
+                        "content": "你好",
+                    }
+                )
+
+            request = self.bridge.load_state()["access_requests"][0]
+            self.assertEqual(request["open_id"], "ou_requester")
+            self.assertEqual(request["name"], "Miller")
+            self.assertFalse(self.bridge.authorized_user("ou_requester"))
+            reply.assert_called_once()
+
+    def test_repeat_access_request_updates_one_pending_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.bridge.STATE_PATH = Path(directory) / "state.json"
+            self.bridge.LOG_PATH = Path(directory) / "bridge.log"
+            with mock.patch.object(self.bridge, "reply_card", return_value=True):
+                event = {
+                    "sender_id": "ou_requester",
+                    "sender_type": "user",
+                    "chat_type": "p2p",
+                    "message_id": "om_request",
+                    "message_type": "text",
+                    "content": "你好",
+                }
+                self.bridge.handle_message_event(event)
+                event["message_id"] = "om_request_again"
+                self.bridge.handle_message_event(event)
+
+            self.assertEqual(
+                len(self.bridge.load_state()["access_requests"]),
+                1,
+            )
 
 
 if __name__ == "__main__":
