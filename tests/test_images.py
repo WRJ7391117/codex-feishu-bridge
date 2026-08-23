@@ -148,6 +148,40 @@ class ImageReplyTests(unittest.TestCase):
         self.assertEqual(command[command.index("--image") + 1], url)
         self.assertIsNone(run.call_args.kwargs["cwd"])
 
+    def test_extracts_only_supported_local_result_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "测试报告.pdf"
+            report.write_bytes(b"pdf")
+            text = (
+                f"报告：[下载](<{report}>)\n"
+                "网页：[说明](https://example.com/help)\n"
+                "缺失：[文件](/tmp/missing.docx)"
+            )
+
+            clean, files = self.bridge.prepare_result_files(text)
+
+            self.assertIn("文件见下方：下载", clean)
+            self.assertIn("[说明](https://example.com/help)", clean)
+            self.assertIn("[文件](/tmp/missing.docx)", clean)
+            self.assertEqual(files, [str(report.resolve())])
+
+    def test_local_file_reply_uses_relative_path_and_parent_cwd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.xlsx"
+            report.write_bytes(b"xlsx")
+            completed = subprocess.CompletedProcess([], 0, '{"ok":true}', "")
+
+            with mock.patch.object(
+                self.bridge.subprocess,
+                "run",
+                return_value=completed,
+            ) as run:
+                self.assertTrue(self.bridge.reply_file("om_test", str(report), 1))
+
+            command = run.call_args.args[0]
+            self.assertEqual(command[command.index("--file") + 1], "./report.xlsx")
+            self.assertEqual(run.call_args.kwargs["cwd"], report.parent.resolve())
+
     def test_extracts_input_image_keys_from_event_formats(self):
         self.assertEqual(
             self.bridge.input_image_keys('{"image_key":"img_v3_abc-123"}'),

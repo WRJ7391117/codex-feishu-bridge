@@ -364,6 +364,80 @@ class RemoteFeatureTests(unittest.TestCase):
             "当前 Task",
         )
 
+    def test_current_status_card_shows_recent_exchange_and_favorite(self):
+        card = self.bridge.build_current_status_card(
+            self.tasks()[0],
+            "空闲",
+            0,
+            0,
+            recent_exchange={"question": "请生成报告", "answer": "报告已经生成"},
+            is_favorite=True,
+        )
+
+        content = card["body"]["elements"][0]["content"]
+        self.assertIn("最近提问", content)
+        self.assertIn("请生成报告", content)
+        self.assertIn("最近回复", content)
+        self.assertIn("报告已经生成", content)
+        self.assertEqual(
+            [tag["text"]["content"] for tag in card["header"]["text_tag_list"]],
+            ["当前 Task", "已收藏", "空闲"],
+        )
+
+    def test_task_card_filters_favorites_and_recent_use(self):
+        favorites = self.bridge.build_task_card(
+            self.tasks(),
+            "task-a",
+            "deepori",
+            favorite_ids={"task-b"},
+            task_scope="favorites",
+        )
+        recent = self.bridge.build_task_card(
+            self.tasks(),
+            "task-a",
+            "deepori",
+            recent_ids=["task-b", "task-a"],
+            task_scope="recent",
+        )
+
+        favorite_selector = next(
+            item
+            for item in favorites["body"]["elements"]
+            if item.get("name") == "task_selector"
+        )
+        recent_selector = next(
+            item
+            for item in recent["body"]["elements"]
+            if item.get("name") == "task_selector"
+        )
+        self.assertEqual(
+            [option["value"] for option in favorite_selector["options"]],
+            ["task-b"],
+        )
+        self.assertEqual(
+            [option["value"] for option in recent_selector["options"]],
+            ["task-b", "task-a"],
+        )
+        scope_selector = next(
+            item
+            for item in recent["body"]["elements"]
+            if item.get("name") == "task_scope_selector"
+        )
+        self.assertEqual(scope_selector["initial_option"], "recent")
+
+    def test_record_task_exchange_is_private_per_user_and_task(self):
+        self.bridge.record_task_exchange("ou_admin", "task-a", question="第一问")
+        self.bridge.record_task_exchange("ou_admin", "task-a", answer="第一答")
+        self.bridge.record_task_exchange("ou_other", "task-b", question="第二问")
+
+        state = self.bridge.load_state()
+        self.assertEqual(
+            state["task_summaries"]["ou_admin"]["task-a"]["answer"],
+            "第一答",
+        )
+        self.assertNotIn("task-b", state["task_summaries"]["ou_admin"])
+        self.assertEqual(state["recent_task_ids"]["ou_admin"], ["task-a"])
+
     def test_archived_task_card_requires_selection_before_restore(self):
         initial = self.bridge.build_task_card(
             self.tasks(),
@@ -1048,6 +1122,81 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(updated["header"]["title"]["content"], "Task：Site")
         self.assertEqual(updated["header"]["subtitle"]["content"], "项目：deepori")
         self.assertIn("当前 Task 已切换", updated["body"]["elements"][0]["content"])
+
+    def test_task_scope_selector_switches_to_recent_use(self):
+        tasks = self.tasks()
+        original = self.bridge.build_task_card(tasks, "task-a", "deepori")
+        self.bridge.recent_tasks = lambda user_id: tasks
+        self.bridge.task_by_id = lambda task_id, user_id: next(
+            (task for task in tasks if task["id"] == task_id),
+            None,
+        )
+        self.bridge.save_state(
+            {
+                "selected": {"ou_admin": "task-a"},
+                "recent_task_ids": {"ou_admin": ["task-b", "task-a"]},
+            }
+        )
+        self.bridge.update_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-scope",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "action_tag": "select_static",
+                "action_name": "task_scope_selector",
+                "option": "recent",
+                "token": "token-test",
+                "card_content": json.dumps(original),
+            }
+        )
+
+        self.assertEqual(
+            self.bridge.load_state()["task_scopes"]["ou_admin"],
+            "recent",
+        )
+        card = self.bridge.update_card.call_args.args[1]
+        selector = next(
+            item
+            for item in card["body"]["elements"]
+            if item.get("name") == "task_selector"
+        )
+        self.assertEqual(
+            [option["value"] for option in selector["options"]],
+            ["task-b", "task-a"],
+        )
+
+    def test_favorite_button_toggles_current_task(self):
+        task = self.tasks()[0]
+        self.bridge.recent_tasks = lambda user_id: self.tasks()
+        self.bridge.selected_task = lambda user_id, state: task
+        self.bridge.update_card = mock.Mock(return_value=True)
+        self.bridge.refresh_user_task_identity_cards = mock.Mock()
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-favorite",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "message_id": "om_card",
+                "token": "token-test",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "toggle_task_favorite", "task_id": "task-a"}
+                ),
+            }
+        )
+
+        self.assertEqual(
+            self.bridge.load_state()["favorite_task_ids"]["ou_admin"],
+            ["task-a"],
+        )
+        card = self.bridge.update_card.call_args.args[1]
+        self.assertIn(
+            "已收藏",
+            [tag["text"]["content"] for tag in card["header"]["text_tag_list"]],
+        )
 
     def test_file_and_audio_are_native_desktop_inputs(self):
         with tempfile.TemporaryDirectory() as directory:

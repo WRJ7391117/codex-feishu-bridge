@@ -11,7 +11,7 @@ Run `lark-cli update` when the user has authorized an update. Configure a dedica
 
 The installed bridge prefers its bundled `lark-cli 1.0.89-codex-feishu.2`. It registers `card.action.trigger` with the SDK's card-action handler and durably spools Ori One workflow decisions before returning Feishu's synchronous callback response. The system CLI and bundled CLI share the same Profile and Keychain credentials. General bridge use may explicitly override `lark_cli_path`, but workflow mode fails closed unless it uses the bundled CLI.
 
-Source release `1.6.0 (build 23)` supersedes `1.5.10 (build 22)` and all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
+Source release `1.6.1 (build 24)` supersedes `1.6.0 (build 23)` and all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
 
 ## Feishu console
 

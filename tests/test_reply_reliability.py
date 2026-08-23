@@ -426,6 +426,34 @@ class ReplyReliabilityTests(unittest.TestCase):
         self.assertEqual(item["next_attempt_at"], 145)
         self.assertTrue(spooled.is_file())
 
+    def test_failed_local_file_is_copied_to_spool_and_retried(self):
+        source = Path(self.temporary.name) / "result.pdf"
+        source.write_bytes(b"pdf-result")
+
+        self.assertTrue(
+            self.bridge.queue_pending_file(
+                "om_source",
+                str(source),
+                1,
+                "飞书 API 网络连接失败",
+                now=100,
+            )
+        )
+        pending = self.bridge.load_state()["pending_replies"]
+        spooled = Path(pending[0]["file"])
+        self.assertEqual(pending[0]["operation"], "file_reply")
+        self.assertEqual(spooled.name, "result.pdf")
+        self.assertNotEqual(spooled, source)
+        self.assertTrue(spooled.is_file())
+
+        source.unlink()
+        with mock.patch.object(self.bridge, "reply_file", return_value=True) as send:
+            self.assertTrue(self.bridge.retry_pending_replies(now=115))
+
+        send.assert_called_once_with("om_source", str(spooled), 1)
+        self.assertEqual(self.bridge.load_state()["pending_replies"], [])
+        self.assertFalse(spooled.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

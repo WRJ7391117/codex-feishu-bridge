@@ -2,7 +2,7 @@
 
 把飞书 Bot 变成 Codex Desktop 的移动入口：在飞书里按项目选择桌面版左侧栏中的 Task，发送文字、图片、文件或音频，并接收可更新的运行状态和最终结果。
 
-版本说明：当前源码发布版本为 `1.6.0 (build 23)`，包含并取代 `1.5.10 (build 22)` 及此前版本；不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码发布版本为 `1.6.1 (build 24)`，包含并取代 `1.6.0 (build 23)` 及此前版本；不得用旧版本或同版本不同构建覆盖。
 
 ## 能力
 
@@ -10,7 +10,8 @@
 - 按 `项目 · Task 标题` 显示所有未归档本地 Task，每页 50 条，可翻页和按标题搜索
 - 选中后持续保持当前 Task，直到主动切换
 - 运行、排队、授权和结果卡片按真实关系显示“当前 Task”“运行 Task”“排队 Task”或“结果所属 Task”，避免切换后旧卡误称当前
-- 每位用户有一张持续更新的当前状态卡，集中显示项目、Task、运行/排队状态和更新时间
+- 每位用户有一张持续更新的当前状态卡，集中显示项目、Task、运行/排队状态、最近提问、最近回复和完成时间
+- Task 卡可切换“全部 Task / 最近使用 / 我的收藏”，收藏和最近记录按飞书用户独立保存
 - 指定飞书用户白名单，每位用户独立保持自己的当前 Task
 - 按 Codex 项目限制每位用户可查看和提交的 Task
 - 未授权用户可在 Bot 单聊中自助提交申请，由 Mac 机主在 App 中分配明确项目后生效
@@ -24,7 +25,8 @@
 - 可在进度卡中停止当前运行；停止结果会区分“已确认”和“未确认”
 - Codex 请求命令、文件修改或临时权限时，可在飞书卡片中“允许一次”或“拒绝”
 - 完成后先回复文字结果，再逐张回复 Codex 生成或引用的图片
-- 最终文字、结果图片和进度卡发送失败都会持久化；网络恢复后补发而不重跑 Codex
+- Codex 明确链接的 PDF、Office、文本和代码结果文件会自动作为飞书附件返回
+- 最终文字、结果图片、结果文件和进度卡发送失败都会持久化；网络恢复后补发而不重跑 Codex
 - 为经批准的本机自动化工作流主动发送里程碑卡片或人工决策卡；普通过程和通用 turn-complete 不发送
 - workflow 通知先写入本机持久 outbox，断网后按原幂等事件自动补发；人工决策只消费一次
 - 标准 macOS 主窗口集中显示事件消费者、运行 Task、排队消息、待补发、最近事件、配置、诊断和日志入口，并可设置 1～8 个并发 Task
@@ -51,7 +53,7 @@
                          ↓
                   Codex 执行与输出
                          ↓
-       lark-cli 更新进度卡并回复文字、图片结果
+       lark-cli 更新进度卡并回复文字、图片、文件结果
                          ↓
                        飞书
 ```
@@ -197,6 +199,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 ## 飞书里的日常操作
 
 - 点击 Bot 菜单“选择 Task” → 卡片只负责先选择项目、再从完整列表中选择 `项目 · Task 标题`
+- 在 Task 卡的“显示范围”中切换“全部 Task / 最近使用 / 我的收藏”；可收藏或取消收藏当前 Task
 - 项目 Task 超过 50 条时点击“上一页/下一页”；发送“搜索 关键词”可按标题筛选，卡片中可一键清除搜索
 - 点击 Bot 菜单“新建 Task” → 在独立卡片中选择项目并确认 → 发送 Task 标题 → Bot 创建并自动选择该 Task；点击“取消新建”可随时退出
 - 点击 Bot 菜单“归档 Task” → 独立卡片显示当前 Task → 可取消或二次确认归档
@@ -210,6 +213,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 - Task 运行中继续发送消息 → Bot 显示排队位置，当前运行完成后自动执行；可点击“取消排队…”
 - 收到授权卡片时，核对请求说明后点击“允许一次”或“拒绝”
 - Codex 返回图片 → Bot 先回复文字，再把图片回复在同一条消息下
+- Codex 返回本机 PDF、Office、文本或代码文件链接 → Bot 把文件作为附件回复在同一条消息下
 - 再次点击“选择 Task” → 切换到另一个 Task
 - 发送“当前” → 查看当前 Task
 - 发送“对话” → 在消息中重新打开 Task 卡片
@@ -236,7 +240,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 ~/.codex/log/feishu-bridge.log
 ```
 
-`config.json` 保存 Profile 名、用户白名单、项目权限和本机 workflow 映射，不保存 App Secret。`state.json` 按用户分别保存当前 Task、访问申请、搜索/分页状态、待执行输入队列，以及尚未送达飞书的最终文字、图片或卡片。本地待补发图片复制到 `~/.codex/feishu-bridge/reply-images/`，送达后自动删除。`workflow-state.json` 保存主动通知 outbox、单次决策与恢复状态；`workflow-decision-inbox/` 在飞书 ACK 前以逐事件 `0600` 文件暂存 workflow callback，业务副作用完成后删除。队列跨桥接重启保留；配置、状态、inbox、socket 与日志都限制为仅当前 macOS 用户可访问。
+`config.json` 保存 Profile 名、用户白名单、项目权限和本机 workflow 映射，不保存 App Secret。`state.json` 按用户分别保存当前 Task、收藏/最近记录、最近对话摘要、访问申请、搜索/分页状态、待执行输入队列，以及尚未送达飞书的最终文字、图片、文件或卡片。本地待补发图片和文件分别复制到 `~/.codex/feishu-bridge/reply-images/` 与 `reply-files/`，送达后自动删除。`workflow-state.json` 保存主动通知 outbox、单次决策与恢复状态；`workflow-decision-inbox/` 在飞书 ACK 前以逐事件 `0600` 文件暂存 workflow callback，业务副作用完成后删除。队列跨桥接重启保留；配置、状态、inbox、socket 与日志都限制为仅当前 macOS 用户可访问。
 
 ## 从源码构建
 
@@ -293,12 +297,14 @@ NOTARY_PROFILE="codex-feishu-notary" \
 - 飞书授权只支持“允许一次”或“拒绝”，不会授予永久权限，也不会绕过 Desktop 的权限模型
 - 每轮最多发送 8 张结果图片；本地图片只接受 Codex 明确返回且实际存在的常见图片格式
 - 单张待补发结果图片默认最多 20 MB，补发缓存总量默认最多 100 MB；超限会淘汰最旧缓存
+- 每轮最多发送 4 个结果文件、单个 50 MB；只处理 Codex 最终回复明确链接的受支持本机文件
+- 待补发结果文件复制到私有缓存，总量默认最多 200 MB；普通网页链接不会自动上传
 - 桥接不绕过 Codex 的权限、沙箱或用户确认
 - 公开仓库不包含任何 App Secret、Token、用户 ID、Chat ID 或本机 Task 数据
 
 ## 与 Codex Remote 的当前差异
 
-`1.6.0 (build 23)` 已覆盖已有 Task 续聊、附件、实时进度、同 Task 排队/跨 Task 并发、停止、一次性授权、新建 Task、搜索/分页/刷新、归档及恢复，并用每用户状态卡与真实角色标记说明当前 Task。Desktop 的“置顶”目前没有可供第三方稳定调用的 Codex app-server 方法，因此桥接不直接修改 Codex SQLite 或 Electron 私有状态；置顶仍在 Desktop 中操作。飞书真实点击、文件/音频、授权回调和 workflow 决策往返仍需要在目标租户中做端到端验收，本地自测不能替代该证据。
+`1.6.1 (build 24)` 已覆盖已有 Task 续聊、输入/结果附件、最近对话摘要、Task 收藏/最近使用、实时进度、同 Task 排队/跨 Task 并发、停止、一次性授权、新建 Task、搜索/分页/刷新、归档及恢复。Desktop 的“置顶”目前没有可供第三方稳定调用的 Codex app-server 方法，因此桥接不直接修改 Codex SQLite 或 Electron 私有状态；置顶仍在 Desktop 中操作。飞书真实点击、结果文件、文件/音频输入、授权回调和 workflow 决策往返仍需要在目标租户中做端到端验收，本地自测不能替代该证据。
 
 ## License
 

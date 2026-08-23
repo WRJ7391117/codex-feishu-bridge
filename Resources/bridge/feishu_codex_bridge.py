@@ -196,6 +196,11 @@ ALLOWED_CHAT_IDS = {
 MAX_PROMPT_CHARS = int(CONFIG.get("max_prompt_chars", 12000))
 MAX_REPLY_CHARS = int(CONFIG.get("max_reply_chars", 3000))
 MAX_RESULT_IMAGES = max(0, int(CONFIG.get("max_result_images", 8)))
+MAX_RESULT_FILES = max(0, int(CONFIG.get("max_result_files", 4)))
+MAX_RESULT_FILE_BYTES = max(
+    1,
+    int(CONFIG.get("max_result_file_bytes", 50 * 1024 * 1024)),
+)
 MAX_INPUT_IMAGES = max(1, int(CONFIG.get("max_input_images", 4)))
 MAX_INPUT_IMAGE_BYTES = max(
     1,
@@ -218,6 +223,9 @@ DOCUMENT_SUFFIXES = {
 AUDIO_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"}
 FILE_SUFFIXES = DOCUMENT_SUFFIXES | AUDIO_SUFFIXES
 MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^)\n]+)\s*\)")
+MARKDOWN_FILE_PATTERN = re.compile(
+    r"(?<!!)\[([^\]\n]*)\]\(\s*(<[^>\n]+>|[^)\n]+)\s*\)"
+)
 IMAGE_KEY_PATTERN = r"img_[A-Za-z0-9_-]{3,512}"
 FILE_KEY_PATTERN = r"file_[A-Za-z0-9_-]{3,512}"
 INPUT_IMAGE_MARKER_PATTERN = re.compile(
@@ -251,6 +259,14 @@ MAX_PENDING_IMAGE_SPOOL_BYTES = max(
     MAX_PENDING_IMAGE_BYTES,
     int(CONFIG.get("max_pending_image_spool_bytes", 100 * 1024 * 1024)),
 )
+MAX_PENDING_FILE_BYTES = max(
+    MAX_RESULT_FILE_BYTES,
+    int(CONFIG.get("max_pending_file_bytes", 50 * 1024 * 1024)),
+)
+MAX_PENDING_FILE_SPOOL_BYTES = max(
+    MAX_PENDING_FILE_BYTES,
+    int(CONFIG.get("max_pending_file_spool_bytes", 200 * 1024 * 1024)),
+)
 MAX_PENDING_INPUTS = max(1, int(CONFIG.get("max_pending_inputs", 50)))
 MAX_PENDING_INPUTS_PER_TASK = max(
     1,
@@ -259,6 +275,8 @@ MAX_PENDING_INPUTS_PER_TASK = max(
 MAX_CONCURRENT_RUNS = max(1, int(CONFIG.get("max_concurrent_runs", 2)))
 ALLOW_ACCESS_REQUESTS = CONFIG.get("allow_access_requests", True) is not False
 TASKS_PER_PAGE = max(10, min(50, int(CONFIG.get("tasks_per_page", 50))))
+RECENT_TASK_LIMIT = 20
+TASK_SUMMARY_CHARS = 120
 
 _last_reply_failure_reason = ""
 _reply_failure_context = threading.local()
@@ -1058,6 +1076,7 @@ def complete_task_creation(
         state = load_state()
         state.setdefault("selected", {})[user_id] = task["id"]
         state.setdefault("last_projects", {})[user_id] = task["project"]
+        remember_recent_task(state, user_id, str(task["id"]))
         state.setdefault("task_pages", {})[user_id] = 0
         state.setdefault("task_queries", {}).pop(user_id, None)
         state.setdefault("pending_task_names", {})[user_id] = {
@@ -1190,7 +1209,7 @@ def queue_pending_reply(
             )
         ]
         pending.append(entry)
-        state["pending_replies"] = pending[-MAX_PENDING_REPLIES:]
+        state["pending_replies"] = trim_pending_replies(pending)
         save_state(state)
     log(f"reply queued kind={kind} reason={entry['reason']}")
 
@@ -1232,7 +1251,7 @@ def queue_pending_card_patch(
         }
         pending = [item for item in pending if item is not existing]
         pending.append(entry)
-        state["pending_replies"] = pending[-MAX_PENDING_REPLIES:]
+        state["pending_replies"] = trim_pending_replies(pending)
         save_state(state)
     log(f"card patch queued reason={entry['reason']}")
 
@@ -1288,7 +1307,7 @@ def queue_pending_queue_card(
             )
         ]
         pending.append(entry)
-        state["pending_replies"] = pending[-MAX_PENDING_REPLIES:]
+        state["pending_replies"] = trim_pending_replies(pending)
         save_state(state)
     log(f"queue card queued reason={entry['reason']}")
 
@@ -1297,18 +1316,40 @@ def pending_image_spool_directory() -> Path:
     return STATE_PATH.parent / "reply-images"
 
 
-def remove_pending_image_file(item: dict[str, Any]) -> None:
-    if item.get("operation") != "image_reply" or item.get("remote") is True:
+def pending_file_spool_directory() -> Path:
+    return STATE_PATH.parent / "reply-files"
+
+
+def remove_pending_resource_file(item: dict[str, Any]) -> None:
+    operation = item.get("operation")
+    if operation == "image_reply":
+        if item.get("remote") is True:
+            return
+        raw_path = str(item.get("image") or "")
+        spool = pending_image_spool_directory()
+    elif operation == "file_reply":
+        raw_path = str(item.get("file") or "")
+        spool = pending_file_spool_directory()
+    else:
         return
-    raw_path = str(item.get("image") or "")
     if not raw_path:
         return
     path = Path(raw_path)
     try:
-        path.resolve().relative_to(pending_image_spool_directory().resolve())
+        path.resolve().relative_to(spool.resolve())
         path.unlink(missing_ok=True)
+        if operation == "file_reply" and path.parent != spool:
+            path.parent.rmdir()
     except (OSError, ValueError):
         return
+
+
+def trim_pending_replies(pending: list[Any]) -> list[Any]:
+    while len(pending) > MAX_PENDING_REPLIES:
+        removed = pending.pop(0)
+        if isinstance(removed, dict):
+            remove_pending_resource_file(removed)
+    return pending
 
 
 def queue_pending_image(
@@ -1366,7 +1407,7 @@ def queue_pending_image(
         ]
         for item in replaced:
             if str(item.get("image") or "") != stored_image:
-                remove_pending_image_file(item)
+                remove_pending_resource_file(item)
         pending = [item for item in pending if item not in replaced]
         pending.append(
             {
@@ -1401,15 +1442,111 @@ def queue_pending_image(
                     total -= Path(str(oldest.get("image") or "")).stat().st_size
                 except OSError:
                     pass
-                remove_pending_image_file(oldest)
+                remove_pending_resource_file(oldest)
                 pending.remove(oldest)
         while len(pending) > MAX_PENDING_REPLIES:
             removed = pending.pop(0)
             if isinstance(removed, dict):
-                remove_pending_image_file(removed)
+                remove_pending_resource_file(removed)
         state["pending_replies"] = pending
         save_state(state)
     log(f"image reply queued index={index} reason={reason or '飞书 API 调用失败'}")
+    return True
+
+
+def queue_pending_file(
+    message_id: str,
+    file_path: str,
+    index: int,
+    reason: str,
+    now: float | None = None,
+) -> bool:
+    source = Path(file_path).resolve()
+    try:
+        size = source.stat().st_size
+    except OSError:
+        return False
+    if (
+        source.suffix.lower() not in FILE_SUFFIXES
+        or size <= 0
+        or size > MAX_PENDING_FILE_BYTES
+    ):
+        return False
+    spool = pending_file_spool_directory()
+    spool.mkdir(parents=True, exist_ok=True)
+    spool.chmod(0o700)
+    digest = hashlib.sha256(
+        f"{message_id}:{index}".encode("utf-8")
+    ).hexdigest()[:32]
+    item_directory = spool / digest
+    item_directory.mkdir(mode=0o700, exist_ok=True)
+    item_directory.chmod(0o700)
+    target = item_directory / source.name
+    temporary = item_directory / f".{source.name}.tmp"
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(target)
+        target.chmod(0o600)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        return False
+
+    with _state_lock:
+        state = load_state()
+        pending = state.setdefault("pending_replies", [])
+        if not isinstance(pending, list):
+            pending = []
+        timestamp = time.time() if now is None else now
+        replaced = [
+            item
+            for item in pending
+            if isinstance(item, dict)
+            and item.get("operation") == "file_reply"
+            and item.get("message_id") == message_id
+            and int(item.get("index") or 0) == index
+        ]
+        for item in replaced:
+            if str(item.get("file") or "") != str(target):
+                remove_pending_resource_file(item)
+        pending = [item for item in pending if item not in replaced]
+        pending.append(
+            {
+                "operation": "file_reply",
+                "message_id": message_id,
+                "file": str(target),
+                "index": index,
+                "reason": reason or "飞书 API 调用失败",
+                "attempts": 0,
+                "created_at": timestamp,
+                "next_attempt_at": timestamp + pending_reply_delay(0),
+            }
+        )
+        local_items = [
+            item
+            for item in pending
+            if isinstance(item, dict) and item.get("operation") == "file_reply"
+        ]
+        total = sum(
+            Path(str(item.get("file") or "")).stat().st_size
+            if Path(str(item.get("file") or "")).is_file()
+            else 0
+            for item in local_items
+        )
+        while total > MAX_PENDING_FILE_SPOOL_BYTES and local_items:
+            oldest = local_items.pop(0)
+            try:
+                total -= Path(str(oldest.get("file") or "")).stat().st_size
+            except OSError:
+                pass
+            remove_pending_resource_file(oldest)
+            pending.remove(oldest)
+        while len(pending) > MAX_PENDING_REPLIES:
+            removed = pending.pop(0)
+            if isinstance(removed, dict):
+                remove_pending_resource_file(removed)
+        state["pending_replies"] = pending
+        save_state(state)
+    log(f"file reply queued index={index} reason={reason or '飞书 API 调用失败'}")
     return True
 
 
@@ -1507,19 +1644,47 @@ def retry_pending_replies(now: float | None = None) -> bool:
                         and not Path(image).is_file()
                     )
                 ):
-                    remove_pending_image_file(item)
+                    remove_pending_resource_file(item)
                     pending.pop(index)
                     state["pending_replies"] = pending
                     save_state(state)
                     return True
                 if reply_image(message_id, image, image_index):
                     reason = str(item.get("reason") or "飞书 API 调用失败")
-                    remove_pending_image_file(item)
+                    remove_pending_resource_file(item)
                     pending.pop(index)
                     state["pending_replies"] = pending
                     save_state(state)
                     log(
                         f"pending image delivered index={image_index} "
+                        f"previous_reason={reason}"
+                    )
+                    return True
+            elif operation == "file_reply":
+                file_path = str(item.get("file") or "")
+                try:
+                    file_index = int(item.get("index") or 0)
+                except (TypeError, ValueError):
+                    file_index = 0
+                if (
+                    not message_id
+                    or not file_path
+                    or file_index <= 0
+                    or not Path(file_path).is_file()
+                ):
+                    remove_pending_resource_file(item)
+                    pending.pop(index)
+                    state["pending_replies"] = pending
+                    save_state(state)
+                    return True
+                if reply_file(message_id, file_path, file_index):
+                    reason = str(item.get("reason") or "飞书 API 调用失败")
+                    remove_pending_resource_file(item)
+                    pending.pop(index)
+                    state["pending_replies"] = pending
+                    save_state(state)
+                    log(
+                        f"pending file delivered index={file_index} "
                         f"previous_reason={reason}"
                     )
                     return True
@@ -1558,7 +1723,7 @@ def retry_pending_replies(now: float | None = None) -> bool:
             except (TypeError, ValueError):
                 attempts = 1
             item["attempts"] = attempts
-            if operation in {"text_reply", "image_reply"}:
+            if operation in {"text_reply", "image_reply", "file_reply"}:
                 item["reason"] = _last_reply_failure_reason or item.get("reason")
             item["next_attempt_at"] = timestamp + pending_reply_delay(attempts)
             state["pending_replies"] = pending
@@ -1986,6 +2151,57 @@ def prepare_result_images(
     return clean_text, images
 
 
+def normalized_file_reference(reference: str) -> str | None:
+    value = reference.strip()
+    if value.startswith("<") and value.endswith(">"):
+        value = value[1:-1].strip()
+    else:
+        value = re.split(r"\s+(?=[\"'])", value, maxsplit=1)[0].strip()
+
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() == "file":
+        value = unquote(parsed.path)
+    elif parsed.scheme:
+        return None
+    path = Path(value).expanduser()
+    if (
+        not path.is_absolute()
+        or path.suffix.lower() not in FILE_SUFFIXES
+        or not path.is_file()
+    ):
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size <= 0 or size > MAX_RESULT_FILE_BYTES:
+        return None
+    return str(path.resolve())
+
+
+def extract_result_files(text: str, limit: int | None = None) -> tuple[str, list[str]]:
+    files: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        file_path = normalized_file_reference(match.group(2))
+        if file_path is None:
+            return match.group(0)
+        if limit is not None and len(files) >= limit and file_path not in files:
+            return match.group(0)
+        if file_path not in files:
+            files.append(file_path)
+        label = match.group(1).strip() or Path(file_path).name
+        return f"文件见下方：{label}"
+
+    return MARKDOWN_FILE_PATTERN.sub(replace, text).strip(), files
+
+
+def prepare_result_files(text: str) -> tuple[str, list[str]]:
+    if MAX_RESULT_FILES == 0:
+        return text, []
+    return extract_result_files(text, MAX_RESULT_FILES)
+
+
 def reply_image(message_id: str, image: str, index: int) -> bool:
     set_reply_failure_reason("")
     parsed = urlsplit(image)
@@ -2033,6 +2249,53 @@ def reply_image(message_id: str, image: str, index: int) -> bool:
         set_reply_failure_reason(lark_reply_failure_reason(result=result))
         log(
             f"image reply failed index={index} attempt={attempt} "
+            f"{lark_reply_failure_metadata(result)} "
+            f"reason={current_reply_failure_reason()}"
+        )
+    return False
+
+
+def reply_file(message_id: str, file_path: str, index: int) -> bool:
+    set_reply_failure_reason("")
+    path = Path(file_path).resolve()
+    command = [
+        LARK_CLI,
+        "--profile",
+        LARK_PROFILE,
+        "im",
+        "+messages-reply",
+        "--message-id",
+        message_id,
+        "--file",
+        f"./{path.name}",
+        "--as",
+        "bot",
+        "--idempotency-key",
+        idempotency_key(message_id, f"file-{index}"),
+    ]
+    for attempt in range(1, 3):
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=lark_environment(),
+                cwd=path.parent,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            set_reply_failure_reason(lark_reply_failure_reason(error=exc))
+            log(
+                f"file reply failed index={index} attempt={attempt} "
+                f"reason={current_reply_failure_reason()}"
+            )
+            continue
+        if lark_succeeded(result):
+            set_reply_failure_reason("")
+            return True
+        set_reply_failure_reason(lark_reply_failure_reason(result=result))
+        log(
+            f"file reply failed index={index} attempt={attempt} "
             f"{lark_reply_failure_metadata(result)} "
             f"reason={current_reply_failure_reason()}"
         )
@@ -3380,8 +3643,10 @@ def help_text() -> str:
         "搜索 关键词 —— 按标题搜索当前项目的 Task\n"
         "当前 —— 查看当前 task\n"
         "帮助 —— 显示本说明\n\n"
+        "Task 卡可查看全部、最近使用或收藏，并可收藏当前 Task。"
         "选择后，文字、图片、文件和音频会发送到该 Codex task。"
         "Task 运行中继续发送的消息会自动排队。"
+        "Codex 明确返回的受支持本机文件会作为飞书附件发送。"
         f"单次最多 {MAX_INPUT_IMAGES} 张图片、{MAX_INPUT_FILES} 个文件。"
     )
 
@@ -3398,7 +3663,13 @@ def build_task_card(
     search_query: str = "",
     archived: bool = False,
     selection_changed: bool = False,
+    favorite_ids: set[str] | None = None,
+    recent_ids: list[str] | None = None,
+    task_scope: str = "all",
 ) -> dict[str, Any]:
+    favorites = favorite_ids or set()
+    recent = recent_ids or []
+    active_scope = task_scope if task_scope in {"all", "recent", "favorites"} else "all"
     selected = next((task for task in tasks if task["id"] == selected_id), None)
     projects = list(dict.fromkeys(task["project"] for task in tasks))
     active_project = (
@@ -3409,6 +3680,12 @@ def build_task_card(
     project_tasks = [
         task for task in tasks if task["project"] == active_project
     ]
+    if not archived and active_scope == "favorites":
+        project_tasks = [task for task in project_tasks if task["id"] in favorites]
+    elif not archived and active_scope == "recent":
+        recent_order = {task_id: index for index, task_id in enumerate(recent)}
+        project_tasks = [task for task in project_tasks if task["id"] in recent_order]
+        project_tasks.sort(key=lambda task: recent_order[task["id"]])
     query = search_query.strip().casefold()
     if query:
         project_tasks = [
@@ -3455,7 +3732,18 @@ def build_task_card(
                     "content": "待恢复" if archived else "当前 Task",
                 },
                 "color": "yellow" if archived else "green",
-            }
+            },
+            *(
+                [
+                    {
+                        "tag": "text_tag",
+                        "text": {"tag": "plain_text", "content": "已收藏"},
+                        "color": "yellow",
+                    }
+                ]
+                if not archived and str(selected["id"]) in favorites
+                else []
+            ),
         ]
     elements: list[dict[str, Any]] = [
         {
@@ -3514,13 +3802,40 @@ def build_task_card(
         selector["initial_option"] = selected["id"]
     if tasks:
         elements.append(project_selector)
+        if not archived:
+            elements.append(
+                {
+                    "tag": "select_static",
+                    "name": "task_scope_selector",
+                    "placeholder": {"tag": "plain_text", "content": "显示范围"},
+                    "options": [
+                        {
+                            "text": {"tag": "plain_text", "content": label},
+                            "value": value,
+                        }
+                        for value, label in (
+                            ("all", "全部 Task"),
+                            ("recent", "最近使用"),
+                            ("favorites", "我的收藏"),
+                        )
+                    ],
+                    "initial_option": active_scope,
+                    "width": "fill",
+                }
+            )
         if visible_tasks:
             elements.append(selector)
         else:
             elements.append(
                 {
                     "tag": "markdown",
-                    "content": "当前项目没有匹配的 Task。请清除搜索或切换项目。",
+                    "content": (
+                        "当前项目还没有收藏的 Task。"
+                        if active_scope == "favorites"
+                        else "当前项目还没有最近使用的 Task。"
+                        if active_scope == "recent"
+                        else "当前项目没有匹配的 Task。请清除搜索或切换项目。"
+                    ),
                 }
             )
         page_label = f"第 {active_page + 1}/{page_count} 页 · {len(project_tasks)} 个 Task"
@@ -3599,6 +3914,31 @@ def build_task_card(
                     ],
                 }
             )
+    if selected and not archived:
+        elements.append(
+            {
+                "tag": "button",
+                "text": {
+                    "tag": "plain_text",
+                    "content": (
+                        "取消收藏当前 Task"
+                        if str(selected["id"]) in favorites
+                        else "收藏当前 Task"
+                    ),
+                },
+                "type": "default",
+                "width": "fill",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": {
+                            "action": "toggle_task_favorite",
+                            "task_id": str(selected["id"]),
+                        },
+                    }
+                ],
+            }
+        )
     if archived:
         if selected:
             elements.append(
@@ -4257,6 +4597,63 @@ def selected_task(user_id: str, state: dict[str, Any]) -> dict[str, str] | None:
         return task
 
 
+def remember_recent_task(state: dict[str, Any], user_id: str, task_id: str) -> None:
+    recent = state.setdefault("recent_task_ids", {}).get(user_id, [])
+    if not isinstance(recent, list):
+        recent = []
+    values = [task_id] + [str(value) for value in recent if str(value) != task_id]
+    state.setdefault("recent_task_ids", {})[user_id] = values[:RECENT_TASK_LIMIT]
+
+
+def task_preferences(
+    state: dict[str, Any],
+    user_id: str,
+) -> tuple[set[str], list[str], str]:
+    favorites = state.setdefault("favorite_task_ids", {}).get(user_id, [])
+    recent = state.setdefault("recent_task_ids", {}).get(user_id, [])
+    scope = str(state.setdefault("task_scopes", {}).get(user_id) or "all")
+    if scope not in {"all", "recent", "favorites"}:
+        scope = "all"
+    return (
+        {str(value) for value in favorites} if isinstance(favorites, list) else set(),
+        [str(value) for value in recent] if isinstance(recent, list) else [],
+        scope,
+    )
+
+
+def summary_fragment(value: str) -> str:
+    return " ".join(str(value).split())[:TASK_SUMMARY_CHARS]
+
+
+def record_task_exchange(
+    user_id: str,
+    task_id: str,
+    question: str = "",
+    answer: str = "",
+    completed_at: float | None = None,
+) -> None:
+    try:
+        with _state_lock:
+            state = load_state()
+            remember_recent_task(state, user_id, task_id)
+            summaries = state.setdefault("task_summaries", {}).setdefault(user_id, {})
+            entry = summaries.get(task_id, {})
+            if not isinstance(entry, dict):
+                entry = {}
+            if question:
+                entry["question"] = summary_fragment(question)
+                entry["asked_at"] = time.time()
+                entry.pop("answer", None)
+                entry.pop("completed_at", None)
+            if answer:
+                entry["answer"] = summary_fragment(answer)
+                entry["completed_at"] = time.time() if completed_at is None else completed_at
+            summaries[task_id] = entry
+            save_state(state)
+    except OSError:
+        return
+
+
 def task_is_current(user_id: str, task_id: str) -> bool:
     with _state_lock:
         state = load_state()
@@ -4270,6 +4667,8 @@ def build_current_status_card(
     queued_inputs: int,
     change: str = "",
     now: float | None = None,
+    recent_exchange: dict[str, Any] | None = None,
+    is_favorite: bool = False,
 ) -> dict[str, Any]:
     timestamp = time.time() if now is None else now
     status_tag = (
@@ -4293,6 +4692,23 @@ def build_current_status_card(
             ),
         ]
     )
+    exchange = recent_exchange if isinstance(recent_exchange, dict) else {}
+    question = summary_fragment(str(exchange.get("question") or ""))
+    answer = summary_fragment(str(exchange.get("answer") or ""))
+    if question:
+        lines.append(f"**最近提问**\n{card_markdown_escape(question)}")
+    if answer:
+        lines.append(f"**最近回复**\n{card_markdown_escape(answer)}")
+        try:
+            completed_at = float(exchange.get("completed_at") or 0)
+        except (TypeError, ValueError):
+            completed_at = 0
+        if completed_at > 0:
+            lines.append(
+                "<font color='grey'>最近完成："
+                f"{time.strftime('%m-%d %H:%M', time.localtime(completed_at))}"
+                "</font>"
+            )
     return {
         "schema": "2.0",
         "config": {
@@ -4308,6 +4724,17 @@ def build_current_status_card(
             "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
             "text_tag_list": [
                 current_task_tag(),
+                *(
+                    [
+                        {
+                            "tag": "text_tag",
+                            "text": {"tag": "plain_text", "content": "已收藏"},
+                            "color": "yellow",
+                        }
+                    ]
+                    if is_favorite
+                    else []
+                ),
                 {
                     "tag": "text_tag",
                     "text": {"tag": "plain_text", "content": status_tag[0]},
@@ -4321,6 +4748,24 @@ def build_current_status_card(
             "vertical_spacing": "12px",
             "elements": [
                 {"tag": "markdown", "content": "\n\n".join(lines)},
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "取消收藏" if is_favorite else "收藏当前 Task",
+                    },
+                    "type": "default",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "toggle_task_favorite",
+                                "task_id": str(task["id"]),
+                                "return_to": "status",
+                            },
+                        }
+                    ],
+                },
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "刷新状态"},
@@ -4358,12 +4803,16 @@ def current_status_card_for_user(
         ]
         status = str(matching_runs[0].get("status") or "正在运行") if matching_runs else "空闲"
     with _state_lock:
+        state = load_state()
         queued = sum(
             isinstance(entry, dict)
             and str(entry.get("user_id") or "") == user_id
             and str(entry.get("task", {}).get("id") or "") == task_id
-            for entry in pending_inputs(load_state())
+            for entry in pending_inputs(state)
         )
+        summaries = state.get("task_summaries", {}).get(user_id, {})
+        recent_exchange = summaries.get(task_id, {}) if isinstance(summaries, dict) else {}
+        favorites, _recent, _scope = task_preferences(state, user_id)
     if not matching_runs and queued:
         status = "等待执行"
     return build_current_status_card(
@@ -4372,6 +4821,8 @@ def current_status_card_for_user(
         len(matching_runs),
         queued,
         change,
+        recent_exchange=recent_exchange,
+        is_favorite=task_id in favorites,
     )
 
 
@@ -4474,14 +4925,31 @@ def refresh_user_task_identity_cards(
     update_current_status_card(user_id, change, task=task, ensure=True)
 
 
-def task_card_for_state(user_id: str, state: dict[str, Any]) -> dict[str, Any]:
+def task_card_for_state(
+    user_id: str,
+    state: dict[str, Any],
+    selection_changed: bool = False,
+    selected_id_override: str | None = None,
+) -> dict[str, Any]:
     with _state_lock:
-        selected = selected_task(user_id, state)
         tasks = recent_tasks(user_id)
+        selected = (
+            next(
+                (
+                    task
+                    for task in tasks
+                    if str(task.get("id") or "") == selected_id_override
+                ),
+                None,
+            )
+            if selected_id_override is not None
+            else selected_task(user_id, state)
+        )
         state.setdefault("last_lists", {})[user_id] = [task["id"] for task in tasks]
         project_filter = state.setdefault("last_projects", {}).get(user_id)
         page = int(state.setdefault("task_pages", {}).get(user_id) or 0)
         query = str(state.setdefault("task_queries", {}).get(user_id) or "")
+        favorites, recent, scope = task_preferences(state, user_id)
         save_state(state)
         return build_task_card(
             tasks,
@@ -4489,6 +4957,10 @@ def task_card_for_state(user_id: str, state: dict[str, Any]) -> dict[str, Any]:
             str(project_filter) if project_filter else None,
             page,
             query,
+            selection_changed=selection_changed,
+            favorite_ids=favorites,
+            recent_ids=recent,
+            task_scope=scope,
         )
 
 
@@ -4550,6 +5022,7 @@ def select_task(user_id: str, choice: str, state: dict[str, Any]) -> str:
         if not selected:
             return "没有找到该 task。请发送“对话”刷新列表。"
         state.setdefault("selected", {})[user_id] = selected["id"]
+        remember_recent_task(state, user_id, str(selected["id"]))
         save_state(state)
         return current_task_changed_text(selected)
 
@@ -5946,6 +6419,13 @@ def process_message_run(
         is_current = task_is_current(str(run["user_id"]), str(task["id"]))
         prefix = task_status_prefix(task, label, is_current)
         clean_result, images = prepare_result_images(result, rollout_images)
+        clean_result, files = prepare_result_files(clean_result)
+        record_task_exchange(
+            str(run["user_id"]),
+            str(task["id"]),
+            answer=clean_result,
+            completed_at=time.time(),
+        )
         delivered = reply_or_queue(message_id, prefix + clean_result, "final")
         failed_images = 0
         queued_images = 0
@@ -5971,8 +6451,36 @@ def process_message_run(
                 ),
                 "image-error",
             )
+        failed_files = 0
+        queued_files = 0
+        for index, file_path in enumerate(files, start=1):
+            if reply_file(message_id, file_path, index):
+                continue
+            failed_files += 1
+            if queue_pending_file(
+                message_id,
+                file_path,
+                index,
+                current_reply_failure_reason() or "飞书 API 调用失败",
+            ):
+                queued_files += 1
+        if failed_files:
+            reply(
+                message_id,
+                (
+                    f"有 {queued_files} 个文件暂未送达，连接恢复后会自动补发。"
+                    if queued_files == failed_files
+                    else f"有 {queued_files} 个文件等待自动补发，另有 "
+                    f"{failed_files - queued_files} 个无法保存，请在 Codex Desktop 中查看。"
+                ),
+                "file-error",
+            )
         if success:
-            delivery_status = "已完成，结果已返回飞书" if delivered else "已完成，结果等待自动补发"
+            delivery_status = (
+                "已完成，结果已返回飞书"
+                if delivered and not failed_images and not failed_files
+                else "已完成，部分结果等待自动补发"
+            )
             set_run_progress(run, delivery_status, "completed", force=True)
     finally:
         task_id = str(run["task"]["id"])
@@ -6130,6 +6638,11 @@ def handle_message_event(event: dict[str, Any]) -> None:
         image_keys,
         file_keys,
     )
+    record_task_exchange(
+        user_id,
+        str(task["id"]),
+        question=content or "发送了附件",
+    )
     run["is_current_task"] = True
     if not claim_active_run(run):
         entry = {
@@ -6249,6 +6762,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
             "archived_task_page",
             "refresh_task_list",
             "refresh_archived_tasks",
+            "toggle_task_favorite",
             "clear_task_search",
             "new_task",
             "cancel_new_task",
@@ -6264,7 +6778,36 @@ def handle_card_event(event: dict[str, Any]) -> None:
                 state = load_state()
                 if not mark_processed(state, f"card:{event_id}"):
                     return
-                if action == "refresh_task_list":
+                if action == "toggle_task_favorite":
+                    task = selected_task(user_id, state)
+                    requested_task_id = str(payload.get("task_id") or "")
+                    if task is None or requested_task_id != str(task["id"]):
+                        reply(
+                            message_id,
+                            "当前 Task 已变化，请刷新卡片后再操作收藏。",
+                            f"favorite-stale-{event_id}",
+                        )
+                        return
+                    favorites = state.setdefault("favorite_task_ids", {}).get(user_id, [])
+                    if not isinstance(favorites, list):
+                        favorites = []
+                    task_id = str(task["id"])
+                    if task_id in favorites:
+                        favorites = [value for value in favorites if str(value) != task_id]
+                        status_change = "已取消收藏当前 Task"
+                    else:
+                        favorites = [task_id] + [
+                            str(value) for value in favorites if str(value) != task_id
+                        ]
+                        status_change = "已收藏当前 Task"
+                    state.setdefault("favorite_task_ids", {})[user_id] = favorites
+                    save_state(state)
+                    card = (
+                        current_status_card_for_user(user_id, task, status_change)
+                        if payload.get("return_to") == "status"
+                        else task_card_for_state(user_id, state)
+                    )
+                elif action == "refresh_task_list":
                     card = task_card_for_state(user_id, state)
                 elif action == "refresh_archived_tasks":
                     card = archived_task_card_for_state(user_id, state)
@@ -6364,6 +6907,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     state = load_state()
                     state.setdefault("selected", {})[user_id] = task["id"]
                     state.setdefault("last_projects", {})[user_id] = task["project"]
+                    remember_recent_task(state, user_id, str(task["id"]))
                     state.setdefault("task_pages", {})[user_id] = 0
                     save_state(state)
                     card = build_archive_task_card(task, restored=True)
@@ -6423,12 +6967,28 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     remember_card_context(current_state, user_id, message_id, card)
             if token and update_card(token, card):
                 if status_change:
-                    refresh_user_task_identity_cards(user_id, status_change, task)
+                    if action == "toggle_task_favorite":
+                        update_current_status_card(
+                            user_id,
+                            status_change,
+                            task=task,
+                            ensure=True,
+                        )
+                    else:
+                        refresh_user_task_identity_cards(user_id, status_change, task)
                 return
             if message_id:
                 patch_card(message_id, card)
             if status_change:
-                refresh_user_task_identity_cards(user_id, status_change, task)
+                if action == "toggle_task_favorite":
+                    update_current_status_card(
+                        user_id,
+                        status_change,
+                        task=task,
+                        ensure=True,
+                    )
+                else:
+                    refresh_user_task_identity_cards(user_id, status_change, task)
             return
         run = active_run(str(payload.get("run_id") or ""))
         if (
@@ -6583,7 +7143,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
     recognized_card = any(
         isinstance(element, dict)
         and element.get("tag") == "select_static"
-        and element.get("name") in {"project_selector", "task_selector"}
+        and element.get("name")
+        in {"project_selector", "task_selector", "task_scope_selector"}
         for element in elements
     ) or context_type == "tasks"
     if action_tag != "select_static":
@@ -6598,13 +7159,15 @@ def handle_card_event(event: dict[str, Any]) -> None:
             f"name={action_name or 'missing'} card_recognized={recognized_card}"
         )
         return
-    if action_name not in {"project_selector", "task_selector"}:
+    if action_name not in {"project_selector", "task_selector", "task_scope_selector"}:
         projects = {task["project"] for task in tasks}
         task_ids = {task["id"] for task in tasks}
         if recognized_card and selected_value in projects:
             action_name = "project_selector"
         elif recognized_card and selected_value in task_ids:
             action_name = "task_selector"
+        elif recognized_card and selected_value in {"all", "recent", "favorites"}:
+            action_name = "task_scope_selector"
         else:
             log(
                 "card ignored reason=unknown-selector "
@@ -6621,7 +7184,16 @@ def handle_card_event(event: dict[str, Any]) -> None:
             authorize_chat(state, user_id, chat_id)
         if not mark_processed(state, f"card:{event_id}"):
             return
-        if action_name == "project_selector":
+        if action_name == "task_scope_selector":
+            if selected_value not in {"all", "recent", "favorites"}:
+                log("card ignored reason=unknown-task-scope")
+                return
+            state.setdefault("task_scopes", {})[user_id] = selected_value
+            state.setdefault("task_pages", {})[user_id] = 0
+            selected = selected_task(user_id, state)
+            save_state(state)
+            card = task_card_for_state(user_id, state)
+        elif action_name == "project_selector":
             projects = {task["project"] for task in tasks}
             if selected_value not in projects:
                 log("card ignored reason=unknown-project")
@@ -6631,11 +7203,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
             state.setdefault("task_queries", {}).pop(user_id, None)
             selected = selected_task(user_id, state)
             save_state(state)
-            card = build_task_card(
-                tasks,
-                selected["id"] if selected else None,
-                selected_value,
-            )
+            card = task_card_for_state(user_id, state)
         else:
             selected = next((task for task in tasks if task["id"] == selected_value), None)
             if selected is None:
@@ -6644,19 +7212,20 @@ def handle_card_event(event: dict[str, Any]) -> None:
                 return
             state.setdefault("selected", {})[user_id] = selected["id"]
             state.setdefault("last_projects", {})[user_id] = selected["project"]
+            remember_recent_task(state, user_id, str(selected["id"]))
             save_state(state)
-            card = build_task_card(
-                tasks,
-                selected["id"],
-                selected["project"],
+            card = task_card_for_state(
+                user_id,
+                state,
                 selection_changed=True,
+                selected_id_override=str(selected["id"]),
             )
         if message_id:
             remember_card_context(state, user_id, message_id, card)
-    visible_count = len(
-        tasks
-        if action_name != "project_selector"
-        else [task for task in tasks if task["project"] == selected_value]
+    visible_count = (
+        len([task for task in tasks if task["project"] == selected_value])
+        if action_name == "project_selector"
+        else len(tasks)
     )
     log(
         f"card selection saved name={action_name} "
@@ -6671,6 +7240,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
     if message_id:
         if action_name == "project_selector":
             reply(message_id, "项目筛选已更新，请重新打开 Task 菜单。", f"project-{event_id}")
+        elif action_name == "task_scope_selector":
+            reply(message_id, "Task 显示范围已更新。", f"task-scope-{event_id}")
         else:
             reply(
                 message_id,

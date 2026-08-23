@@ -1,5 +1,15 @@
 # Release Notes
 
+## 1.6.1 (build 24)
+
+- Uploads supported local PDF, Office, text, and code files explicitly linked by the Codex result, with per-file/count limits and stable filenames.
+- Durably spools failed result-file replies in a private bounded directory and retries them with the original idempotency key without rerunning Codex.
+- Shows the latest question, latest answer, and completion time on each user's current-status card; a new question clears the previous answer until completion.
+- Adds per-user Task favorites and an explicit Task display scope for all, recently used, or favorite Tasks.
+- Keeps favorites, recent history, and conversation summaries isolated by authorized Feishu user and stored only in the private bridge state.
+- Adds regression coverage for file extraction/reply/retry, summary lifecycle, favorites, recent ordering, scope selection, and callback behavior.
+- Supersedes `1.6.0 (build 23)`; source builds remain ad-hoc signed unless Developer ID and notarization credentials are supplied.
+
 ## 1.6.0 (build 23)
 
 - Corrects Task identity after switching: old run, queue, approval, and result cards no longer claim to be the current Task.
