@@ -1011,7 +1011,7 @@ def complete_task_creation(
         save_state(state)
     reply(
         message_id,
-        f"已新建并选择：{option_text(task)}\n现在发送的下一条消息会进入这个 Task。",
+        f"{current_task_changed_text(task, '已新建')}\n现在发送的下一条消息会进入这个 Task。",
         "new-task-created",
     )
 
@@ -2974,6 +2974,34 @@ def card_markdown_escape(value: str) -> str:
     return "".join(replacements.get(character, character) for character in value)
 
 
+def task_title_text(task: dict[str, str]) -> str:
+    return f"Task：{task['title']}"
+
+
+def task_project_text(task: dict[str, str]) -> str:
+    return f"项目：{task['project']}"
+
+
+def current_task_text(task: dict[str, str]) -> str:
+    return f"🟢 当前 Task\n{task_project_text(task)}\n{task_title_text(task)}"
+
+
+def current_task_changed_text(task: dict[str, str], action: str = "已切换") -> str:
+    return f"✅ 当前 Task {action}\n{task_project_text(task)}\n{task_title_text(task)}"
+
+
+def task_status_prefix(task: dict[str, str], status: str) -> str:
+    return f"{current_task_text(task)}\n状态：{status}\n\n"
+
+
+def current_task_tag() -> dict[str, Any]:
+    return {
+        "tag": "text_tag",
+        "text": {"tag": "plain_text", "content": "当前 Task"},
+        "color": "green",
+    }
+
+
 def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
     status = str(run.get("status") or "正在准备")
     outcome = str(run.get("outcome") or "running")
@@ -3031,11 +3059,15 @@ def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
             "summary": {"content": f"Codex {tag_text}"},
         },
         "header": {
-            "title": {"tag": "plain_text", "content": option_text(run["task"])},
-            "subtitle": {"tag": "plain_text", "content": "Codex 飞书桥接"},
+            "title": {"tag": "plain_text", "content": task_title_text(run["task"])},
+            "subtitle": {
+                "tag": "plain_text",
+                "content": task_project_text(run["task"]),
+            },
             "template": template,
             "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
             "text_tag_list": [
+                current_task_tag(),
                 {
                     "tag": "text_tag",
                     "text": {"tag": "plain_text", "content": tag_text},
@@ -3105,11 +3137,12 @@ def build_queued_card(
             "summary": {"content": "Codex 消息已排队"},
         },
         "header": {
-            "title": {"tag": "plain_text", "content": option_text(task)},
-            "subtitle": {"tag": "plain_text", "content": "Codex 飞书桥接"},
+            "title": {"tag": "plain_text", "content": task_title_text(task)},
+            "subtitle": {"tag": "plain_text", "content": task_project_text(task)},
             "template": "grey" if canceled else "blue",
             "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
             "text_tag_list": [
+                current_task_tag(),
                 {
                     "tag": "text_tag",
                     "text": {
@@ -3153,11 +3186,18 @@ def build_approval_card(run: dict[str, Any], approval: dict[str, Any]) -> dict[s
             "summary": {"content": "Codex 等待授权"},
         },
         "header": {
-            "title": {"tag": "plain_text", "content": titles.get(request_type, titles["permission"])},
-            "subtitle": {"tag": "plain_text", "content": option_text(run["task"])},
+            "title": {
+                "tag": "plain_text",
+                "content": task_title_text(run["task"]),
+            },
+            "subtitle": {
+                "tag": "plain_text",
+                "content": task_project_text(run["task"]),
+            },
             "template": "yellow",
             "icon": {"tag": "standard_icon", "token": "approval_colorful"},
             "text_tag_list": [
+                current_task_tag(),
                 {
                     "tag": "text_tag",
                     "text": {"tag": "plain_text", "content": "待处理"},
@@ -3170,6 +3210,10 @@ def build_approval_card(run: dict[str, Any], approval: dict[str, Any]) -> dict[s
             "padding": "12px 12px 20px 12px",
             "vertical_spacing": "12px",
             "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"**授权请求**\n{titles.get(request_type, titles['permission'])}",
+                },
                 {"tag": "markdown", "content": f"**请求说明**\n{detail}"},
                 {
                     "tag": "button",
@@ -3212,6 +3256,7 @@ def completed_approval_card(
     card = build_approval_card(run, approval)
     card["header"]["template"] = "green" if approved else "grey"
     card["header"]["text_tag_list"] = [
+        current_task_tag(),
         {
             "tag": "text_tag",
             "text": {"tag": "plain_text", "content": "已允许" if approved else "已拒绝"},
@@ -3259,6 +3304,7 @@ def build_task_card(
     page: int = 0,
     search_query: str = "",
     archived: bool = False,
+    selection_changed: bool = False,
 ) -> dict[str, Any]:
     selected = next((task for task in tasks if task["id"] == selected_id), None)
     projects = list(dict.fromkeys(task["project"] for task in tasks))
@@ -3284,17 +3330,24 @@ def build_task_card(
     visible_tasks = project_tasks[start : start + TASKS_PER_PAGE]
     card_title = "恢复已归档 Task" if archived else "选择 Codex task"
     header: dict[str, Any] = {
-        "title": {"tag": "plain_text", "content": card_title},
+        "title": {
+            "tag": "plain_text",
+            "content": (
+                f"待恢复：{selected['title']}"
+                if archived and selected
+                else task_title_text(selected)
+                if selected
+                else card_title
+            ),
+        },
         "subtitle": {
             "tag": "plain_text",
             "content": (
-                f"待恢复：{option_text(selected)}"
-                if archived and selected
-                else f"当前：{option_text(selected)}"
+                task_project_text(selected)
                 if selected
                 else "选择后确认恢复该 Task"
                 if archived
-                else "选择后，后续文字会发送到该 task"
+                else "选择后，后续文字会发送到该 Task"
             ),
         },
         "template": "yellow" if archived and selected else "green" if selected else "blue",
@@ -3306,7 +3359,7 @@ def build_task_card(
                 "tag": "text_tag",
                 "text": {
                     "tag": "plain_text",
-                    "content": "待恢复" if archived else "已选择",
+                    "content": "待恢复" if archived else "当前 Task",
                 },
                 "color": "yellow" if archived else "green",
             }
@@ -3316,9 +3369,13 @@ def build_task_card(
             "tag": "markdown",
             "content": (
                 (
-                    "**先选项目，再选已归档 Task**\n选中后点击“恢复这个 Task”。"
+                    "**恢复已归档 Task**\n先选项目，再选 Task，最后点击“恢复这个 Task”。"
                     if archived
-                    else "**先选项目，再选 Task**\n选中后，后续消息会持续发送到该 Task。"
+                    else (
+                        "✅ **当前 Task 已切换**\n后续消息会持续发送到这个 Task。"
+                        if selection_changed
+                        else "**选择 Codex Task**\n先选项目，再选 Task；当前选择会持续保留。"
+                    )
                 )
                 + (f"\n当前搜索：`{card_markdown_escape(search_query[:80])}`" if query else "")
                 if tasks
@@ -3746,6 +3803,34 @@ def build_archive_task_card(
                 },
             ]
         )
+    header_tags: list[dict[str, Any]] = []
+    if task is not None and not archived:
+        header_tags.append(current_task_tag())
+    if archived or canceled or restored or busy:
+        header_tags.append(
+            {
+                "tag": "text_tag",
+                "text": {
+                    "tag": "plain_text",
+                    "content": (
+                        "已恢复"
+                        if restored
+                        else "已归档"
+                        if archived
+                        else "已取消"
+                        if canceled
+                        else "运行中"
+                    ),
+                },
+                "color": (
+                    "green"
+                    if restored
+                    else "neutral"
+                    if archived or canceled
+                    else "yellow"
+                ),
+            }
+        )
     return {
         "schema": "2.0",
         "config": {
@@ -3755,10 +3840,13 @@ def build_archive_task_card(
             "summary": {"content": "归档 Codex Task"},
         },
         "header": {
-            "title": {"tag": "plain_text", "content": "归档 Codex Task"},
+            "title": {
+                "tag": "plain_text",
+                "content": task_title_text(task) if task else "归档 Codex Task",
+            },
             "subtitle": {
                 "tag": "plain_text",
-                "content": option_text(task) if task else "没有当前 Task",
+                "content": task_project_text(task) if task else "没有当前 Task",
             },
             "template": (
                 "green"
@@ -3770,34 +3858,7 @@ def build_archive_task_card(
                 else "yellow"
             ),
             "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
-            "text_tag_list": (
-                [
-                    {
-                        "tag": "text_tag",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": (
-                                "已恢复"
-                                if restored
-                                else "已归档"
-                                if archived
-                                else "已取消"
-                                if canceled
-                                else "运行中"
-                            ),
-                        },
-                        "color": (
-                            "green"
-                            if restored
-                            else "neutral"
-                            if archived or canceled
-                            else "yellow"
-                        ),
-                    }
-                ]
-                if archived or canceled or restored or busy
-                else []
-            ),
+            "text_tag_list": header_tags,
         },
         "body": {
             "direction": "vertical",
@@ -3820,7 +3881,12 @@ def updated_task_card(
     if not isinstance(card, dict) or card.get("schema") != "2.0":
         return None
     if tasks is not None:
-        return build_task_card(tasks, selected["id"], selected["project"])
+        return build_task_card(
+            tasks,
+            selected["id"],
+            selected["project"],
+            selection_changed=True,
+        )
     header = card.get("header")
     body = card.get("body")
     elements = body.get("elements") if isinstance(body, dict) else None
@@ -3845,15 +3911,19 @@ def updated_task_card(
         if isinstance(option, dict)
     }:
         return None
+    header["title"] = {
+        "tag": "plain_text",
+        "content": task_title_text(selected),
+    }
     header["subtitle"] = {
         "tag": "plain_text",
-        "content": f"当前：{option_text(selected)}",
+        "content": task_project_text(selected),
     }
     header["template"] = "green"
     header["text_tag_list"] = [
         {
             "tag": "text_tag",
-            "text": {"tag": "plain_text", "content": "已选择"},
+            "text": {"tag": "plain_text", "content": "当前 Task"},
             "color": "green",
         }
     ]
@@ -4142,14 +4212,14 @@ def select_task(user_id: str, choice: str, state: dict[str, Any]) -> str:
             return "没有找到该 task。请发送“对话”刷新列表。"
         state.setdefault("selected", {})[user_id] = selected["id"]
         save_state(state)
-        return f"已选择：{selected['title']}（{selected['project']}）"
+        return current_task_changed_text(selected)
 
 
 def current_task(user_id: str, state: dict[str, Any]) -> str:
     task = selected_task(user_id, state)
     if not task:
         return "尚未选择 Codex task。请点击机器人菜单中的“选择 Task”。"
-    return f"当前：{task['title']}（{task['project']}）"
+    return current_task_text(task)
 
 
 def send_ipc_message(connection: socket.socket, message: dict[str, Any]) -> None:
@@ -4614,8 +4684,8 @@ def start_claimed_run(
         if not patch_card(existing_progress_id, build_run_card(run)):
             reply(
                 message_id,
-                f"【Codex · {option_text(run['task'])}】\n状态：正在准备\n"
-                "排队消息已开始执行，完成后会自动回复结果。",
+                task_status_prefix(run["task"], "正在准备")
+                + "排队消息已开始执行，完成后会自动回复结果。",
                 f"queued-running-{run['run_id']}",
             )
     else:
@@ -4633,8 +4703,8 @@ def start_claimed_run(
         else:
             reply(
                 message_id,
-                f"【Codex · {option_text(run['task'])}】\n状态：正在准备\n"
-                "完成后会自动回复结果。",
+                task_status_prefix(run["task"], "正在准备")
+                + "完成后会自动回复结果。",
                 "running",
             )
     worker = threading.Thread(
@@ -5510,7 +5580,7 @@ def process_message_run(
         )
         set_run_progress(run, status, outcome, force=True)
         label = "已停止" if stopped else "已完成" if success else "未完成"
-        prefix = f"【Codex · {option_text(task)}】\n状态：{label}\n\n"
+        prefix = task_status_prefix(task, label)
         clean_result, images = prepare_result_images(result, rollout_images)
         delivered = reply_or_queue(message_id, prefix + clean_result, "final")
         failed_images = 0
@@ -5735,8 +5805,8 @@ def handle_message_event(event: dict[str, Any]) -> None:
             )
             reply(
                 message_id,
-                f"【Codex · {option_text(task)}】\n状态：已排队（第 {position} 条）\n\n"
-                "当前运行完成后会自动执行。",
+                task_status_prefix(task, f"已排队（第 {position} 条）")
+                + "当前运行完成后会自动执行。",
                 "task-queued",
             )
         log(f"input queued position={position} attachments={len(image_keys) + len(file_keys)}")
@@ -5905,7 +5975,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     card = build_archive_task_card(task, restored=True)
                     reply(
                         message_id,
-                        f"已恢复并选择：{option_text(task)}",
+                        current_task_changed_text(task, "已恢复"),
                         f"restored-{event_id}",
                     )
                 else:
@@ -6176,7 +6246,12 @@ def handle_card_event(event: dict[str, Any]) -> None:
             state.setdefault("selected", {})[user_id] = selected["id"]
             state.setdefault("last_projects", {})[user_id] = selected["project"]
             save_state(state)
-            card = build_task_card(tasks, selected["id"], selected["project"])
+            card = build_task_card(
+                tasks,
+                selected["id"],
+                selected["project"],
+                selection_changed=True,
+            )
         if message_id:
             remember_card_context(state, user_id, message_id, card)
     visible_count = len(
@@ -6198,7 +6273,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         else:
             reply(
                 message_id,
-                f"已选择：{selected['title']}（{selected['project']}）",
+                current_task_changed_text(selected),
                 f"selected-{event_id}",
             )
 
@@ -6358,7 +6433,9 @@ def self_test() -> int:
         for task in tasks
         if task["project"] == tasks[0]["project"]
     ]
-    assert card["header"]["subtitle"]["content"] == f"当前：{option_text(tasks[0])}"
+    assert card["header"]["title"]["content"] == task_title_text(tasks[0])
+    assert card["header"]["subtitle"]["content"] == task_project_text(tasks[0])
+    assert card["header"]["text_tag_list"][0]["text"]["content"] == "当前 Task"
     updated = updated_task_card(json.dumps(card), tasks[-1], tasks)
     assert updated is not None
     assert updated["header"]["template"] == "green"

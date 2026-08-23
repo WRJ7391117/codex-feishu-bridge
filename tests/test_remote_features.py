@@ -91,6 +91,63 @@ class RemoteFeatureTests(unittest.TestCase):
             {"id": "task-c", "title": "Paper", "project": "thesis"},
         ]
 
+    def test_task_identity_text_is_consistent_across_plain_replies(self):
+        task = self.tasks()[0]
+
+        self.assertEqual(
+            self.bridge.current_task_text(task),
+            "🟢 当前 Task\n项目：deepori\nTask：Home",
+        )
+        self.assertEqual(
+            self.bridge.current_task_changed_text(task),
+            "✅ 当前 Task 已切换\n项目：deepori\nTask：Home",
+        )
+        self.assertEqual(
+            self.bridge.task_status_prefix(task, "已完成"),
+            "🟢 当前 Task\n项目：deepori\nTask：Home\n状态：已完成\n\n",
+        )
+
+    def test_running_queued_and_approval_cards_show_current_task_identity(self):
+        task = self.tasks()[0]
+        run = {
+            "run_id": "run-1",
+            "task": task,
+            "status": "运行中",
+            "outcome": "running",
+            "started_at": time.time(),
+            "attachment_count": 0,
+        }
+        entry = {
+            "queue_id": "queue-1",
+            "task": task,
+            "image_keys": [],
+            "file_keys": [],
+        }
+        approval = {
+            "type": "command",
+            "request_id": "request-1",
+            "detail": "运行测试",
+        }
+
+        cards = [
+            (self.bridge.build_run_card(run), "运行中"),
+            (self.bridge.build_queued_card(entry, 1), "已排队"),
+            (self.bridge.build_approval_card(run, approval), "待处理"),
+        ]
+        for card, status in cards:
+            with self.subTest(status=status):
+                self.assertEqual(card["header"]["title"]["content"], "Task：Home")
+                self.assertEqual(card["header"]["subtitle"]["content"], "项目：deepori")
+                self.assertEqual(
+                    [tag["text"]["content"] for tag in card["header"]["text_tag_list"]],
+                    ["当前 Task", status],
+                )
+
+        self.assertIn(
+            "Codex 请求运行命令",
+            self.bridge.build_approval_card(run, approval)["body"]["elements"][0]["content"],
+        )
+
     def test_task_card_filters_by_project_without_truncating_project_tasks(self):
         card = self.bridge.build_task_card(self.tasks(), "task-a", "deepori")
         selectors = {
@@ -177,6 +234,26 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertNotIn("新建 Task", button_labels)
         self.assertNotIn("归档当前 Task…", button_labels)
         self.assertIn("查看已归档 Task", button_labels)
+
+    def test_task_card_separates_current_project_and_title(self):
+        card = self.bridge.build_task_card(self.tasks(), "task-a", "deepori")
+
+        self.assertEqual(card["header"]["title"]["content"], "Task：Home")
+        self.assertEqual(card["header"]["subtitle"]["content"], "项目：deepori")
+        self.assertEqual(
+            card["header"]["text_tag_list"][0]["text"]["content"],
+            "当前 Task",
+        )
+
+    def test_task_card_marks_a_new_selection_as_changed(self):
+        card = self.bridge.build_task_card(
+            self.tasks(),
+            "task-b",
+            "deepori",
+            selection_changed=True,
+        )
+
+        self.assertIn("当前 Task 已切换", card["body"]["elements"][0]["content"])
 
     def test_archived_task_card_requires_selection_before_restore(self):
         initial = self.bridge.build_task_card(
@@ -442,7 +519,12 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.assertEqual(len(sent), 1)
         card = sent[0][1]
-        self.assertEqual(card["header"]["subtitle"]["content"], "deepori · Home")
+        self.assertEqual(card["header"]["title"]["content"], "Task：Home")
+        self.assertEqual(card["header"]["subtitle"]["content"], "项目：deepori")
+        self.assertEqual(
+            [tag["text"]["content"] for tag in card["header"]["text_tag_list"]],
+            ["当前 Task"],
+        )
         buttons = [
             item for item in card["body"]["elements"]
             if item.get("tag") == "button"
@@ -495,8 +577,8 @@ class RemoteFeatureTests(unittest.TestCase):
         canceled = self.bridge.update_card.call_args.args[1]
         self.assertIn("已取消归档", canceled["body"]["elements"][0]["content"])
         self.assertEqual(
-            canceled["header"]["text_tag_list"][0]["text"]["content"],
-            "已取消",
+            [tag["text"]["content"] for tag in canceled["header"]["text_tag_list"]],
+            ["当前 Task", "已取消"],
         )
 
     def test_archive_callback_clears_selection_only_after_success(self):
@@ -531,7 +613,10 @@ class RemoteFeatureTests(unittest.TestCase):
             self.bridge.load_state().get("selected", {}),
         )
         completed = self.bridge.update_card.call_args.args[1]
-        self.assertEqual(completed["header"]["text_tag_list"][0]["text"]["content"], "已归档")
+        self.assertEqual(
+            [tag["text"]["content"] for tag in completed["header"]["text_tag_list"]],
+            ["已归档"],
+        )
         self.assertEqual(
             [
                 item["text"]["content"]
@@ -569,8 +654,12 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(state["last_projects"]["ou_admin"], "deepori")
         restored = self.bridge.update_card.call_args.args[1]
         self.assertEqual(
-            restored["header"]["text_tag_list"][0]["text"]["content"],
-            "已恢复",
+            [tag["text"]["content"] for tag in restored["header"]["text_tag_list"]],
+            ["当前 Task", "已恢复"],
+        )
+        self.assertIn(
+            "✅ 当前 Task 已恢复\n项目：deepori\nTask：Home",
+            self.bridge.reply.call_args.args[1],
         )
 
     def test_restore_codex_task_uses_desktop_unarchive_protocol(self):
@@ -718,6 +807,27 @@ class RemoteFeatureTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "没有.*权限"):
             self.bridge.create_codex_task("ou_admin", "thesis", "Paper")
 
+    def test_completed_task_creation_announces_the_new_current_task(self):
+        task = self.tasks()[0]
+        self.bridge.create_codex_task = mock.Mock(return_value=task)
+        self.bridge.reply = mock.Mock(return_value=True)
+
+        self.bridge.complete_task_creation(
+            "om_new_task",
+            "ou_admin",
+            "deepori",
+            "Home",
+        )
+
+        self.assertEqual(
+            self.bridge.load_state()["selected"]["ou_admin"],
+            "task-a",
+        )
+        self.assertIn(
+            "✅ 当前 Task 已新建\n项目：deepori\nTask：Home",
+            self.bridge.reply.call_args.args[1],
+        )
+
     def test_first_completed_turn_restores_requested_task_name_once(self):
         self.bridge.save_state(
             {
@@ -803,6 +913,32 @@ class RemoteFeatureTests(unittest.TestCase):
             if item.get("name") == "task_selector"
         )
         self.assertEqual([option["value"] for option in selector["options"]], ["task-c"])
+
+    def test_task_selector_marks_the_new_current_task(self):
+        tasks = self.tasks()
+        original = self.bridge.build_task_card(tasks, "task-a", "deepori")
+        self.bridge.recent_tasks = lambda user_id: tasks
+        self.bridge.update_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-task",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "action_tag": "select_static",
+                "action_name": "task_selector",
+                "option": "task-b",
+                "token": "token-test",
+                "card_content": json.dumps(original),
+            }
+        )
+
+        state = self.bridge.load_state()
+        self.assertEqual(state["selected"]["ou_admin"], "task-b")
+        updated = self.bridge.update_card.call_args.args[1]
+        self.assertEqual(updated["header"]["title"]["content"], "Task：Site")
+        self.assertEqual(updated["header"]["subtitle"]["content"], "项目：deepori")
+        self.assertIn("当前 Task 已切换", updated["body"]["elements"][0]["content"])
 
     def test_file_and_audio_are_native_desktop_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -942,7 +1078,10 @@ class RemoteFeatureTests(unittest.TestCase):
         state = self.bridge.load_state()
         self.assertEqual(len(state["pending_inputs"]), 1)
         self.assertEqual(calls, ["第一条"])
-        self.assertEqual(cards[1]["header"]["text_tag_list"][0]["text"]["content"], "已排队")
+        self.assertEqual(
+            [tag["text"]["content"] for tag in cards[1]["header"]["text_tag_list"]],
+            ["当前 Task", "已排队"],
+        )
         gate.set()
         for _ in range(200):
             if calls == ["第一条", "第二条"] and not self.bridge.active_run_for_task("task-a"):
@@ -988,7 +1127,10 @@ class RemoteFeatureTests(unittest.TestCase):
         )
 
         self.assertEqual(self.bridge.load_state().get("pending_inputs"), [])
-        self.assertEqual(patched[0]["header"]["text_tag_list"][0]["text"]["content"], "已取消")
+        self.assertEqual(
+            [tag["text"]["content"] for tag in patched[0]["header"]["text_tag_list"]],
+            ["当前 Task", "已取消"],
+        )
 
     def test_desktop_busy_response_converts_direct_message_to_queue(self):
         self.bridge.selected_task = lambda user_id, state: self.tasks()[0]
@@ -1022,7 +1164,10 @@ class RemoteFeatureTests(unittest.TestCase):
         queued = self.bridge.load_state()["pending_inputs"]
         self.assertEqual(len(queued), 1)
         self.assertEqual(queued[0]["content"], "排队执行")
-        self.assertEqual(patched[-1]["header"]["text_tag_list"][0]["text"]["content"], "已排队")
+        self.assertEqual(
+            [tag["text"]["content"] for tag in patched[-1]["header"]["text_tag_list"]],
+            ["当前 Task", "已排队"],
+        )
 
     def test_progress_card_patch_retries_a_transient_failure(self):
         failure = subprocess.CompletedProcess(

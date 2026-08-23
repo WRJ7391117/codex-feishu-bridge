@@ -1,5 +1,14 @@
 # Release Notes
 
+## 1.5.10 (build 22)
+
+- Gives running, queued, completed, stopped, failed, and approval cards an additional green “当前 Task” marker while preserving their existing status colors.
+- Displays the project and Task title on separate labeled lines across progress, queue, approval, selection, and archive cards.
+- Marks Task selection, creation, and restoration as an explicit current-Task change without adding another confirmation step.
+- Uses the same three-line current-Task identity banner in current-status, progress fallback, queue fallback, and final text replies.
+- Adds regression coverage for the shared identity format, card headers and tags, approval request labeling, and Task-switch feedback.
+- Supersedes `1.5.9 (build 21)`; do not publish these fixes under a reused version/build pair.
+
 ## 1.5.9 (build 21)
 
 - Adds a visible “取消新建” button to the new-Task card and clears any pending title request without creating a Task.
