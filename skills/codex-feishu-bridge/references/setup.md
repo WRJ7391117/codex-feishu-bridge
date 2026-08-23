@@ -11,7 +11,7 @@ Run `lark-cli update` when the user has authorized an update. Configure a dedica
 
 The installed bridge prefers its bundled `lark-cli 1.0.89-codex-feishu.2`. It registers `card.action.trigger` with the SDK's card-action handler and durably spools Ori One workflow decisions before returning Feishu's synchronous callback response. The system CLI and bundled CLI share the same Profile and Keychain credentials. General bridge use may explicitly override `lark_cli_path`, but workflow mode fails closed unless it uses the bundled CLI.
 
-Source release `1.5.3 (build 15)` supersedes `1.5.2 (build 14)`, installed baseline `1.5.1 (build 13)`, and the earlier planned `1.4.3` upgrade. Do not downgrade it or overwrite it with a different build carrying the same version.
+Source release `1.6.0 (build 23)` supersedes `1.5.10 (build 22)` and all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
 
 ## Feishu console
 
@@ -67,4 +67,4 @@ With the user present for the required end-to-end check, run `workflow-notify --
 
 The bridge alone owns the one 24-hour reminder for an unanswered decision. Keep reminder generation disabled in Neon and the deterministic runner.
 
-The App automatically checks the latest GitHub Release when its control window opens. Source builds are ad-hoc by default. A release operator with a Developer ID certificate and a `notarytool` Keychain profile can set `CODE_SIGN_IDENTITY` and `NOTARY_PROFILE`; the build then enables hardened runtime, waits for notarization, staples the ticket, and regenerates the archive plus SHA-256 manifest. Never claim notarization when those credentials were not used.
+The App automatically checks the latest GitHub Release when its control window opens. It can install an update only from `/Applications` or `~/Applications`, and only after the three pending-work queues are empty and the GitHub SHA-256, bundle identity/version, code signature, and Universal architectures pass. The helper logs aggregate update results to `~/.codex/log/feishu-bridge-app-update.log` and restores the previous App if replacement or launch fails. Source builds are ad-hoc by default. A release operator with a Developer ID certificate and a `notarytool` Keychain profile can set `CODE_SIGN_IDENTITY` and `NOTARY_PROFILE`; the build then enables hardened runtime, waits for notarization, staples the ticket, and regenerates the archive plus SHA-256 manifest. Never claim notarization when those credentials were not used.

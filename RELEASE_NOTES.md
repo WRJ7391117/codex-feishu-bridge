@@ -1,5 +1,15 @@
 # Release Notes
 
+## 1.6.0 (build 23)
+
+- Corrects Task identity after switching: old run, queue, approval, and result cards no longer claim to be the current Task.
+- Runs different Tasks concurrently up to the configurable global limit while keeping each individual Task strictly serial; queue cards explain the exact reason and capacity.
+- Adds explicit Task-list refresh actions and a per-user current-status card with project, Task, run state, queue count, and update time.
+- Adds a live Mac dashboard for event consumers, active Tasks, queued inputs, pending deliveries, and the most recent Feishu event, plus a 1—8 Task concurrency setting.
+- Adds in-App updates from GitHub Releases with SHA-256, bundle identity, signature, and Universal-architecture verification, an Applications-only replacement helper, rollback, and a pending-work safety gate.
+- Adds aggregate-only private runtime health state and regression coverage for concurrency, card roles, refresh/status behavior, installer safety, and updater boundaries.
+- Supersedes `1.5.10 (build 22)`; this source build is ad-hoc signed unless the release operator supplies Developer ID and notarization credentials.
+
 ## 1.5.10 (build 22)
 
 - Gives running, queued, completed, stopped, failed, and approval cards an additional green “当前 Task” marker while preserving their existing status colors.

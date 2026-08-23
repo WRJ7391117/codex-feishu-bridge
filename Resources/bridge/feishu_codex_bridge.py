@@ -267,6 +267,9 @@ _consumers: list[subprocess.Popen[str]] = []
 _state_lock = threading.RLock()
 _active_runs_lock = threading.RLock()
 _active_runs: dict[str, dict[str, Any]] = {}
+_last_feishu_event_at = 0.0
+_runtime_status_lock = threading.Lock()
+_last_runtime_status_signature: tuple[int, int, int, float] | None = None
 
 
 def set_reply_failure_reason(reason: str) -> None:
@@ -419,6 +422,59 @@ def save_state(state: dict[str, Any]) -> None:
                 os.close(directory_descriptor)
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def runtime_status_path() -> Path:
+    configured = str(os.environ.get("CODEX_FEISHU_RUNTIME_STATUS") or "").strip()
+    return Path(configured).expanduser() if configured else STATE_PATH.with_name("runtime-status.json")
+
+
+def write_runtime_status(active_runs: int | None = None) -> None:
+    global _last_runtime_status_signature
+
+    with _active_runs_lock:
+        running = (
+            sum(
+                run.get("outcome") in {"running", "approval"}
+                for run in _active_runs.values()
+            )
+            if active_runs is None
+            else active_runs
+        )
+    destination = runtime_status_path()
+    consumers = sum(consumer.poll() is None for consumer in _consumers)
+    signature = (running, consumers, MAX_CONCURRENT_RUNS, _last_feishu_event_at)
+    with _runtime_status_lock:
+        if signature == _last_runtime_status_signature and destination.is_file():
+            return
+        try:
+            destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            destination.parent.chmod(0o700)
+            payload = {
+                "active_runs": running,
+                "active_consumers": consumers,
+                "max_concurrent_runs": MAX_CONCURRENT_RUNS,
+                "last_feishu_event_at": _last_feishu_event_at,
+                "updated_at": time.time(),
+            }
+            temporary = destination.parent / (
+                f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(temporary, flags, 0o600)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, destination)
+                destination.chmod(0o600)
+                _last_runtime_status_signature = signature
+            finally:
+                temporary.unlink(missing_ok=True)
+        except OSError:
+            return
 
 
 def desktop_project_names() -> dict[str, str]:
@@ -1014,6 +1070,7 @@ def complete_task_creation(
         f"{current_task_changed_text(task, '已新建')}\n现在发送的下一条消息会进入这个 Task。",
         "new-task-created",
     )
+    refresh_user_task_identity_cards(user_id, "当前 Task 已新建", task)
 
 
 def restore_pending_task_name(user_id: str, task_id: str) -> bool:
@@ -2990,8 +3047,17 @@ def current_task_changed_text(task: dict[str, str], action: str = "已切换") -
     return f"✅ 当前 Task {action}\n{task_project_text(task)}\n{task_title_text(task)}"
 
 
-def task_status_prefix(task: dict[str, str], status: str) -> str:
-    return f"{current_task_text(task)}\n状态：{status}\n\n"
+def task_status_prefix(
+    task: dict[str, str],
+    status: str,
+    is_current: bool = True,
+) -> str:
+    identity = (
+        current_task_text(task)
+        if is_current
+        else f"🔵 结果所属 Task\n{task_project_text(task)}\n{task_title_text(task)}"
+    )
+    return f"{identity}\n状态：{status}\n\n"
 
 
 def current_task_tag() -> dict[str, Any]:
@@ -2999,6 +3065,16 @@ def current_task_tag() -> dict[str, Any]:
         "tag": "text_tag",
         "text": {"tag": "plain_text", "content": "当前 Task"},
         "color": "green",
+    }
+
+
+def task_role_tag(is_current: bool, other_label: str) -> dict[str, Any]:
+    if is_current:
+        return current_task_tag()
+    return {
+        "tag": "text_tag",
+        "text": {"tag": "plain_text", "content": other_label},
+        "color": "blue",
     }
 
 
@@ -3013,6 +3089,8 @@ def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
         "failed": ("red", "未完成", "red"),
     }
     template, tag_text, tag_color = templates.get(outcome, templates["running"])
+    is_current = run.get("is_current_task") is not False
+    role_label = "结果所属 Task" if outcome in {"completed", "stopped", "failed"} else "运行 Task"
     attachment_count = int(run.get("attachment_count") or 0)
     details = [
         f"**当前阶段**\n{status}",
@@ -3067,7 +3145,7 @@ def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
             "template": template,
             "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
             "text_tag_list": [
-                current_task_tag(),
+                task_role_tag(is_current, role_label),
                 {
                     "tag": "text_tag",
                     "text": {"tag": "plain_text", "content": tag_text},
@@ -3087,10 +3165,21 @@ def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
 def build_queued_card(
     entry: dict[str, Any],
     position: int,
-    status: str = "等待当前运行完成后自动执行",
+    status: str = "",
     canceled: bool = False,
 ) -> dict[str, Any]:
     task = entry["task"]
+    is_current = entry.get("is_current_task") is not False
+    reason = str(entry.get("queue_reason") or "same_task")
+    if not status:
+        if reason == "global_limit":
+            active = int(entry.get("active_run_count") or MAX_CONCURRENT_RUNS)
+            maximum = int(entry.get("max_concurrent_runs") or MAX_CONCURRENT_RUNS)
+            status = f"全局并发已满（{active}/{maximum}），有空闲位置后自动执行"
+        elif reason == "desktop_task_busy":
+            status = "Codex Desktop 中的这个 Task 仍在运行，15 秒后自动重试"
+        else:
+            status = "同一 Task 正在运行，将按发送顺序自动执行"
     attachment_count = len(entry.get("image_keys") or []) + len(
         entry.get("file_keys") or []
     )
@@ -3098,7 +3187,7 @@ def build_queued_card(
         f"**当前状态**\n{'已取消排队' if canceled else status}",
     ]
     if not canceled:
-        details.append(f"<font color='grey'>队列位置：第 {position} 条</font>")
+        details.append(f"<font color='grey'>本 Task 队列：第 {position} 条</font>")
     if attachment_count:
         details.append(f"<font color='grey'>本轮附件：{attachment_count} 个</font>")
     elements: list[dict[str, Any]] = [
@@ -3142,7 +3231,7 @@ def build_queued_card(
             "template": "grey" if canceled else "blue",
             "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
             "text_tag_list": [
-                current_task_tag(),
+                task_role_tag(is_current, "排队 Task"),
                 {
                     "tag": "text_tag",
                     "text": {
@@ -3177,6 +3266,7 @@ def build_approval_card(run: dict[str, Any], approval: dict[str, Any]) -> dict[s
         "request_id": str(approval["request_id"]),
         "approval_type": request_type,
     }
+    is_current = run.get("is_current_task") is not False
     return {
         "schema": "2.0",
         "config": {
@@ -3197,7 +3287,7 @@ def build_approval_card(run: dict[str, Any], approval: dict[str, Any]) -> dict[s
             "template": "yellow",
             "icon": {"tag": "standard_icon", "token": "approval_colorful"},
             "text_tag_list": [
-                current_task_tag(),
+                task_role_tag(is_current, "授权所属 Task"),
                 {
                     "tag": "text_tag",
                     "text": {"tag": "plain_text", "content": "待处理"},
@@ -3256,7 +3346,10 @@ def completed_approval_card(
     card = build_approval_card(run, approval)
     card["header"]["template"] = "green" if approved else "grey"
     card["header"]["text_tag_list"] = [
-        current_task_tag(),
+        task_role_tag(
+            run.get("is_current_task") is not False,
+            "授权所属 Task",
+        ),
         {
             "tag": "text_tag",
             "text": {"tag": "plain_text", "content": "已允许" if approved else "已拒绝"},
@@ -3432,6 +3525,35 @@ def build_task_card(
             )
         page_label = f"第 {active_page + 1}/{page_count} 页 · {len(project_tasks)} 个 Task"
         elements.append({"tag": "markdown", "content": f"<font color='grey'>{page_label}</font>"})
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "刷新 Task 列表"},
+                "type": "default",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": {
+                            "action": (
+                                "refresh_archived_tasks"
+                                if archived
+                                else "refresh_task_list"
+                            )
+                        },
+                    }
+                ],
+            }
+        )
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": (
+                    "<font color='grey'>"
+                    f"最后刷新：{time.strftime('%H:%M:%S', time.localtime())}"
+                    "</font>"
+                ),
+            }
+        )
         if active_page > 0:
             elements.append(
                 {
@@ -4135,6 +4257,223 @@ def selected_task(user_id: str, state: dict[str, Any]) -> dict[str, str] | None:
         return task
 
 
+def task_is_current(user_id: str, task_id: str) -> bool:
+    with _state_lock:
+        state = load_state()
+        return str(state.get("selected", {}).get(user_id) or "") == task_id
+
+
+def build_current_status_card(
+    task: dict[str, str],
+    status: str,
+    active_runs: int,
+    queued_inputs: int,
+    change: str = "",
+    now: float | None = None,
+) -> dict[str, Any]:
+    timestamp = time.time() if now is None else now
+    status_tag = (
+        ("运行中", "blue")
+        if active_runs
+        else ("有排队", "yellow")
+        if queued_inputs
+        else ("空闲", "neutral")
+    )
+    lines = []
+    if change:
+        lines.append(f"✅ **{card_markdown_escape(change)}**")
+    lines.extend(
+        [
+            f"**当前状态**\n{card_markdown_escape(status)}",
+            (
+                "<font color='grey'>"
+                f"运行中：{active_runs} · 排队：{queued_inputs} · "
+                f"更新：{time.strftime('%H:%M:%S', time.localtime(timestamp))}"
+                "</font>"
+            ),
+        ]
+    )
+    return {
+        "schema": "2.0",
+        "config": {
+            "update_multi": True,
+            "width_mode": "default",
+            "enable_forward": False,
+            "summary": {"content": f"当前 Task：{task['title']}"},
+        },
+        "header": {
+            "title": {"tag": "plain_text", "content": task_title_text(task)},
+            "subtitle": {"tag": "plain_text", "content": task_project_text(task)},
+            "template": "green",
+            "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
+            "text_tag_list": [
+                current_task_tag(),
+                {
+                    "tag": "text_tag",
+                    "text": {"tag": "plain_text", "content": status_tag[0]},
+                    "color": status_tag[1],
+                },
+            ],
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": [
+                {"tag": "markdown", "content": "\n\n".join(lines)},
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "刷新状态"},
+                    "type": "default",
+                    "behaviors": [
+                        {"type": "callback", "value": {"action": "refresh_current_status"}}
+                    ],
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "切换 Task"},
+                    "type": "default",
+                    "behaviors": [
+                        {"type": "callback", "value": {"action": "show_task_selector"}}
+                    ],
+                },
+            ],
+        },
+    }
+
+
+def current_status_card_for_user(
+    user_id: str,
+    task: dict[str, str],
+    change: str = "",
+) -> dict[str, Any]:
+    task_id = str(task["id"])
+    with _active_runs_lock:
+        matching_runs = [
+            run
+            for run in _active_runs.values()
+            if str(run.get("user_id") or "") == user_id
+            and str(run.get("task", {}).get("id") or "") == task_id
+            and run.get("outcome") in {"running", "approval"}
+        ]
+        status = str(matching_runs[0].get("status") or "正在运行") if matching_runs else "空闲"
+    with _state_lock:
+        queued = sum(
+            isinstance(entry, dict)
+            and str(entry.get("user_id") or "") == user_id
+            and str(entry.get("task", {}).get("id") or "") == task_id
+            for entry in pending_inputs(load_state())
+        )
+    if not matching_runs and queued:
+        status = "等待执行"
+    return build_current_status_card(
+        task,
+        status,
+        len(matching_runs),
+        queued,
+        change,
+    )
+
+
+def update_current_status_card(
+    user_id: str,
+    change: str = "",
+    task: dict[str, str] | None = None,
+    ensure: bool = False,
+) -> bool:
+    with _state_lock:
+        state = load_state()
+        current_id = str(state.get("selected", {}).get(user_id) or "")
+        record = state.get("current_status_cards", {}).get(user_id, {})
+        message_id = str(record.get("message_id") or "") if isinstance(record, dict) else ""
+    if task is None and current_id:
+        task = next(
+            (
+                candidate
+                for candidate in recent_tasks(user_id)
+                if str(candidate.get("id") or "") == current_id
+            ),
+            None,
+        )
+    if task is None:
+        return False
+    if not message_id and not ensure:
+        return False
+    card = current_status_card_for_user(user_id, task, change)
+    if message_id and patch_card(message_id, card):
+        return True
+    success, chat_id, new_message_id = send_card(
+        user_id,
+        card,
+        f"current-status-{uuid.uuid4().hex}",
+    )
+    if not success or not new_message_id:
+        return False
+    if message_id:
+        clear_pending_card_patch(message_id)
+    with _state_lock:
+        state = load_state()
+        state.setdefault("current_status_cards", {})[user_id] = {
+            "message_id": new_message_id,
+            "chat_id": chat_id or "",
+        }
+        if chat_id:
+            authorize_chat(state, user_id, chat_id)
+        save_state(state)
+    return True
+
+
+def refresh_user_task_identity_cards(
+    user_id: str,
+    change: str = "",
+    task: dict[str, str] | None = None,
+) -> None:
+    with _state_lock:
+        state = load_state()
+        current_id = str(state.get("selected", {}).get(user_id) or "")
+        entries = pending_inputs(state)
+        queued_cards: list[tuple[str, dict[str, Any], int]] = []
+        changed = False
+        for entry in entries:
+            if not isinstance(entry, dict) or str(entry.get("user_id") or "") != user_id:
+                continue
+            is_current = str(entry.get("task", {}).get("id") or "") == current_id
+            if entry.get("is_current_task") is not is_current:
+                entry["is_current_task"] = is_current
+                changed = True
+            message_id = str(entry.get("progress_message_id") or "")
+            if message_id:
+                position = queued_position(
+                    entries,
+                    str(entry.get("task", {}).get("id") or ""),
+                    str(entry.get("queue_id") or ""),
+                )
+                queued_cards.append((message_id, dict(entry), position))
+        if changed:
+            save_state(state)
+    with _active_runs_lock:
+        run_cards: list[tuple[str, dict[str, Any]]] = []
+        approval_cards: list[tuple[str, dict[str, Any]]] = []
+        for run in _active_runs.values():
+            if str(run.get("user_id") or "") != user_id:
+                continue
+            run["is_current_task"] = str(run.get("task", {}).get("id") or "") == current_id
+            message_id = str(run.get("progress_message_id") or "")
+            if message_id:
+                run_cards.append((message_id, build_run_card(run)))
+            for approval in run.get("approvals", {}).values():
+                approval_message_id = str(approval.get("message_id") or "")
+                if approval_message_id and not approval.get("resolved"):
+                    approval_cards.append(
+                        (approval_message_id, build_approval_card(run, approval))
+                    )
+    for message_id, card in run_cards + approval_cards:
+        patch_card(message_id, card)
+    for message_id, entry, position in queued_cards:
+        patch_card(message_id, build_queued_card(entry, position))
+    update_current_status_card(user_id, change, task=task, ensure=True)
+
+
 def task_card_for_state(user_id: str, state: dict[str, Any]) -> dict[str, Any]:
     with _state_lock:
         selected = selected_task(user_id, state)
@@ -4591,6 +4930,7 @@ def refresh_queued_cards(task_id: str) -> None:
 def register_active_run(run: dict[str, Any]) -> None:
     with _active_runs_lock:
         _active_runs[str(run["run_id"])] = run
+    write_runtime_status()
 
 
 def claim_active_run(run: dict[str, Any]) -> bool:
@@ -4601,21 +4941,27 @@ def claim_active_run(run: dict[str, Any]) -> bool:
             for item in _active_runs.values()
             if item.get("outcome") in {"running", "approval"}
         ]
-        if len(running) >= MAX_CONCURRENT_RUNS:
-            return False
         if any(
             str(item["task"]["id"]) == thread_id
             and item.get("outcome") in {"running", "approval"}
             for item in running
         ):
+            run["queue_reason"] = "same_task"
+            run["active_run_count"] = len(running)
+            return False
+        if len(running) >= MAX_CONCURRENT_RUNS:
+            run["queue_reason"] = "global_limit"
+            run["active_run_count"] = len(running)
             return False
         _active_runs[str(run["run_id"])] = run
-        return True
+    write_runtime_status()
+    return True
 
 
 def remove_active_run(run_id: str) -> None:
     with _active_runs_lock:
         _active_runs.pop(run_id, None)
+    write_runtime_status()
 
 
 def active_run(run_id: str) -> dict[str, Any] | None:
@@ -4652,6 +4998,7 @@ def new_run(
         "chat_id": chat_id,
         "source_message_id": message_id,
         "task": task,
+        "is_current_task": task_is_current(user_id, str(task["id"])),
         "status": "正在准备",
         "outcome": "running",
         "started_at": time.time(),
@@ -4684,7 +5031,11 @@ def start_claimed_run(
         if not patch_card(existing_progress_id, build_run_card(run)):
             reply(
                 message_id,
-                task_status_prefix(run["task"], "正在准备")
+                task_status_prefix(
+                    run["task"],
+                    "正在准备",
+                    run.get("is_current_task") is not False,
+                )
                 + "排队消息已开始执行，完成后会自动回复结果。",
                 f"queued-running-{run['run_id']}",
             )
@@ -4703,7 +5054,11 @@ def start_claimed_run(
         else:
             reply(
                 message_id,
-                task_status_prefix(run["task"], "正在准备")
+                task_status_prefix(
+                    run["task"],
+                    "正在准备",
+                    run.get("is_current_task") is not False,
+                )
                 + "完成后会自动回复结果。",
                 "running",
             )
@@ -4715,6 +5070,7 @@ def start_claimed_run(
     )
     run["worker"] = worker
     worker.start()
+    update_current_status_card(str(run["user_id"]))
 
 
 def start_next_queued_input(task_id: str, now: float | None = None) -> bool:
@@ -4757,6 +5113,7 @@ def start_next_queued_input(task_id: str, now: float | None = None) -> bool:
             entry,
         )
         _active_runs[str(run["run_id"])] = run
+        write_runtime_status()
     start_claimed_run(
         run,
         str(entry.get("content") or ""),
@@ -4791,6 +5148,12 @@ def set_run_progress(
     force: bool = False,
 ) -> None:
     now = time.time()
+    with _state_lock:
+        selected_id = str(
+            load_state().get("selected", {}).get(str(run["user_id"])) or ""
+        )
+    if selected_id:
+        run["is_current_task"] = selected_id == str(run["task"]["id"])
     with _active_runs_lock:
         run["status"] = status
         if outcome is not None:
@@ -5421,6 +5784,9 @@ def queue_busy_run(
     )
     entry["available_at"] = time.time() + 15
     entry["ready"] = True
+    entry["queue_reason"] = "desktop_task_busy"
+    entry["is_current_task"] = run.get("is_current_task") is not False
+    entry["max_concurrent_runs"] = MAX_CONCURRENT_RUNS
     with _state_lock:
         state = load_state()
         entries = pending_inputs(state)
@@ -5449,12 +5815,9 @@ def queue_busy_run(
     if message_id:
         patch_card(
             message_id,
-            build_queued_card(
-                entry,
-                position,
-                "Codex Desktop 中的 Task 仍在运行，15 秒后自动重试",
-            ),
+            build_queued_card(entry, position),
         )
+    update_current_status_card(str(run["user_id"]))
     log("input queued reason=desktop-task-busy")
     return True
 
@@ -5580,7 +5943,8 @@ def process_message_run(
         )
         set_run_progress(run, status, outcome, force=True)
         label = "已停止" if stopped else "已完成" if success else "未完成"
-        prefix = task_status_prefix(task, label)
+        is_current = task_is_current(str(run["user_id"]), str(task["id"]))
+        prefix = task_status_prefix(task, label, is_current)
         clean_result, images = prepare_result_images(result, rollout_images)
         delivered = reply_or_queue(message_id, prefix + clean_result, "final")
         failed_images = 0
@@ -5613,6 +5977,7 @@ def process_message_run(
     finally:
         task_id = str(run["task"]["id"])
         remove_active_run(str(run["run_id"]))
+        update_current_status_card(str(run["user_id"]))
         start_next_queued_input(task_id)
 
 
@@ -5703,6 +6068,7 @@ def handle_message_event(event: dict[str, Any]) -> None:
             reply(message_id, show_tasks(user_id, state), "list-fallback")
         return
     if not image_keys and not file_keys and content in {"当前", "/current", "current"}:
+        update_current_status_card(user_id, ensure=True)
         reply(message_id, current_task(user_id, state), "current")
         return
     search_match = re.fullmatch(r"(?:/)?(?:搜索|search)\s+(.+)", content, re.IGNORECASE)
@@ -5718,11 +6084,14 @@ def handle_message_event(event: dict[str, Any]) -> None:
         return
     match = re.fullmatch(r"(?:/)?(?:选择|使用|use)\s+(.+)", content, re.IGNORECASE)
     if not image_keys and not file_keys and match:
+        selection_reply = select_task(user_id, match.group(1).strip(), state)
         reply(
             message_id,
-            select_task(user_id, match.group(1).strip(), state),
+            selection_reply,
             "select",
         )
+        if selection_reply.startswith("✅"):
+            refresh_user_task_identity_cards(user_id, "当前 Task 已切换")
         return
     if len(content) > MAX_PROMPT_CHARS:
         reply(message_id, f"消息超过 {MAX_PROMPT_CHARS} 字，请缩短后重试。", "too-long")
@@ -5761,6 +6130,7 @@ def handle_message_event(event: dict[str, Any]) -> None:
         image_keys,
         file_keys,
     )
+    run["is_current_task"] = True
     if not claim_active_run(run):
         entry = {
             "queue_id": str(uuid.uuid4()),
@@ -5776,6 +6146,10 @@ def handle_message_event(event: dict[str, Any]) -> None:
             "created_at": time.time(),
             "available_at": 0,
             "ready": False,
+            "queue_reason": str(run.get("queue_reason") or "same_task"),
+            "active_run_count": int(run.get("active_run_count") or 1),
+            "max_concurrent_runs": MAX_CONCURRENT_RUNS,
+            "is_current_task": run.get("is_current_task") is not False,
         }
         queued, position, error = enqueue_pending_input(entry)
         if not queued:
@@ -5805,11 +6179,16 @@ def handle_message_event(event: dict[str, Any]) -> None:
             )
             reply(
                 message_id,
-                task_status_prefix(task, f"已排队（第 {position} 条）")
+                task_status_prefix(
+                    task,
+                    f"已排队（第 {position} 条）",
+                    entry.get("is_current_task") is not False,
+                )
                 + "当前运行完成后会自动执行。",
                 "task-queued",
             )
         log(f"input queued position={position} attachments={len(image_keys) + len(file_keys)}")
+        update_current_status_card(user_id)
         start_next_queued_input(str(task["id"]))
         return
     start_claimed_run(run, content, image_keys, file_keys, raw_content, message_type)
@@ -5855,11 +6234,21 @@ def handle_card_event(event: dict[str, Any]) -> None:
                 )
             task_id = str(entry["task"]["id"])
             refresh_queued_cards(task_id)
+            update_current_status_card(user_id)
             log("queued input canceled")
+            return
+        if action == "refresh_current_status":
+            with _state_lock:
+                state = load_state()
+                if not mark_processed(state, f"card:{event_id}"):
+                    return
+            update_current_status_card(user_id, ensure=True)
             return
         if action in {
             "task_page",
             "archived_task_page",
+            "refresh_task_list",
+            "refresh_archived_tasks",
             "clear_task_search",
             "new_task",
             "cancel_new_task",
@@ -5870,11 +6259,16 @@ def handle_card_event(event: dict[str, Any]) -> None:
             "show_archived_tasks",
             "show_new_task",
         }:
+            status_change = ""
             with _state_lock:
                 state = load_state()
                 if not mark_processed(state, f"card:{event_id}"):
                     return
-                if action == "task_page":
+                if action == "refresh_task_list":
+                    card = task_card_for_state(user_id, state)
+                elif action == "refresh_archived_tasks":
+                    card = archived_task_card_for_state(user_id, state)
+                elif action == "task_page":
                     try:
                         page = max(0, int(payload.get("page") or 0))
                     except (TypeError, ValueError):
@@ -5973,6 +6367,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     state.setdefault("task_pages", {})[user_id] = 0
                     save_state(state)
                     card = build_archive_task_card(task, restored=True)
+                    status_change = "当前 Task 已恢复"
                     reply(
                         message_id,
                         current_task_changed_text(task, "已恢复"),
@@ -6027,9 +6422,13 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     current_state = load_state()
                     remember_card_context(current_state, user_id, message_id, card)
             if token and update_card(token, card):
+                if status_change:
+                    refresh_user_task_identity_cards(user_id, status_change, task)
                 return
             if message_id:
                 patch_card(message_id, card)
+            if status_change:
+                refresh_user_task_identity_cards(user_id, status_change, task)
             return
         run = active_run(str(payload.get("run_id") or ""))
         if (
@@ -6266,6 +6665,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
     token = str(event.get("token") or "")
     if token and update_card(token, card):
         log(f"card selection updated name={action_name}")
+        if action_name == "task_selector":
+            refresh_user_task_identity_cards(user_id, "当前 Task 已切换", selected)
         return
     if message_id:
         if action_name == "project_selector":
@@ -6276,6 +6677,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
                 current_task_changed_text(selected),
                 f"selected-{event_id}",
             )
+    if action_name == "task_selector":
+        refresh_user_task_identity_cards(user_id, "当前 Task 已切换", selected)
 
 
 def handle_menu_event(event: dict[str, Any]) -> None:
@@ -6319,6 +6722,10 @@ def handle_menu_event(event: dict[str, Any]) -> None:
 
 
 def dispatch_event(event: dict[str, Any]) -> None:
+    global _last_feishu_event_at
+
+    _last_feishu_event_at = time.time()
+    write_runtime_status()
     if event.get("type") == "card.action.trigger":
         handle_card_event(event)
     elif event.get("type") == "application.bot.menu_v6":
@@ -6370,6 +6777,7 @@ def stop(_signum: int, _frame: Any) -> None:
     for consumer in _consumers:
         if consumer.poll() is None:
             consumer.terminate()
+    write_runtime_status(active_runs=0)
 
 
 def diagnostic_report() -> dict[str, Any]:
@@ -6533,11 +6941,17 @@ def main() -> int:
             daemon=True,
         ).start()
 
+    write_runtime_status()
+
     next_pending_retry = 0.0
     next_input_retry = 0.0
     next_workflow_retry = 0.0
+    next_runtime_status = 0.0
     while any(consumer.poll() is None for consumer in _consumers):
         now = time.time()
+        if now >= next_runtime_status:
+            write_runtime_status()
+            next_runtime_status = now + 5
         if now >= next_pending_retry:
             try:
                 retry_pending_replies(now)
@@ -6568,6 +6982,7 @@ def main() -> int:
             acknowledge_workflow_decision_inbox(event)
         except Exception as exc:
             log(f"event failed: {type(exc).__name__}: {exc}")
+    write_runtime_status(active_runs=0)
     return next(
         (consumer.returncode for consumer in _consumers if consumer.returncode),
         0,

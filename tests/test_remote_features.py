@@ -45,6 +45,9 @@ class RemoteFeatureTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.bridge.STATE_PATH = Path(self.temporary.name) / "state.json"
         self.bridge.LOG_PATH = Path(self.temporary.name) / "bridge.log"
+        self.bridge.send_card = mock.Mock(
+            return_value=(True, "oc_test", "om_current_status")
+        )
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -83,6 +86,30 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.assertTrue(self.bridge.claim_active_run(first))
         self.assertFalse(self.bridge.claim_active_run(second))
+        self.assertEqual(second["queue_reason"], "same_task")
+
+    def test_different_tasks_in_same_project_run_in_parallel_until_global_limit(self):
+        self.bridge.MAX_CONCURRENT_RUNS = 2
+        first = self.bridge.new_run(
+            "ou_admin", "oc_test", "om_1", self.tasks()[0], [], []
+        )
+        second = self.bridge.new_run(
+            "ou_admin", "oc_test", "om_2", self.tasks()[1], [], []
+        )
+        third = self.bridge.new_run(
+            "ou_admin",
+            "oc_test",
+            "om_3",
+            {"id": "task-d", "title": "API", "project": "deepori"},
+            [],
+            [],
+        )
+
+        self.assertTrue(self.bridge.claim_active_run(first))
+        self.assertTrue(self.bridge.claim_active_run(second))
+        self.assertFalse(self.bridge.claim_active_run(third))
+        self.assertEqual(third["queue_reason"], "global_limit")
+        self.assertEqual(third["active_run_count"], 2)
 
     def tasks(self):
         return [
@@ -105,6 +132,10 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(
             self.bridge.task_status_prefix(task, "已完成"),
             "🟢 当前 Task\n项目：deepori\nTask：Home\n状态：已完成\n\n",
+        )
+        self.assertEqual(
+            self.bridge.task_status_prefix(task, "已完成", False),
+            "🔵 结果所属 Task\n项目：deepori\nTask：Home\n状态：已完成\n\n",
         )
 
     def test_running_queued_and_approval_cards_show_current_task_identity(self):
@@ -147,6 +178,59 @@ class RemoteFeatureTests(unittest.TestCase):
             "Codex 请求运行命令",
             self.bridge.build_approval_card(run, approval)["body"]["elements"][0]["content"],
         )
+
+    def test_old_task_cards_stop_claiming_to_be_current_after_switch(self):
+        task = self.tasks()[0]
+        run = {
+            "run_id": "run-1",
+            "task": task,
+            "status": "运行中",
+            "outcome": "running",
+            "started_at": time.time(),
+            "attachment_count": 0,
+            "is_current_task": False,
+        }
+        queued = {
+            "queue_id": "queue-1",
+            "task": task,
+            "image_keys": [],
+            "file_keys": [],
+            "is_current_task": False,
+        }
+
+        self.assertEqual(
+            self.bridge.build_run_card(run)["header"]["text_tag_list"][0]["text"]["content"],
+            "运行 Task",
+        )
+        self.assertEqual(
+            self.bridge.build_queued_card(queued, 1)["header"]["text_tag_list"][0]["text"]["content"],
+            "排队 Task",
+        )
+
+    def test_queue_card_explains_global_capacity_and_same_task_reasons(self):
+        base = {
+            "queue_id": "queue-1",
+            "task": self.tasks()[0],
+            "image_keys": [],
+            "file_keys": [],
+        }
+        same_task = self.bridge.build_queued_card(
+            {**base, "queue_reason": "same_task"},
+            2,
+        )
+        global_limit = self.bridge.build_queued_card(
+            {
+                **base,
+                "queue_reason": "global_limit",
+                "active_run_count": 2,
+                "max_concurrent_runs": 2,
+            },
+            1,
+        )
+
+        self.assertIn("同一 Task 正在运行", same_task["body"]["elements"][0]["content"])
+        self.assertIn("本 Task 队列：第 2 条", same_task["body"]["elements"][0]["content"])
+        self.assertIn("全局并发已满（2/2）", global_limit["body"]["elements"][0]["content"])
 
     def test_task_card_filters_by_project_without_truncating_project_tasks(self):
         card = self.bridge.build_task_card(self.tasks(), "task-a", "deepori")
@@ -234,6 +318,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertNotIn("新建 Task", button_labels)
         self.assertNotIn("归档当前 Task…", button_labels)
         self.assertIn("查看已归档 Task", button_labels)
+        self.assertIn("刷新 Task 列表", button_labels)
 
     def test_task_card_separates_current_project_and_title(self):
         card = self.bridge.build_task_card(self.tasks(), "task-a", "deepori")
@@ -254,6 +339,30 @@ class RemoteFeatureTests(unittest.TestCase):
         )
 
         self.assertIn("当前 Task 已切换", card["body"]["elements"][0]["content"])
+
+    def test_current_status_card_is_reused_per_user(self):
+        self.bridge.save_state({"selected": {"ou_admin": "task-a"}})
+        self.bridge.recent_tasks = lambda user_id: self.tasks()
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.assertTrue(
+            self.bridge.update_current_status_card(
+                "ou_admin",
+                "当前 Task 已切换",
+                task=self.tasks()[0],
+                ensure=True,
+            )
+        )
+        self.assertTrue(self.bridge.update_current_status_card("ou_admin"))
+
+        self.bridge.send_card.assert_called_once()
+        self.bridge.patch_card.assert_called_once()
+        status_card = self.bridge.patch_card.call_args.args[1]
+        self.assertEqual(status_card["header"]["title"]["content"], "Task：Home")
+        self.assertEqual(
+            status_card["header"]["text_tag_list"][0]["text"]["content"],
+            "当前 Task",
+        )
 
     def test_archived_task_card_requires_selection_before_restore(self):
         initial = self.bridge.build_task_card(
@@ -279,10 +388,10 @@ class RemoteFeatureTests(unittest.TestCase):
             for item in selected["body"]["elements"]
             if item.get("tag") == "button"
         ]
-        self.assertEqual(initial_buttons, ["返回当前 Task"])
+        self.assertEqual(initial_buttons, ["刷新 Task 列表", "返回当前 Task"])
         self.assertEqual(
             selected_buttons,
-            ["恢复这个 Task", "返回当前 Task"],
+            ["刷新 Task 列表", "恢复这个 Task", "返回当前 Task"],
         )
         restore = next(
             item

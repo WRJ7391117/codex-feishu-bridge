@@ -40,6 +40,7 @@ umask 077
     "${HOME}/.codex/feishu-bridge/workflow-state.json" \
     --files \
     "${HOME}/.codex/feishu-bridge/state.json" \
+    "${HOME}/.codex/feishu-bridge/runtime-status.json" \
     "${HOME}/.codex/log/feishu-bridge.log" \
     "${HOME}/.codex/log/feishu-bridge-launchd.log" \
     "${support_dir}/bridge.py" \
@@ -235,6 +236,29 @@ for path in sections["workflow-state"]:
             workflow_module.WorkflowStore(path)._validate_state(payload)
         except workflow_module.WorkflowStateError as exc:
             raise SystemExit("existing workflow state is invalid") from exc
+
+state_path = next(
+    (path for path in sections["files"] if path.name == "state.json"),
+    None,
+)
+if state_path is not None:
+    bridge_state = read_json(state_path, "existing bridge state is invalid")
+    if bridge_state is not None:
+        if not isinstance(bridge_state, dict):
+            raise SystemExit("existing bridge state is invalid")
+        pending_inputs = bridge_state.get("pending_inputs", [])
+        pending_replies = bridge_state.get("pending_replies", [])
+        pending_creations = bridge_state.get("pending_task_creations", {})
+        if (
+            not isinstance(pending_inputs, list)
+            or not isinstance(pending_replies, list)
+            or not isinstance(pending_creations, dict)
+        ):
+            raise SystemExit("existing bridge state is invalid")
+        if pending_inputs or pending_replies or pending_creations:
+            raise SystemExit(
+                "bridge has pending Feishu work; wait for all queues to clear before updating"
+            )
 PY
 
 if /bin/launchctl print "${domain}/${label}" >/dev/null 2>&1 || \
@@ -332,6 +356,7 @@ fi
 /usr/bin/python3 - \
     "${support_dir}/config.json" \
     "${HOME}/.codex/feishu-bridge/state.json" \
+    "${HOME}/.codex/feishu-bridge/runtime-status.json" \
     "${HOME}/.codex/feishu-bridge/workflow-state.json" \
     --logs \
     "${HOME}/.codex/log/feishu-bridge.log" \

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 
@@ -27,7 +28,37 @@ private struct AccessRequestDraft: Identifiable {
     let openID: String
 }
 
-private final class BridgeController {
+private struct BridgeHealthSnapshot {
+    let activeConsumers: Int
+    let activeRuns: Int
+    let pendingInputs: Int
+    let pendingDeliveries: Int
+    let pendingTaskCreations: Int
+    let maxConcurrentRuns: Int
+    let lastFeishuEventAt: Date?
+
+    static let empty = BridgeHealthSnapshot(
+        activeConsumers: 0,
+        activeRuns: 0,
+        pendingInputs: 0,
+        pendingDeliveries: 0,
+        pendingTaskCreations: 0,
+        maxConcurrentRuns: 2,
+        lastFeishuEventAt: nil
+    )
+}
+
+private enum BridgeUpdateError: LocalizedError {
+    case message(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .message(let text): text
+        }
+    }
+}
+
+private final class BridgeController: @unchecked Sendable {
     let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Codex Feishu Bridge", isDirectory: true)
 
@@ -35,6 +66,9 @@ private final class BridgeController {
     var stateURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/feishu-bridge/state.json")
+    }
+    var runtimeStatusURL: URL {
+        stateURL.deletingLastPathComponent().appendingPathComponent("runtime-status.json")
     }
     var logURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -124,6 +158,124 @@ private final class BridgeController {
         }
     }
 
+    func healthSnapshot() -> BridgeHealthSnapshot {
+        let state = readJSONObject(at: stateURL)
+        let runtime = readJSONObject(at: runtimeStatusURL)
+        let pendingInputs = (state["pending_inputs"] as? [Any])?.count ?? 0
+        let pendingDeliveries = (state["pending_replies"] as? [Any])?.count ?? 0
+        let pendingTaskCreations = (state["pending_task_creations"] as? [String: Any])?.count ?? 0
+        let lastEvent = (runtime["last_feishu_event_at"] as? NSNumber)?.doubleValue ?? 0
+        return BridgeHealthSnapshot(
+            activeConsumers: (runtime["active_consumers"] as? NSNumber)?.intValue ?? 0,
+            activeRuns: (runtime["active_runs"] as? NSNumber)?.intValue ?? 0,
+            pendingInputs: pendingInputs,
+            pendingDeliveries: pendingDeliveries,
+            pendingTaskCreations: pendingTaskCreations,
+            maxConcurrentRuns: (runtime["max_concurrent_runs"] as? NSNumber)?.intValue
+                ?? (readConfig()["max_concurrent_runs"] as? NSNumber)?.intValue
+                ?? 2,
+            lastFeishuEventAt: lastEvent > 0 ? Date(timeIntervalSince1970: lastEvent) : nil
+        )
+    }
+
+    func stageAppUpdate(
+        downloadedArchive: URL,
+        expectedSHA256: String,
+        expectedVersion: String
+    ) throws -> URL {
+        let health = healthSnapshot()
+        guard health.pendingInputs == 0,
+              health.pendingDeliveries == 0,
+              health.pendingTaskCreations == 0 else {
+            throw BridgeUpdateError.message("仍有运行队列、待补发结果或新建 Task 请求，请处理完成后再更新。")
+        }
+        let cleanDigest = expectedSHA256
+            .lowercased()
+            .replacingOccurrences(of: "sha256:", with: "")
+        guard cleanDigest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+            throw BridgeUpdateError.message("GitHub Release 没有提供有效的 SHA-256，已停止更新。")
+        }
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexFeishuBridgeUpdate-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
+        let archive = staging.appendingPathComponent("update.zip")
+        try FileManager.default.copyItem(at: downloadedArchive, to: archive)
+        let digestResult = run("/usr/bin/shasum", ["-a", "256", archive.path])
+        let actualDigest = digestResult.output.split(separator: " ").first.map(String.init) ?? ""
+        guard digestResult.status == 0, actualDigest.lowercased() == cleanDigest else {
+            throw BridgeUpdateError.message("更新包 SHA-256 校验失败，已停止安装。")
+        }
+        let expanded = staging.appendingPathComponent("expanded", isDirectory: true)
+        try FileManager.default.createDirectory(at: expanded, withIntermediateDirectories: false)
+        let extract = run("/usr/bin/ditto", ["-x", "-k", archive.path, expanded.path])
+        guard extract.status == 0 else {
+            throw BridgeUpdateError.message("无法解压更新包。")
+        }
+        let app = expanded.appendingPathComponent("Codex 飞书桥接.app", isDirectory: true)
+        guard let bundle = Bundle(url: app),
+              bundle.bundleIdentifier == "com.deepori.codex-feishu-bridge",
+              (bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+                == expectedVersion else {
+            throw BridgeUpdateError.message("更新包中的 App 身份或版本不匹配。")
+        }
+        let signature = run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
+        guard signature.status == 0 else {
+            throw BridgeUpdateError.message("更新包签名验证失败。")
+        }
+        let architectures = run(
+            "/usr/bin/lipo",
+            ["-verify_arch", "arm64", "x86_64", app.appendingPathComponent("Contents/MacOS/CodexFeishuBridge").path]
+        )
+        guard architectures.status == 0 else {
+            throw BridgeUpdateError.message("更新包不是完整的 Universal App。")
+        }
+        return app
+    }
+
+    func launchAppUpdate(stagedApp: URL, expectedVersion: String) -> CommandResult {
+        guard let helper = bundledBridgeDirectory?.appendingPathComponent("app_update.sh") else {
+            return CommandResult(status: 1, output: "更新助手不存在")
+        }
+        let destination = Bundle.main.bundleURL.standardizedFileURL
+        let allowedDestinations = [
+            URL(fileURLWithPath: "/Applications/Codex 飞书桥接.app").standardizedFileURL,
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Applications/Codex 飞书桥接.app")
+                .standardizedFileURL,
+        ]
+        guard allowedDestinations.contains(destination),
+              FileManager.default.isWritableFile(
+                atPath: destination.deletingLastPathComponent().path
+              ) else {
+            return CommandResult(
+                status: 1,
+                output: "当前 App 不在可更新的 Applications 目录，或目录不可写。请下载正式安装包后再打开。"
+            )
+        }
+        let process = Process()
+        process.executableURL = helper
+        process.arguments = [
+            stagedApp.path,
+            destination.path,
+            String(ProcessInfo.processInfo.processIdentifier),
+            expectedVersion,
+        ]
+        do {
+            try process.run()
+            return CommandResult(status: 0, output: "")
+        } catch {
+            return CommandResult(status: 1, output: error.localizedDescription)
+        }
+    }
+
+    private func readJSONObject(at url: URL) -> [String: Any] {
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return object
+    }
+
     func removeAccessRequests(openIDs: Set<String>) throws {
         guard !openIDs.isEmpty,
               let data = try? Data(contentsOf: stateURL),
@@ -177,6 +329,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var isRunning = false
     @Published var profileName = "codex-notify"
     @Published var authorizedUserCount = 0
+    @Published var health = BridgeHealthSnapshot.empty
     @Published var pendingAccessRequests: [AccessRequestDraft] = []
     @Published var showConfiguration = false
     @Published var showDiagnosis = false
@@ -186,6 +339,8 @@ private final class BridgeViewModel: ObservableObject {
     @Published var alertMessage: String?
     @Published var availableVersion = ""
     @Published var updateURL: URL?
+    @Published var updateSHA256 = ""
+    @Published var isUpdating = false
 
     @Published var draftProfile = "codex-notify"
     @Published var draftUsers = [AuthorizedUserDraft()]
@@ -193,6 +348,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var draftEventKey = "select_task"
     @Published var draftNewTaskEventKey = "new_task"
     @Published var draftArchiveTaskEventKey = "archive_task"
+    @Published var draftMaxConcurrentRuns = 2
 
     init(bridge: BridgeController) {
         self.bridge = bridge
@@ -205,6 +361,7 @@ private final class BridgeViewModel: ObservableObject {
         profileName = String(describing: config["lark_profile"] ?? "codex-notify")
         authorizedUserCount = configuredUsers(from: config).count
         pendingAccessRequests = bridge.pendingAccessRequests()
+        health = bridge.healthSnapshot()
     }
 
     func checkForUpdates(manual: Bool = false) {
@@ -237,14 +394,18 @@ private final class BridgeViewModel: ObservableObject {
             let assetURL = assets.first(where: {
                 ($0["name"] as? String) == "Codex-Feishu-Bridge-macOS-universal.zip"
             })?["browser_download_url"] as? String
-            let releaseURL = assetURL ?? payload["html_url"] as? String
+            let asset = assets.first(where: {
+                ($0["name"] as? String) == "Codex-Feishu-Bridge-macOS-universal.zip"
+            })
+            let digest = asset?["digest"] as? String ?? ""
             Task { @MainActor in
                 if latest.compare(current, options: .numeric) == .orderedDescending {
                     self.availableVersion = latest
-                    self.updateURL = releaseURL.flatMap(URL.init(string:))
+                    self.updateURL = assetURL.flatMap(URL.init(string:))
+                    self.updateSHA256 = digest
                     if manual {
                         self.alertTitle = "发现新版本 v\(latest)"
-                        self.alertMessage = "可从 GitHub Releases 下载正式安装包。"
+                        self.alertMessage = "已找到经过 SHA-256 标记的 Universal 安装包，可直接下载安装。"
                     }
                 } else if manual {
                     self.alertTitle = "已是最新版本"
@@ -254,12 +415,60 @@ private final class BridgeViewModel: ObservableObject {
         }.resume()
     }
 
-    func openUpdate() {
-        if let updateURL {
-            NSWorkspace.shared.open(updateURL)
-        } else {
-            checkForUpdates(manual: true)
+    func installUpdate() {
+        guard !isUpdating else { return }
+        health = bridge.healthSnapshot()
+        guard health.pendingInputs == 0,
+              health.pendingDeliveries == 0,
+              health.pendingTaskCreations == 0 else {
+            presentError(
+                title: "暂不能更新",
+                message: "仍有排队消息、待补发结果或新建 Task 请求。全部处理完成后再更新，避免打断飞书任务。"
+            )
+            return
         }
+        guard let updateURL, !availableVersion.isEmpty, !updateSHA256.isEmpty else {
+            checkForUpdates(manual: true)
+            return
+        }
+        isUpdating = true
+        let version = availableVersion
+        let digest = updateSHA256
+        let updater = bridge
+        URLSession.shared.downloadTask(with: updateURL) { [weak self] temporaryURL, _, error in
+            guard let self else { return }
+            guard error == nil, let temporaryURL else {
+                Task { @MainActor in
+                    self.isUpdating = false
+                    self.presentError(title: "更新失败", message: "下载安装包失败，请稍后重试。")
+                }
+                return
+            }
+            do {
+                let staged = try updater.stageAppUpdate(
+                    downloadedArchive: temporaryURL,
+                    expectedSHA256: digest,
+                    expectedVersion: version
+                )
+                Task { @MainActor in
+                    let result = updater.launchAppUpdate(
+                        stagedApp: staged,
+                        expectedVersion: version
+                    )
+                    if result.status == 0 {
+                        NSApplication.shared.terminate(nil)
+                    } else {
+                        self.isUpdating = false
+                        self.presentError(title: "更新失败", message: result.output)
+                    }
+                }
+            } catch {
+                Task { @MainActor in
+                    self.isUpdating = false
+                    self.presentError(title: "更新失败", message: error.localizedDescription)
+                }
+            }
+        }.resume()
     }
 
     func toggleBridge() {
@@ -289,6 +498,10 @@ private final class BridgeViewModel: ObservableObject {
         )
         draftArchiveTaskEventKey = String(
             describing: config["archive_task_menu_event_key"] ?? "archive_task"
+        )
+        draftMaxConcurrentRuns = min(
+            8,
+            max(1, (config["max_concurrent_runs"] as? NSNumber)?.intValue ?? 2)
         )
         showConfiguration = true
     }
@@ -379,6 +592,7 @@ private final class BridgeViewModel: ObservableObject {
         config["task_menu_event_key"] = eventKey
         config["new_task_menu_event_key"] = newTaskEventKey
         config["archive_task_menu_event_key"] = archiveTaskEventKey
+        config["max_concurrent_runs"] = min(8, max(1, draftMaxConcurrentRuns))
         config["max_prompt_chars"] = config["max_prompt_chars"] ?? 12000
         config["max_reply_chars"] = config["max_reply_chars"] ?? 3000
 
@@ -409,6 +623,16 @@ private final class BridgeViewModel: ObservableObject {
     }
 
     func installComponents() {
+        health = bridge.healthSnapshot()
+        guard health.pendingInputs == 0,
+              health.pendingDeliveries == 0,
+              health.pendingTaskCreations == 0 else {
+            presentError(
+                title: "暂不能更新后台组件",
+                message: "仍有飞书工作等待处理。队列清零后再更新，现有消息不会被打断。"
+            )
+            return
+        }
         let result = bridge.install()
         if result.status == 0 {
             alertTitle = "后台组件已更新"
@@ -500,11 +724,13 @@ private final class BridgeViewModel: ObservableObject {
 
 private struct MainView: View {
     @ObservedObject var model: BridgeViewModel
+    private let refreshTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             header
             statusCard
+            healthCard
             HStack(alignment: .top, spacing: 16) {
                 connectionCard
                 actionsCard
@@ -515,7 +741,7 @@ private struct MainView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(28)
-        .frame(minWidth: 700, idealWidth: 760, minHeight: 500, idealHeight: 540)
+        .frame(minWidth: 760, idealWidth: 820, minHeight: 610, idealHeight: 660)
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $model.showConfiguration) {
             ConfigurationView(model: model)
@@ -537,6 +763,9 @@ private struct MainView: View {
         .onAppear {
             model.refresh()
             model.checkForUpdates()
+        }
+        .onReceive(refreshTimer) { _ in
+            model.refresh()
         }
     }
 
@@ -574,7 +803,7 @@ private struct MainView: View {
                 Text(model.isRunning ? "桥接已开启" : "桥接已关闭")
                     .font(.title3.weight(.semibold))
                 Text(model.isRunning
-                     ? "正在监听飞书消息、Task 卡片和机器人菜单"
+                     ? "事件监听 \(model.health.activeConsumers)/3 · 运行 \(model.health.activeRuns)/\(model.health.maxConcurrentRuns)"
                      : "飞书消息暂时不会发送到 Codex Desktop")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -598,6 +827,37 @@ private struct MainView: View {
         )
     }
 
+    private var healthCard: some View {
+        GroupBox("运行看板") {
+            HStack(spacing: 0) {
+                metric("事件消费者", "\(model.health.activeConsumers)/3", "dot.radiowaves.left.and.right")
+                Divider().frame(height: 46)
+                metric("运行 Task", "\(model.health.activeRuns)/\(model.health.maxConcurrentRuns)", "play.circle")
+                Divider().frame(height: 46)
+                metric("排队消息", "\(model.health.pendingInputs)", "text.line.first.and.arrowtriangle.forward")
+                Divider().frame(height: 46)
+                metric("待补发", "\(model.health.pendingDeliveries)", "arrow.clockwise")
+                Divider().frame(height: 46)
+                metric("最近飞书事件", lastEventText, "clock")
+            }
+            .padding(.vertical, 6)
+        }
+    }
+
+    private var lastEventText: String {
+        guard let date = model.health.lastFeishuEventAt else { return "暂无" }
+        return date.formatted(date: .omitted, time: .shortened)
+    }
+
+    private func metric(_ title: String, _ value: String, _ icon: String) -> some View {
+        VStack(spacing: 5) {
+            Image(systemName: icon).foregroundStyle(.secondary)
+            Text(value).font(.headline.monospacedDigit())
+            Text(title).font(.caption).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
     private var connectionCard: some View {
         GroupBox("连接信息") {
             VStack(spacing: 12) {
@@ -611,7 +871,11 @@ private struct MainView: View {
                     value: "\(model.pendingAccessRequests.count) 条"
                 )
                 Divider()
-                infoRow(icon: "dot.radiowaves.left.and.right", title: "飞书事件", value: "3 个监听器")
+                infoRow(
+                    icon: "dot.radiowaves.left.and.right",
+                    title: "飞书事件",
+                    value: "\(model.health.activeConsumers)/3 正常"
+                )
                 Divider()
                 infoRow(icon: "sidebar.left", title: "Task 来源", value: "Codex Desktop 左侧栏")
             }
@@ -629,15 +893,17 @@ private struct MainView: View {
                     model.installComponents()
                 }
                 actionButton(
-                    model.availableVersion.isEmpty
+                    model.isUpdating
+                        ? "正在下载并验证更新…"
+                        : model.availableVersion.isEmpty
                         ? "检查 App 更新"
-                        : "下载 App 更新 v\(model.availableVersion)",
+                        : "安装 App 更新 v\(model.availableVersion)",
                     icon: "arrow.down.app"
                 ) {
                     if model.availableVersion.isEmpty {
                         model.checkForUpdates(manual: true)
                     } else {
-                        model.openUpdate()
+                        model.installUpdate()
                     }
                 }
                 HStack(spacing: 10) {
@@ -699,6 +965,14 @@ private struct ConfigurationView: View {
                 TextField("选择 Task Event Key", text: $model.draftEventKey)
                 TextField("新建 Task Event Key", text: $model.draftNewTaskEventKey)
                 TextField("归档 Task Event Key", text: $model.draftArchiveTaskEventKey)
+                Stepper(
+                    "最多同时运行 \(model.draftMaxConcurrentRuns) 个 Task",
+                    value: $model.draftMaxConcurrentRuns,
+                    in: 1...8
+                )
+                Text("不同 Task 可并行；同一 Task 始终按顺序执行。提高并发会增加内存和 CPU 占用。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             if !model.pendingAccessRequests.isEmpty {

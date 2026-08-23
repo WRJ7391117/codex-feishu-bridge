@@ -794,6 +794,7 @@ class InstallerSafetyTests(unittest.TestCase):
             "lark-cli",
             "config.json",
             "state.json",
+            "runtime-status.json",
             "workflow-state.json",
             "workflow-decision-inbox",
             "feishu-bridge.log",
@@ -806,6 +807,25 @@ class InstallerSafetyTests(unittest.TestCase):
         self.assertGreater(source.index("/bin/launchctl print"), source.index("._validate_state"))
         self.assertIn("backups", source[runtime_start:])
         self.assertIn("os.replace(backup, destination)", source[runtime_start:])
+
+    def test_installer_refuses_to_interrupt_pending_feishu_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package, home, _config_path, _workflow_path, runtime = (
+                self._installer_fixture(Path(directory))
+            )
+            state_path = home / ".codex/feishu-bridge/state.json"
+            state_path.write_text(
+                json.dumps({"pending_inputs": [{"ready": True}]}),
+                encoding="utf-8",
+            )
+            state_path.chmod(0o600)
+            original_runtime = runtime.read_bytes()
+
+            result = self._run_installer(package, home)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("pending Feishu work", result.stderr)
+            self.assertEqual(runtime.read_bytes(), original_runtime)
 
     def test_invalid_existing_config_fails_before_runtime_or_service_changes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1729,12 +1749,35 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.5.10")
-        self.assertEqual(info["CFBundleVersion"], "22")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.6.0")
+        self.assertEqual(info["CFBundleVersion"], "23")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.5.10 (build 22)", readme)
-        self.assertIn("1.5.10 (build 22)", release_notes)
+        self.assertIn("1.6.0 (build 23)", readme)
+        self.assertIn("1.6.0 (build 23)", release_notes)
+
+
+class AppUpdaterSafetyTests(unittest.TestCase):
+    def test_helper_refuses_destination_outside_applications(self):
+        helper = ROOT / "Resources/bridge/app_update.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            environment = os.environ.copy()
+            environment["HOME"] = directory
+            result = subprocess.run(
+                [str(helper), "/tmp/not-an-app", "/tmp/Codex Feishu Bridge.app", "1", "9.9.9"],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+        self.assertEqual(result.returncode, 2)
+
+    def test_app_checks_destination_and_all_pending_queues_before_update(self):
+        source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(encoding="utf-8")
+        self.assertIn('URL(fileURLWithPath: "/Applications/Codex 飞书桥接.app")', source)
+        self.assertIn("health.pendingInputs == 0", source)
+        self.assertIn("health.pendingDeliveries == 0", source)
+        self.assertIn("health.pendingTaskCreations == 0", source)
+        self.assertIn('appendingPathComponent("app_update.sh")', source)
 
 
 if __name__ == "__main__":
