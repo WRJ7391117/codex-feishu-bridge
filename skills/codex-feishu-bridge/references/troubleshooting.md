@@ -15,7 +15,7 @@ Common interpretations:
 
 - Listener starts but card selection does nothing: callback configuration is usually not enabled in the Feishu console.
 - Project/Task selection succeeds but Feishu shows `108002`: verify the installed runtime is using the bundled `lark-cli 1.0.89-codex-feishu.2`. Official v1.0.89 routes the card action through the generic custom-event handler and does not return the card-action response Feishu expects within three seconds.
-- Bot menu click does nothing: the menu action must be “push event” and its Event Key must match `task_menu_event_key`.
+- Bot menu click does nothing: the menu action must be “push event” and its Event Key must match the corresponding configured key; the usage menu uses `usage_menu_event_key=codex_usage`.
 - Every message asks to select again: inspect `state.json` ownership, confirm selection is keyed by that user's open_id, and verify their project rule still includes the selected Task.
 - A user sees no Tasks: their project names must exactly match the Codex Desktop sidebar; use `*` only when the Mac owner intends to grant all projects.
 - A message stays queued: confirm the active Task eventually completes, inspect `pending input loop failed`, and verify that the Task still exists and remains within that user's project access. If Codex Desktop reports the Task is still busy after a bridge restart, the bridge waits 15 seconds and retries rather than duplicating the turn.
@@ -25,6 +25,7 @@ Common interpretations:
 - An approval card does not appear: inspect Desktop state broadcasts and the bridge log; handle the request in Desktop rather than assuming it was denied.
 - “备用 Codex CLI 版本低于该 task”: Codex Desktop IPC was unavailable and a PATH CLI would be too old for the Task record. Open Codex Desktop and retry; do not delete or reselect the Task.
 - “备用 Codex CLI 的兼容版本无法确认”: open Codex Desktop and retry. The bridge blocks an unverifiable CLI fallback to avoid corrupting or misreading the Task record.
+- “等待你选择执行方式”: the message has not been submitted. Retry Desktop for live Desktop visibility, or explicitly confirm the CLI fallback knowing Desktop will show the Task as opened elsewhere until that run completes.
 - `failed to read thread`, `thread-store internal error`, or `does not start with session metadata`: verify that the installed App is current and that it selects the Desktop-bundled CLI before PATH. The Task rollout may still be valid; do not rebuild the Task solely from this error.
 - Start succeeds but no events arrive: a loaded LaunchAgent only proves the process exists; inspect ready markers and console subscriptions.
 - Reply fails after Codex completed: inspect lark-cli error envelopes and their `error.type`, `error.subtype`, `missing_scopes`, and `console_url`.

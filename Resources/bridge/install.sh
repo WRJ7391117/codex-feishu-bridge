@@ -143,6 +143,7 @@ def validate_config(payload) -> None:
         "task_menu_event_key",
         "new_task_menu_event_key",
         "archive_task_menu_event_key",
+        "usage_menu_event_key",
         "lark_cli_path",
         "codex_cli_path",
     )

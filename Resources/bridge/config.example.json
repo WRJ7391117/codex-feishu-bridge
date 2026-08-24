@@ -13,6 +13,7 @@
   "task_menu_event_key": "select_task",
   "new_task_menu_event_key": "new_task",
   "archive_task_menu_event_key": "archive_task",
+  "usage_menu_event_key": "codex_usage",
   "max_prompt_chars": 12000,
   "max_reply_chars": 3000,
   "max_result_images": 8,

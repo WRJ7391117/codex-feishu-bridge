@@ -15,7 +15,7 @@ Source release `1.6.1 (build 24)` supersedes `1.6.0 (build 23)` and all earlier 
 
 ## Feishu console
 
-Enable long-connection delivery and subscribe to `im.message.receive_v1` and `application.bot.menu_v6`. Enable callback configuration for `card.action.trigger`. Add three custom Bot menu items, all using the push-event action: “选择 Task” with Event Key `select_task`, “新建 Task” with `new_task`, and “归档 Task” with `archive_task`. Keep the same three values in the Mac App configuration.
+Enable long-connection delivery and subscribe to `im.message.receive_v1` and `application.bot.menu_v6`. Enable callback configuration for `card.action.trigger`. Add four custom Bot menu items, all using the push-event action: “选择 Task” with Event Key `select_task`, “新建 Task” with `new_task`, “归档 Task” with `archive_task`, and “Codex 用量” with `codex_usage`. Keep the same four values in the Mac App configuration.
 
 The bot needs message receive/read/send permissions. Incoming image support also requires permission to read the matching message resource; `im:resource` is needed to upload result images. Follow `missing_scopes` from lark-cli rather than guessing broader permissions.
 

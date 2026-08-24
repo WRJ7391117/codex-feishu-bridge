@@ -363,6 +363,7 @@ class ImageReplyTests(unittest.TestCase):
                     "task-id",
                     "请分析",
                     input_images=[str(image)],
+                    use_cli_fallback=True,
                 )
 
             self.assertTrue(success)

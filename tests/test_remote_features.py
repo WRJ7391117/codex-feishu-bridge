@@ -384,6 +384,126 @@ class RemoteFeatureTests(unittest.TestCase):
             ["当前 Task", "已收藏", "空闲"],
         )
 
+    def test_codex_usage_uses_live_rate_limit_buckets_and_remaining_percent(self):
+        usage = self.bridge.normalize_codex_usage(
+            {
+                "rateLimitsByLimitId": {
+                    "codex_bengalfox": {
+                        "limitId": "codex_bengalfox",
+                        "limitName": "GPT-5.3-Codex-Spark",
+                        "primary": {
+                            "usedPercent": 4,
+                            "windowDurationMins": 300,
+                            "resetsAt": 2_000,
+                        },
+                    },
+                    "codex": {
+                        "limitId": "codex",
+                        "limitName": None,
+                        "primary": {
+                            "usedPercent": 63,
+                            "windowDurationMins": 10_080,
+                            "resetsAt": 3_000,
+                        },
+                    },
+                }
+            },
+            now=1_000,
+        )
+
+        self.assertEqual(usage["updated_at"], 1_000)
+        self.assertEqual([bucket["id"] for bucket in usage["buckets"]], ["codex", "codex_bengalfox"])
+        self.assertEqual(usage["buckets"][0]["name"], "Codex")
+        self.assertEqual(usage["buckets"][0]["windows"][0]["remaining_percent"], 37)
+        self.assertEqual(usage["buckets"][1]["windows"][0]["remaining_percent"], 96)
+
+    def test_codex_usage_has_a_compact_card_and_is_absent_from_task_status(self):
+        usage = {
+            "buckets": [
+                {
+                    "id": "codex",
+                    "name": "Codex",
+                    "windows": [
+                        {
+                            "remaining_percent": 37,
+                            "window_minutes": 10_080,
+                            "resets_at": 3_000,
+                        }
+                    ],
+                }
+            ],
+            "updated_at": 1_000,
+        }
+        with self.bridge._codex_usage_lock:
+            self.bridge._codex_usage = usage
+
+        status_card = self.bridge.current_status_card_for_user("ou_admin", self.tasks()[0])
+        usage_card = self.bridge.build_codex_usage_card(usage)
+        status_content = status_card["body"]["elements"][0]["content"]
+        usage_content = usage_card["body"]["elements"][0]["content"]
+        usage_buttons = [
+            element.get("text", {}).get("content")
+            for element in usage_card["body"]["elements"]
+            if element.get("tag") == "button"
+        ]
+        self.assertNotIn("Codex 用量", status_content)
+        self.assertIn("剩余 37%", usage_content)
+        self.assertEqual(usage_buttons, ["刷新用量"])
+
+    def test_usage_menu_sends_refreshable_card_to_all_authorized_users(self):
+        self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
+        sent = []
+        self.bridge.send_card = lambda user_id, card, kind: (
+            sent.append((user_id, card, kind)) or True,
+            "oc_test",
+            "om_usage_card",
+        )
+
+        for index, user_id in enumerate(("ou_admin", "ou_miller")):
+            self.bridge.handle_menu_event(
+                {
+                    "event_id": f"evt-usage-menu-{index}",
+                    "event_key": "codex_usage",
+                    "operator_id": user_id,
+                }
+            )
+
+        self.assertEqual(len(sent), 2)
+        for _user_id, card, _kind in sent:
+            self.assertEqual(card["header"]["title"]["content"], "Codex 用量")
+            self.assertIn("刷新用量", [
+                element.get("text", {}).get("content")
+                for element in card["body"]["elements"]
+                if element.get("tag") == "button"
+            ])
+
+    def test_authorized_user_usage_button_starts_live_refresh_with_visible_feedback(self):
+        self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
+        self.bridge.patch_card = mock.Mock(return_value=True)
+        refresh_thread = mock.Mock()
+        thread_factory = mock.Mock(return_value=refresh_thread)
+
+        with mock.patch.object(self.bridge.threading, "Thread", thread_factory):
+            self.bridge.handle_card_event(
+                {
+                    "event_id": "evt-refresh-usage",
+                    "message_id": "om_status",
+                    "chat_id": "oc_test",
+                    "operator_id": "ou_miller",
+                    "action_tag": "button",
+                    "action_value": json.dumps({"action": "refresh_codex_usage"}),
+                }
+            )
+
+        progress_card = self.bridge.patch_card.call_args.args[1]
+        self.assertIn("正在刷新用量", progress_card["body"]["elements"][0]["content"])
+        self.assertIs(
+            thread_factory.call_args.kwargs["target"],
+            self.bridge.refresh_codex_usage_card,
+        )
+        self.assertEqual(thread_factory.call_args.kwargs["args"], ("om_status",))
+        refresh_thread.start.assert_called_once_with()
+
     def test_task_card_filters_favorites_and_recent_use(self):
         favorites = self.bridge.build_task_card(
             self.tasks(),
@@ -943,7 +1063,7 @@ class RemoteFeatureTests(unittest.TestCase):
             return_value=(True, "oc_test", "om_task_card")
         )
 
-        for index, event_key in enumerate(("select_task", "new_task", "archive_task")):
+        for index, event_key in enumerate(("select_task", "new_task", "archive_task", "codex_usage")):
             self.bridge.handle_menu_event(
                 {
                     "event_id": f"evt-unauthorized-{index}",
@@ -1427,6 +1547,42 @@ class RemoteFeatureTests(unittest.TestCase):
             ["当前 Task", "已排队"],
         )
 
+    def test_desktop_unavailable_message_waits_for_user_choice(self):
+        self.bridge.selected_task = lambda user_id, state: self.tasks()[0]
+        self.bridge.reply_card_message = lambda *args, **kwargs: (True, "om_progress")
+        patched = []
+        self.bridge.patch_card = lambda message_id, card: patched.append(card) or True
+        self.bridge.reply = lambda *args, **kwargs: True
+        self.bridge.reply_or_queue = lambda *args, **kwargs: True
+
+        def unavailable(*args, **kwargs):
+            raise self.bridge.DesktopUnavailableError("no-client-found")
+
+        self.bridge.run_codex = unavailable
+        self.bridge.handle_message_event(
+            {
+                "chat_id": "oc_test",
+                "chat_type": "p2p",
+                "sender_id": "ou_admin",
+                "sender_type": "user",
+                "message_type": "text",
+                "message_id": "om_desktop_unavailable",
+                "content": "等待 Desktop",
+            }
+        )
+        for _ in range(100):
+            if not self.bridge.active_run_for_task("task-a"):
+                break
+            time.sleep(0.01)
+
+        pending = self.bridge.load_state().get("pending_cli_fallbacks", {})
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(next(iter(pending.values()))["content"], "等待 Desktop")
+        self.assertEqual(
+            [tag["text"]["content"] for tag in patched[-1]["header"]["text_tag_list"]],
+            ["当前 Task", "等待选择"],
+        )
+
     def test_progress_card_patch_retries_a_transient_failure(self):
         failure = subprocess.CompletedProcess(
             ["lark-cli"],
@@ -1522,6 +1678,87 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertNotIn("width", button)
         self.assertIn("confirm", button)
         self.assertEqual(button["confirm"]["title"]["content"], "确认停止当前运行？")
+
+    def test_desktop_unavailable_card_requires_explicit_cli_choice(self):
+        card = self.bridge.build_run_card(
+            {
+                "run_id": "run-1",
+                "fallback_id": "fallback-1",
+                "task": self.tasks()[0],
+                "status": "等待你选择执行方式",
+                "outcome": "desktop_unavailable",
+                "started_at": time.time(),
+                "attachment_count": 0,
+            }
+        )
+        buttons = {
+            item["text"]["content"]: item
+            for item in card["body"]["elements"]
+            if item.get("tag") == "button"
+        }
+
+        self.assertEqual(
+            list(buttons),
+            ["重试 Desktop", "使用备用 CLI…", "取消本条消息"],
+        )
+        self.assertEqual(
+            buttons["重试 Desktop"]["behaviors"][0]["value"]["action"],
+            "retry_desktop",
+        )
+        self.assertIn("confirm", buttons["使用备用 CLI…"])
+
+    def test_cli_fallback_button_starts_only_after_explicit_confirmation(self):
+        task = self.tasks()[0]
+        self.bridge.save_state(
+            {
+                "pending_cli_fallbacks": {
+                    "fallback-1": {
+                        "fallback_id": "fallback-1",
+                        "user_id": "ou_admin",
+                        "chat_id": "oc_test",
+                        "source_message_id": "om_source",
+                        "progress_message_id": "om_progress",
+                        "task": task,
+                        "content": "继续处理",
+                        "image_keys": [],
+                        "file_keys": [],
+                        "raw_content": "继续处理",
+                        "message_type": "text",
+                        "reason": "no-client-found",
+                        "created_at": time.time(),
+                    }
+                }
+            }
+        )
+        self.bridge.task_by_id = lambda task_id, user_id: task
+        started = []
+        self.bridge.start_claimed_run = lambda run, *args: started.append((run, args))
+
+        self.bridge.handle_card_event(
+            {
+                "type": "card.action.trigger",
+                "event_id": "evt-use-cli",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "message_id": "om_progress",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {
+                        "action": "use_cli_fallback",
+                        "fallback_id": "fallback-1",
+                    }
+                ),
+            }
+        )
+
+        self.assertEqual(len(started), 1)
+        self.assertTrue(started[0][0]["use_cli_fallback"])
+        self.assertEqual(started[0][1][0], "继续处理")
+        self.assertEqual(
+            self.bridge.load_state().get("pending_cli_fallbacks"),
+            {},
+        )
+        self.bridge.remove_active_run(str(started[0][0]["run_id"]))
 
     def test_approval_decisions_use_desktop_protocol(self):
         calls = []
@@ -1653,7 +1890,6 @@ class RemoteFeatureTests(unittest.TestCase):
                 0,
                 "turn-1",
                 ipc_connection=client,
-                client_id="owner-client",
                 on_ipc_response=lambda response: self.bridge.complete_run_ipc_response(
                     run,
                     response,
@@ -1669,21 +1905,43 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(message, "完成")
         self.assertEqual(result[0]["resultType"], "success")
 
-    def test_following_requests_complete_history_for_desktop_read_only_view(self):
+    def test_following_subscribes_without_replaying_complete_history(self):
         client, server = self.bridge.socket.socketpair()
+        server.settimeout(0.05)
         try:
             self.bridge.begin_desktop_following(client, "bridge-client", "task-a")
 
             following = self.bridge.receive_ipc_message(server)
-            history = self.bridge.receive_ipc_message(server)
+            with self.assertRaises(self.bridge.socket.timeout):
+                self.bridge.receive_ipc_message(server)
         finally:
             client.close()
             server.close()
 
         self.assertEqual(following["method"], "thread-stream-following-changed")
         self.assertTrue(following["params"]["following"])
-        self.assertEqual(history["method"], "thread-follower-load-complete-history")
-        self.assertEqual(history["params"]["conversationId"], "task-a")
+
+    def test_approval_request_is_read_directly_from_stream_patch(self):
+        change = {
+            "type": "patches",
+            "patches": [
+                {
+                    "op": "add",
+                    "path": ["requests", "req-1"],
+                    "value": {
+                        "id": "req-1",
+                        "method": "item/commandExecution/requestApproval",
+                        "params": {"command": "echo test"},
+                    },
+                }
+            ],
+        }
+
+        approvals = self.bridge.approval_requests_from_stream_change(change)
+
+        self.assertEqual(len(approvals), 1)
+        self.assertEqual(approvals[0]["request_id"], "req-1")
+        self.assertEqual(approvals[0]["type"], "command")
 
 
 if __name__ == "__main__":

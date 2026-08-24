@@ -32,7 +32,7 @@ if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${stage
     exit 2
 fi
 /usr/bin/codesign --verify --deep --strict "${staged_app}"
-/usr/bin/lipo -verify_arch arm64 x86_64 "${staged_app}/Contents/MacOS/CodexFeishuBridge"
+/usr/bin/lipo "${staged_app}/Contents/MacOS/CodexFeishuBridge" -verify_arch arm64 x86_64
 
 for _attempt in {1..300}; do
     if ! /bin/kill -0 "${running_pid}" 2>/dev/null; then

@@ -28,6 +28,14 @@ private struct AccessRequestDraft: Identifiable {
     let openID: String
 }
 
+private struct CodexUsageItem: Identifiable {
+    let id: String
+    let name: String
+    let windowLabel: String
+    let remainingPercent: Int
+    let resetsAt: Date?
+}
+
 private struct BridgeHealthSnapshot {
     let activeConsumers: Int
     let activeRuns: Int
@@ -36,6 +44,8 @@ private struct BridgeHealthSnapshot {
     let pendingTaskCreations: Int
     let maxConcurrentRuns: Int
     let lastFeishuEventAt: Date?
+    let codexUsage: [CodexUsageItem]
+    let codexUsageUpdatedAt: Date?
 
     static let empty = BridgeHealthSnapshot(
         activeConsumers: 0,
@@ -44,7 +54,9 @@ private struct BridgeHealthSnapshot {
         pendingDeliveries: 0,
         pendingTaskCreations: 0,
         maxConcurrentRuns: 2,
-        lastFeishuEventAt: nil
+        lastFeishuEventAt: nil,
+        codexUsage: [],
+        codexUsageUpdatedAt: nil
     )
 }
 
@@ -165,6 +177,37 @@ private final class BridgeController: @unchecked Sendable {
         let pendingDeliveries = (state["pending_replies"] as? [Any])?.count ?? 0
         let pendingTaskCreations = (state["pending_task_creations"] as? [String: Any])?.count ?? 0
         let lastEvent = (runtime["last_feishu_event_at"] as? NSNumber)?.doubleValue ?? 0
+        let usage = runtime["codex_usage"] as? [String: Any] ?? [:]
+        let usageUpdatedAt = (usage["updated_at"] as? NSNumber)?.doubleValue ?? 0
+        let usageItems = (usage["buckets"] as? [[String: Any]] ?? []).flatMap { bucket in
+            let bucketID = String(describing: bucket["id"] ?? "codex")
+            let name = String(describing: bucket["name"] ?? "Codex")
+            return (bucket["windows"] as? [[String: Any]] ?? []).enumerated().compactMap {
+                (index, window) -> CodexUsageItem? in
+                guard let remaining = (window["remaining_percent"] as? NSNumber)?.intValue else {
+                    return nil
+                }
+                let minutes = (window["window_minutes"] as? NSNumber)?.intValue ?? 0
+                let reset = (window["resets_at"] as? NSNumber)?.doubleValue ?? 0
+                let label: String
+                if minutes == 10_080 {
+                    label = "每周"
+                } else if minutes > 0, minutes.isMultiple(of: 60) {
+                    label = "\(minutes / 60) 小时"
+                } else if minutes > 0 {
+                    label = "\(minutes) 分钟"
+                } else {
+                    label = "额度"
+                }
+                return CodexUsageItem(
+                    id: "\(bucketID)-\(index)",
+                    name: name,
+                    windowLabel: label,
+                    remainingPercent: min(100, max(0, remaining)),
+                    resetsAt: reset > 0 ? Date(timeIntervalSince1970: reset) : nil
+                )
+            }
+        }
         return BridgeHealthSnapshot(
             activeConsumers: (runtime["active_consumers"] as? NSNumber)?.intValue ?? 0,
             activeRuns: (runtime["active_runs"] as? NSNumber)?.intValue ?? 0,
@@ -174,7 +217,11 @@ private final class BridgeController: @unchecked Sendable {
             maxConcurrentRuns: (runtime["max_concurrent_runs"] as? NSNumber)?.intValue
                 ?? (readConfig()["max_concurrent_runs"] as? NSNumber)?.intValue
                 ?? 2,
-            lastFeishuEventAt: lastEvent > 0 ? Date(timeIntervalSince1970: lastEvent) : nil
+            lastFeishuEventAt: lastEvent > 0 ? Date(timeIntervalSince1970: lastEvent) : nil,
+            codexUsage: usageItems,
+            codexUsageUpdatedAt: usageUpdatedAt > 0
+                ? Date(timeIntervalSince1970: usageUpdatedAt)
+                : nil
         )
     }
 
@@ -348,6 +395,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var draftEventKey = "select_task"
     @Published var draftNewTaskEventKey = "new_task"
     @Published var draftArchiveTaskEventKey = "archive_task"
+    @Published var draftUsageEventKey = "codex_usage"
     @Published var draftMaxConcurrentRuns = 2
 
     init(bridge: BridgeController) {
@@ -499,6 +547,9 @@ private final class BridgeViewModel: ObservableObject {
         draftArchiveTaskEventKey = String(
             describing: config["archive_task_menu_event_key"] ?? "archive_task"
         )
+        draftUsageEventKey = String(
+            describing: config["usage_menu_event_key"] ?? "codex_usage"
+        )
         draftMaxConcurrentRuns = min(
             8,
             max(1, (config["max_concurrent_runs"] as? NSNumber)?.intValue ?? 2)
@@ -511,6 +562,7 @@ private final class BridgeViewModel: ObservableObject {
         let eventKey = draftEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let newTaskEventKey = draftNewTaskEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let archiveTaskEventKey = draftArchiveTaskEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let usageEventKey = draftUsageEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !profile.isEmpty else {
             presentError(title: "配置未保存", message: "lark-cli Profile 不能为空。")
             return
@@ -554,7 +606,8 @@ private final class BridgeViewModel: ObservableObject {
             users: users,
             eventKey: eventKey,
             newTaskEventKey: newTaskEventKey,
-            archiveTaskEventKey: archiveTaskEventKey
+            archiveTaskEventKey: archiveTaskEventKey,
+            usageEventKey: usageEventKey
         )
     }
 
@@ -563,15 +616,16 @@ private final class BridgeViewModel: ObservableObject {
         users: [(name: String, openID: String, projects: [String], index: Int)],
         eventKey: String,
         newTaskEventKey: String,
-        archiveTaskEventKey: String
+        archiveTaskEventKey: String,
+        usageEventKey: String
     ) {
-        let menuEventKeys = [eventKey, newTaskEventKey, archiveTaskEventKey]
+        let menuEventKeys = [eventKey, newTaskEventKey, archiveTaskEventKey, usageEventKey]
         guard menuEventKeys.allSatisfy({ !$0.isEmpty }) else {
-            presentError(title: "配置未保存", message: "三个机器人菜单 Event Key 都不能为空。")
+            presentError(title: "配置未保存", message: "四个机器人菜单 Event Key 都不能为空。")
             return
         }
         guard Set(menuEventKeys).count == menuEventKeys.count else {
-            presentError(title: "配置未保存", message: "三个机器人菜单 Event Key 不能重复。")
+            presentError(title: "配置未保存", message: "四个机器人菜单 Event Key 不能重复。")
             return
         }
 
@@ -592,6 +646,7 @@ private final class BridgeViewModel: ObservableObject {
         config["task_menu_event_key"] = eventKey
         config["new_task_menu_event_key"] = newTaskEventKey
         config["archive_task_menu_event_key"] = archiveTaskEventKey
+        config["usage_menu_event_key"] = usageEventKey
         config["max_concurrent_runs"] = min(8, max(1, draftMaxConcurrentRuns))
         config["max_prompt_chars"] = config["max_prompt_chars"] ?? 12000
         config["max_reply_chars"] = config["max_reply_chars"] ?? 3000
@@ -731,6 +786,7 @@ private struct MainView: View {
             header
             statusCard
             healthCard
+            usageCard
             HStack(alignment: .top, spacing: 16) {
                 connectionCard
                 actionsCard
@@ -741,7 +797,7 @@ private struct MainView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(28)
-        .frame(minWidth: 760, idealWidth: 820, minHeight: 610, idealHeight: 660)
+        .frame(minWidth: 760, idealWidth: 820, minHeight: 760, idealHeight: 800)
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $model.showConfiguration) {
             ConfigurationView(model: model)
@@ -842,6 +898,52 @@ private struct MainView: View {
             }
             .padding(.vertical, 6)
         }
+    }
+
+    private var usageCard: some View {
+        GroupBox("Codex 用量") {
+            if model.health.codexUsage.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "gauge.with.dots.needle.0percent")
+                        .foregroundStyle(.secondary)
+                    Text("暂无额度数据；桥接连接 Codex 后会自动刷新。")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.vertical, 6)
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(model.health.codexUsage) { item in
+                        HStack(spacing: 12) {
+                            Text("\(item.name) · \(item.windowLabel)")
+                                .frame(width: 190, alignment: .leading)
+                                .lineLimit(1)
+                            ProgressView(value: Double(item.remainingPercent), total: 100)
+                            Text("剩余 \(item.remainingPercent)%")
+                                .font(.headline.monospacedDigit())
+                                .foregroundStyle(usageColor(item.remainingPercent))
+                                .frame(width: 82, alignment: .trailing)
+                            Text(resetText(item.resetsAt))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 118, alignment: .trailing)
+                        }
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+        }
+    }
+
+    private func usageColor(_ remaining: Int) -> Color {
+        remaining <= 10 ? .red : remaining <= 30 ? .orange : .green
+    }
+
+    private func resetText(_ date: Date?) -> String {
+        guard let date else { return "重置时间未知" }
+        return date.formatted(
+            Date.FormatStyle(date: .numeric, time: .shortened)
+        ) + " 重置"
     }
 
     private var lastEventText: String {
@@ -950,21 +1052,59 @@ private struct MainView: View {
 
 private struct ConfigurationView: View {
     @ObservedObject var model: BridgeViewModel
+    @State private var showAdvancedSettings = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("桥接配置")
-                    .font(.title2.weight(.semibold))
-                Text("App Secret 由 lark-cli 和 macOS Keychain 管理，不会保存在这里。")
-                    .foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            header
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    connectionSettings
+                    advancedSettings
+                    accessRequests
+                    authorizedUsers
+                    Text("项目名必须与 Codex Desktop 左侧栏完全一致。多个群 Chat ID 使用英文逗号分隔；留空时优先使用与 Bot 的单聊。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(22)
             }
-            Form {
-                TextField("lark-cli Profile", text: $model.draftProfile)
-                TextField("允许的群 Chat ID", text: $model.draftChats)
-                TextField("选择 Task Event Key", text: $model.draftEventKey)
-                TextField("新建 Task Event Key", text: $model.draftNewTaskEventKey)
-                TextField("归档 Task Event Key", text: $model.draftArchiveTaskEventKey)
+            Divider()
+            footer
+        }
+        .frame(width: 720, height: 560)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("桥接配置")
+                .font(.title2.weight(.semibold))
+            Text("App Secret 由 lark-cli 和 macOS Keychain 管理，不会保存在这里。")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+    }
+
+    private var connectionSettings: some View {
+        GroupBox("连接设置") {
+            VStack(alignment: .leading, spacing: 5) {
+                configurationField(
+                    "lark-cli Profile",
+                    placeholder: "例如 codex-notify",
+                    text: $model.draftProfile,
+                    monospaced: true
+                )
+                configurationField(
+                    "允许的群 Chat ID",
+                    placeholder: "可选；多个 ID 使用英文逗号分隔",
+                    text: $model.draftChats,
+                    monospaced: true
+                )
+                Divider().padding(.vertical, 5)
                 Stepper(
                     "最多同时运行 \(model.draftMaxConcurrentRuns) 个 Task",
                     value: $model.draftMaxConcurrentRuns,
@@ -974,11 +1114,50 @@ private struct ConfigurationView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .padding(.top, 6)
+        }
+    }
 
-            if !model.pendingAccessRequests.isEmpty {
+    private var advancedSettings: some View {
+        GroupBox {
+            DisclosureGroup("机器人菜单 Event Key", isExpanded: $showAdvancedSettings) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("待审批访问申请")
-                        .font(.headline)
+                    configurationField(
+                        "选择 Task",
+                        placeholder: "select_task",
+                        text: $model.draftEventKey,
+                        monospaced: true
+                    )
+                    configurationField(
+                        "新建 Task",
+                        placeholder: "new_task",
+                        text: $model.draftNewTaskEventKey,
+                        monospaced: true
+                    )
+                    configurationField(
+                        "归档 Task",
+                        placeholder: "archive_task",
+                        text: $model.draftArchiveTaskEventKey,
+                        monospaced: true
+                    )
+                    configurationField(
+                        "Codex 用量",
+                        placeholder: "codex_usage",
+                        text: $model.draftUsageEventKey,
+                        monospaced: true
+                    )
+                }
+                .padding(.top, 10)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    @ViewBuilder
+    private var accessRequests: some View {
+        if !model.pendingAccessRequests.isEmpty {
+            GroupBox("待审批访问申请") {
+                VStack(alignment: .leading, spacing: 10) {
                     ForEach(model.pendingAccessRequests) { request in
                         HStack(spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
@@ -1001,59 +1180,103 @@ private struct ConfigurationView: View {
                         .background(Color.orange.opacity(0.08))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
-                    Text("点击“配置授权”后，必须填写明确项目并保存；留空不会获得权限。")
+                    Text("配置授权后仍需填写明确项目并保存；留空不会获得权限。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                .padding(.top, 6)
             }
+        }
+    }
 
+    private var authorizedUsers: some View {
+        GroupBox {
+            VStack(spacing: 12) {
+                ForEach($model.draftUsers) { $user in
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text(user.name.isEmpty ? "未命名用户" : user.name)
+                                .font(.headline)
+                            Spacer()
+                            Button(role: .destructive) {
+                                model.removeUser(id: user.id)
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(model.draftUsers.count == 1)
+                            .help(
+                                model.draftUsers.count == 1
+                                    ? "至少保留一位授权用户"
+                                    : "删除这位用户"
+                            )
+                        }
+                        configurationField(
+                            "备注名",
+                            placeholder: "用于本机辨认，不会发送给 Codex",
+                            text: $user.name
+                        )
+                        configurationField(
+                            "用户 open_id",
+                            placeholder: "ou_...",
+                            text: $user.openID,
+                            monospaced: true
+                        )
+                        configurationField(
+                            "允许项目",
+                            placeholder: "英文逗号分隔；* 表示全部项目",
+                            text: $user.projects
+                        )
+                    }
+                    .padding(14)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                    )
+                }
+            }
+            .padding(.top, 6)
+        } label: {
             HStack {
                 Text("授权用户")
-                    .font(.headline)
                 Spacer()
                 Button("添加用户", systemImage: "plus") { model.addUser() }
             }
-            ScrollView {
-                VStack(spacing: 10) {
-                    ForEach($model.draftUsers) { $user in
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                TextField("备注名", text: $user.name)
-                                Button {
-                                    model.removeUser(id: user.id)
-                                } label: {
-                                    Image(systemName: "trash")
-                                }
-                                .buttonStyle(.borderless)
-                                .foregroundStyle(.red)
-                                .disabled(model.draftUsers.count == 1)
-                                .help("删除用户")
-                            }
-                            TextField("用户 open_id（ou_...）", text: $user.openID)
-                            TextField("允许项目（英文逗号分隔；* 表示全部）", text: $user.projects)
-                        }
-                        .padding(12)
-                        .background(Color(nsColor: .controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                }
-            }
-            .frame(minHeight: 180, maxHeight: 320)
+        }
+    }
 
-            Text("项目名必须与 Codex Desktop 左侧栏完全一致。多个群 Chat ID 使用英文逗号分隔；留空时优先使用与 Bot 的单聊。")
+    private var footer: some View {
+        HStack {
+            Text("保存后，正在运行的桥接会自动重启并保留当前 Task。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack {
-                Spacer()
-                Button("取消") { model.showConfiguration = false }
-                    .keyboardShortcut(.cancelAction)
-                Button("保存") { model.saveConfiguration() }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-            }
+            Spacer()
+            Button("取消") { model.showConfiguration = false }
+                .keyboardShortcut(.cancelAction)
+            Button("保存") { model.saveConfiguration() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
         }
-        .padding(26)
-        .frame(width: 680, height: model.pendingAccessRequests.isEmpty ? 560 : 680)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
+    }
+
+    private func configurationField(
+        _ title: String,
+        placeholder: String,
+        text: Binding<String>,
+        monospaced: Bool = false
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+                .font(monospaced ? .system(.body, design: .monospaced) : .body)
+        }
     }
 }
 

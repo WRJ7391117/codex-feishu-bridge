@@ -989,6 +989,109 @@ class WorkflowBridgeTests(unittest.TestCase):
         self.assertNotIn("ou_admin", encoded_card)
         self.assertNotIn("oc_private", encoded_card)
 
+    def test_workflow_card_explains_target_and_current_task_without_switching(self):
+        target = {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "project": "Ori One Mind",
+            "title": "自动研发",
+        }
+        current = {
+            "id": "22222222-2222-2222-2222-222222222222",
+            "project": "Evolution",
+            "title": "实现飞书Bot双向通信",
+        }
+        with mock.patch.object(
+            self.bridge,
+            "workflow_task_route",
+            return_value=(target, current),
+        ):
+            card = self.bridge.build_workflow_card(
+                workflow_payload(),
+                completed=True,
+                user_id="ou_admin",
+            )
+
+        encoded = json.dumps(card, ensure_ascii=False)
+        self.assertIn("Ori One Mind → 自动研发", encoded)
+        self.assertIn("Evolution → 实现飞书Bot双向通信", encoded)
+        self.assertIn("不会自动切换当前 Task", encoded)
+        self.assertIn("无需再发送“已点击”等确认文字", encoded)
+        self.assertIn("切换到目标 Task", encoded)
+        self.assertIn("保持当前 Task", encoded)
+
+    def test_workflow_route_switch_requires_explicit_button(self):
+        payload = self.enqueue_delivered_request()
+        target = {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "project": "Ori One Mind",
+            "title": "自动研发",
+        }
+        state = self.bridge.load_state()
+        state.setdefault("selected", {})["ou_admin"] = (
+            "22222222-2222-2222-2222-222222222222"
+        )
+        self.bridge.save_state(state)
+        action = {
+            "action": "workflow_switch_task",
+            "workflow_id": payload["workflow_id"],
+            "event_id": payload["event_id"],
+            "task_id": target["id"],
+        }
+        event = {
+            "event_id": "workflow-route-switch",
+            "operator_id": "ou_admin",
+            "chat_id": "oc_private",
+            "message_id": "om_workflow",
+        }
+        with mock.patch.object(
+            self.bridge,
+            "task_by_id",
+            return_value=target,
+        ), mock.patch.object(
+            self.bridge,
+            "patch_workflow_completed_cards",
+        ) as patch, mock.patch.object(
+            self.bridge,
+            "refresh_user_task_identity_cards",
+        ) as refresh:
+            self.assertTrue(self.bridge.handle_workflow_card_action(event, action))
+
+        saved = self.bridge.load_state()
+        self.assertEqual(saved["selected"]["ou_admin"], target["id"])
+        self.assertEqual(saved["last_projects"]["ou_admin"], "Ori One Mind")
+        patch.assert_called_once_with(mock.ANY, "已切换到目标 Task")
+        refresh.assert_called_once_with("ou_admin", "当前 Task 已切换", target)
+
+    def test_workflow_route_keep_does_not_change_current_task(self):
+        payload = self.enqueue_delivered_request()
+        current_id = "22222222-2222-2222-2222-222222222222"
+        state = self.bridge.load_state()
+        state.setdefault("selected", {})["ou_admin"] = current_id
+        self.bridge.save_state(state)
+        action = {
+            "action": "workflow_keep_current_task",
+            "workflow_id": payload["workflow_id"],
+            "event_id": payload["event_id"],
+            "task_id": "11111111-1111-1111-1111-111111111111",
+        }
+        event = {
+            "event_id": "workflow-route-keep",
+            "operator_id": "ou_admin",
+            "chat_id": "oc_private",
+            "message_id": "om_workflow",
+        }
+        with mock.patch.object(
+            self.bridge,
+            "patch_workflow_completed_cards",
+        ) as patch:
+            self.assertTrue(self.bridge.handle_workflow_card_action(event, action))
+
+        self.assertEqual(
+            self.bridge.load_state()["selected"]["ou_admin"],
+            current_id,
+        )
+        patch.assert_called_once_with(mock.ANY, "已保持当前 Task")
+
     def test_card_callback_persists_once_and_patches_card_once(self):
         payload = self.enqueue_delivered_request()
         record = self.bridge._workflow_store.record_for_event(
@@ -1749,15 +1852,23 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.6.1")
-        self.assertEqual(info["CFBundleVersion"], "24")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.7.0")
+        self.assertEqual(info["CFBundleVersion"], "30")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.6.1 (build 24)", readme)
-        self.assertIn("1.6.1 (build 24)", release_notes)
+        self.assertIn("1.7.0 (build 30)", readme)
+        self.assertIn("1.7.0 (build 30", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):
+    def test_helper_verifies_universal_binary_with_valid_lipo_order(self):
+        helper = (ROOT / "Resources/bridge/app_update.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            'lipo "${staged_app}/Contents/MacOS/CodexFeishuBridge" '
+            "-verify_arch arm64 x86_64",
+            helper,
+        )
+
     def test_helper_refuses_destination_outside_applications(self):
         helper = ROOT / "Resources/bridge/app_update.sh"
         with tempfile.TemporaryDirectory() as directory:
@@ -1778,6 +1889,21 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         self.assertIn("health.pendingDeliveries == 0", source)
         self.assertIn("health.pendingTaskCreations == 0", source)
         self.assertIn('appendingPathComponent("app_update.sh")', source)
+
+    def test_configuration_sheet_has_one_scroll_region_and_labeled_user_cards(self):
+        source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(encoding="utf-8")
+        configuration = source.split("private struct ConfigurationView", 1)[1].split(
+            "private struct DiagnosisView",
+            1,
+        )[0]
+
+        self.assertEqual(configuration.count("ScrollView {"), 1)
+        self.assertNotIn("Form {", configuration)
+        self.assertIn('Text("桥接配置")', configuration)
+        self.assertIn('"备注名"', configuration)
+        self.assertIn('"用户 open_id"', configuration)
+        self.assertIn('"允许项目"', configuration)
+        self.assertIn('Text("保存后，正在运行的桥接会自动重启并保留当前 Task。")', configuration)
 
 
 if __name__ == "__main__":

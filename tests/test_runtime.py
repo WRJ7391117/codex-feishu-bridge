@@ -136,19 +136,34 @@ class RuntimeCompatibilityTests(unittest.TestCase):
         self.assertIn("打开 Codex Desktop", message)
         self.assertIn("无需重新选择", message)
 
-    def test_run_codex_does_not_invoke_incompatible_cli(self):
+    def test_run_codex_does_not_silently_invoke_cli(self):
         self.bridge.run_codex_via_desktop = lambda *args, **kwargs: (
             "unavailable",
-            "",
+            "no-client-found",
             [],
         )
+        with mock.patch.object(self.bridge.subprocess, "Popen") as popen:
+            with self.assertRaises(self.bridge.DesktopUnavailableError) as raised:
+                self.bridge.run_codex("task-id", "hello")
+        self.assertEqual(raised.exception.reason, "no-client-found")
+        self.assertIn("尚未提交", str(raised.exception))
+        popen.assert_not_called()
+
+    def test_explicit_cli_fallback_skips_desktop(self):
+        self.bridge.run_codex_via_desktop = mock.Mock()
         self.bridge.rollout_path_for_task = lambda thread_id: None
-        with mock.patch.object(self.bridge.subprocess, "run") as run:
-            success, message, images = self.bridge.run_codex("task-id", "hello")
+        self.bridge.cli_resume_preflight = lambda rollout: (False, "blocked")
+
+        success, message, images = self.bridge.run_codex(
+            "task-id",
+            "hello",
+            use_cli_fallback=True,
+        )
+
         self.assertFalse(success)
-        self.assertIn("打开 Codex Desktop", message)
+        self.assertEqual(message, "blocked")
         self.assertEqual(images, [])
-        run.assert_not_called()
+        self.bridge.run_codex_via_desktop.assert_not_called()
 
 
 if __name__ == "__main__":

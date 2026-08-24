@@ -247,6 +247,9 @@ NEW_TASK_MENU_EVENT_KEY = str(
 ARCHIVE_TASK_MENU_EVENT_KEY = str(
     CONFIG.get("archive_task_menu_event_key") or "archive_task"
 )
+USAGE_MENU_EVENT_KEY = str(
+    CONFIG.get("usage_menu_event_key") or "codex_usage"
+)
 REPLY_RETRY_DELAYS = (1.0, 2.0)
 CARD_PATCH_RETRY_DELAYS = (1.0, 2.0)
 PENDING_REPLY_DELAYS = (15, 30, 60, 120, 300, 600)
@@ -273,6 +276,8 @@ MAX_PENDING_INPUTS_PER_TASK = max(
     int(CONFIG.get("max_pending_inputs_per_task", 10)),
 )
 MAX_CONCURRENT_RUNS = max(1, int(CONFIG.get("max_concurrent_runs", 2)))
+MAX_PENDING_CLI_FALLBACKS = 50
+CLI_FALLBACK_TTL_SECONDS = 24 * 60 * 60
 ALLOW_ACCESS_REQUESTS = CONFIG.get("allow_access_requests", True) is not False
 TASKS_PER_PAGE = max(10, min(50, int(CONFIG.get("tasks_per_page", 50))))
 RECENT_TASK_LIMIT = 20
@@ -287,7 +292,32 @@ _active_runs_lock = threading.RLock()
 _active_runs: dict[str, dict[str, Any]] = {}
 _last_feishu_event_at = 0.0
 _runtime_status_lock = threading.Lock()
-_last_runtime_status_signature: tuple[int, int, int, float] | None = None
+_last_runtime_status_signature: tuple[Any, ...] | None = None
+_codex_usage_lock = threading.Lock()
+_codex_usage: dict[str, Any] = {}
+_codex_usage_refreshing = False
+
+
+class DesktopUnavailableError(RuntimeError):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(desktop_unavailable_message(reason))
+
+
+def desktop_unavailable_message(reason: str) -> str:
+    explanations = {
+        "ipc-socket-missing": "Codex Desktop 当前没有提供桥接连接",
+        "task-record-missing": "桥接暂时找不到这个 Task 的本地记录",
+        "no-client-found": "Codex Desktop 当前没有打开或接管这个 Task",
+        "ipc-timeout": "Codex Desktop 的桥接连接暂时没有响应",
+        "ipc-connect-failed": "桥接暂时无法连接 Codex Desktop",
+        "ipc-initialize-failed": "Codex Desktop 的桥接连接初始化失败",
+    }
+    detail = explanations.get(reason, "Codex Desktop 当前不可用")
+    return (
+        f"{detail}。这条消息尚未提交。请点击“重试 Desktop”；"
+        "如确认接受 Desktop 暂时无法实时显示，也可以主动选择“使用备用 CLI”。"
+    )
 
 
 def set_reply_failure_reason(reason: str) -> None:
@@ -461,7 +491,16 @@ def write_runtime_status(active_runs: int | None = None) -> None:
         )
     destination = runtime_status_path()
     consumers = sum(consumer.poll() is None for consumer in _consumers)
-    signature = (running, consumers, MAX_CONCURRENT_RUNS, _last_feishu_event_at)
+    with _codex_usage_lock:
+        codex_usage = json.loads(json.dumps(_codex_usage)) if _codex_usage else {}
+    usage_signature = json.dumps(codex_usage, sort_keys=True, separators=(",", ":"))
+    signature = (
+        running,
+        consumers,
+        MAX_CONCURRENT_RUNS,
+        _last_feishu_event_at,
+        usage_signature,
+    )
     with _runtime_status_lock:
         if signature == _last_runtime_status_signature and destination.is_file():
             return
@@ -473,6 +512,7 @@ def write_runtime_status(active_runs: int | None = None) -> None:
                 "active_consumers": consumers,
                 "max_concurrent_runs": MAX_CONCURRENT_RUNS,
                 "last_feishu_event_at": _last_feishu_event_at,
+                "codex_usage": codex_usage,
                 "updated_at": time.time(),
             }
             temporary = destination.parent / (
@@ -913,7 +953,7 @@ def codex_app_server_requests(
     requests: list[
         tuple[
             str,
-            dict[str, Any] | Callable[[list[dict[str, Any]]], dict[str, Any]],
+            dict[str, Any] | None | Callable[[list[dict[str, Any]]], dict[str, Any]],
         ]
     ],
     timeout: float = 15,
@@ -985,6 +1025,190 @@ def codex_app_server_requests(
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=3)
+
+
+def normalize_codex_usage(result: dict[str, Any], now: float | None = None) -> dict[str, Any]:
+    raw_buckets = result.get("rateLimitsByLimitId")
+    if not isinstance(raw_buckets, dict) or not raw_buckets:
+        fallback = result.get("rateLimits")
+        raw_buckets = {
+            str(fallback.get("limitId") or "codex"): fallback
+        } if isinstance(fallback, dict) else {}
+
+    buckets: list[dict[str, Any]] = []
+    ordered = sorted(
+        raw_buckets.items(),
+        key=lambda item: (str(item[0]) != "codex", str(item[0])),
+    )
+    for limit_id, raw_snapshot in ordered:
+        if not isinstance(raw_snapshot, dict):
+            continue
+        windows: list[dict[str, Any]] = []
+        for key in ("primary", "secondary"):
+            raw_window = raw_snapshot.get(key)
+            if not isinstance(raw_window, dict):
+                continue
+            used = raw_window.get("usedPercent")
+            if not isinstance(used, (int, float)) or isinstance(used, bool):
+                continue
+            reset = raw_window.get("resetsAt")
+            duration = raw_window.get("windowDurationMins")
+            windows.append(
+                {
+                    "remaining_percent": max(0, min(100, int(round(100 - used)))),
+                    "window_minutes": int(duration) if isinstance(duration, (int, float)) else 0,
+                    "resets_at": int(reset) if isinstance(reset, (int, float)) else 0,
+                }
+            )
+        if not windows:
+            continue
+        name = str(raw_snapshot.get("limitName") or "").strip()
+        if not name:
+            name = "Codex" if str(limit_id) == "codex" else str(limit_id)
+        buckets.append({"id": str(limit_id), "name": name[:80], "windows": windows})
+    return {
+        "buckets": buckets,
+        "updated_at": time.time() if now is None else now,
+    } if buckets else {}
+
+
+def refresh_codex_usage() -> bool:
+    global _codex_usage, _codex_usage_refreshing
+
+    with _codex_usage_lock:
+        if _codex_usage_refreshing:
+            return False
+        _codex_usage_refreshing = True
+    try:
+        results = codex_app_server_requests(
+            [("account/rateLimits/read", None)],
+            timeout=10,
+        )
+        usage = normalize_codex_usage(results[0] if results else {})
+        if usage:
+            with _codex_usage_lock:
+                _codex_usage = usage
+            write_runtime_status()
+            return True
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        log(f"Codex usage refresh failed: {type(exc).__name__}")
+    finally:
+        with _codex_usage_lock:
+            _codex_usage_refreshing = False
+    return False
+
+
+def codex_usage_snapshot() -> dict[str, Any]:
+    with _codex_usage_lock:
+        return json.loads(json.dumps(_codex_usage)) if _codex_usage else {}
+
+
+def usage_window_label(minutes: int) -> str:
+    if minutes == 10080:
+        return "每周"
+    if minutes > 0 and minutes % 60 == 0:
+        return f"{minutes // 60} 小时"
+    return f"{minutes} 分钟" if minutes > 0 else "额度"
+
+
+def codex_usage_lines(usage: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for bucket in usage.get("buckets", []):
+        if not isinstance(bucket, dict):
+            continue
+        name = str(bucket.get("name") or "Codex")
+        for window in bucket.get("windows", []):
+            if not isinstance(window, dict):
+                continue
+            remaining = int(window.get("remaining_percent") or 0)
+            label = usage_window_label(int(window.get("window_minutes") or 0))
+            resets_at = int(window.get("resets_at") or 0)
+            reset_text = (
+                time.strftime("%m-%d %H:%M", time.localtime(resets_at)) + " 重置"
+                if resets_at > 0
+                else "重置时间未知"
+            )
+            lines.append(f"{name} · {label}：剩余 {remaining}% · {reset_text}")
+    return lines
+
+
+def build_codex_usage_card(
+    usage: dict[str, Any],
+    status: str = "",
+) -> dict[str, Any]:
+    lines = []
+    if status:
+        lines.append(f"✅ **{card_markdown_escape(status)}**")
+    usage_lines = codex_usage_lines(usage)
+    lines.extend(
+        f"**{card_markdown_escape(line)}**"
+        for line in usage_lines
+    )
+    if not usage_lines:
+        lines.append("暂时没有额度数据，请点击下方按钮刷新。")
+    try:
+        updated_at = float(usage.get("updated_at") or 0)
+    except (TypeError, ValueError):
+        updated_at = 0
+    if updated_at > 0:
+        lines.append(
+            "<font color='grey'>数据更新："
+            f"{time.strftime('%m-%d %H:%M:%S', time.localtime(updated_at))}"
+            "</font>"
+        )
+    buttons = [
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "刷新用量"},
+            "type": "primary_filled",
+            "width": "fill",
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {"action": "refresh_codex_usage"},
+                }
+            ],
+        }
+    ]
+    return {
+        "schema": "2.0",
+        "config": {
+            "update_multi": True,
+            "width_mode": "default",
+            "enable_forward": False,
+            "summary": {"content": "Codex 用量"},
+        },
+        "header": {
+            "title": {"tag": "plain_text", "content": "Codex 用量"},
+            "subtitle": {
+                "tag": "plain_text",
+                "content": "本机 Codex 账号的实时额度",
+            },
+            "template": "blue",
+            "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": [
+                {"tag": "markdown", "content": "\n\n".join(lines)},
+                *buttons,
+            ],
+        },
+    }
+
+
+def refresh_codex_usage_card(message_id: str) -> None:
+    refreshed = refresh_codex_usage()
+    if message_id:
+        patch_card(
+            message_id,
+            build_codex_usage_card(
+                codex_usage_snapshot(),
+                "用量已刷新" if refreshed else "用量暂时无法刷新",
+            ),
+        )
 
 
 def create_codex_task(user_id: str, project_name: str, title: str) -> dict[str, str]:
@@ -2518,10 +2742,32 @@ def update_card(token: str, card: dict[str, Any]) -> bool:
     return True
 
 
+def workflow_task_label(
+    task: dict[str, str] | None,
+    fallback: str,
+) -> str:
+    if not task:
+        return fallback
+    return f"{task.get('project') or '无项目'} → {task.get('title') or '未命名 Task'}"
+
+
+def workflow_task_route(
+    user_id: str,
+) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+    try:
+        target_task = task_by_id(workflow_codex_task_id(), user_id)
+        current_task = selected_task(user_id, load_state())
+    except (OSError, sqlite3.Error):
+        return None, None
+    return target_task, current_task
+
+
 def build_workflow_card(
     record: dict[str, Any],
     reminder: bool = False,
     completed: bool = False,
+    user_id: str = "",
+    route_status: str = "",
 ) -> dict[str, Any]:
     requires_action = record.get("status") == "user_action_required"
     selected = record.get("selected_action")
@@ -2605,6 +2851,86 @@ def build_workflow_card(
             },
         )
 
+    if requires_action and user_id:
+        target_task, current_task = workflow_task_route(user_id)
+        target_label = workflow_task_label(target_task, "Ori One Mind 专用 Task")
+        current_label = workflow_task_label(current_task, "尚未选择")
+        same_task = bool(
+            target_task
+            and current_task
+            and str(target_task.get("id") or "") == str(current_task.get("id") or "")
+        )
+        route_lines = [
+            (
+                "**结果提交到 Task**"
+                if completed
+                else "**本卡片的处理目标 Task**"
+            ),
+            card_markdown_escape(target_label),
+            "**当前聊天 Task**",
+            card_markdown_escape(current_label),
+        ]
+        if route_status:
+            route_lines.append(f"✅ **{card_markdown_escape(route_status)}**")
+        elif same_task:
+            route_lines.append("当前聊天 Task 与处理目标一致。")
+        else:
+            route_lines.append(
+                "<font color='orange'>两者不同。处理本卡片不会自动切换当前 Task。</font>"
+            )
+        if completed:
+            route_lines.append("无需再发送“已点击”等确认文字。")
+        elements.insert(
+            0,
+            {"tag": "markdown", "content": "\n".join(route_lines)},
+        )
+        if completed and target_task and not same_task:
+            callback_base = {
+                "workflow_id": str(record.get("workflow_id") or ""),
+                "event_id": str(record.get("event_id") or ""),
+                "task_id": str(target_task.get("id") or ""),
+            }
+            elements.extend(
+                [
+                    {
+                        "tag": "button",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": "切换到目标 Task",
+                        },
+                        "type": "primary_filled",
+                        "width": "fill",
+                        "behaviors": [
+                            {
+                                "type": "callback",
+                                "value": {
+                                    **callback_base,
+                                    "action": "workflow_switch_task",
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "tag": "button",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": "保持当前 Task",
+                        },
+                        "type": "default",
+                        "width": "fill",
+                        "behaviors": [
+                            {
+                                "type": "callback",
+                                "value": {
+                                    **callback_base,
+                                    "action": "workflow_keep_current_task",
+                                },
+                            }
+                        ],
+                    },
+                ]
+            )
+
     if completed:
         template, tag_text, tag_color = "green", "已处理", "green"
     elif requires_action:
@@ -2663,7 +2989,7 @@ def send_workflow_card(
         "interactive",
         "--content",
         json.dumps(
-            build_workflow_card(record, reminder=reminder),
+            build_workflow_card(record, reminder=reminder, user_id=user_id),
             ensure_ascii=False,
             separators=(",", ":"),
         ),
@@ -2943,12 +3269,24 @@ def workflow_event_authorized(event: dict[str, Any], record: dict[str, Any]) -> 
     return user_id == recipient and bool(chat_id) and chat_id == expected_chat
 
 
-def workflow_completed_card(record: dict[str, Any]) -> dict[str, Any]:
-    return build_workflow_card(record, completed=True)
+def workflow_completed_card(
+    record: dict[str, Any],
+    route_status: str = "",
+) -> dict[str, Any]:
+    recipient, _chat_id = workflow_recipient()
+    return build_workflow_card(
+        record,
+        completed=True,
+        user_id=recipient,
+        route_status=route_status,
+    )
 
 
-def patch_workflow_completed_cards(record: dict[str, Any]) -> None:
-    card = workflow_completed_card(record)
+def patch_workflow_completed_cards(
+    record: dict[str, Any],
+    route_status: str = "",
+) -> None:
+    card = workflow_completed_card(record, route_status=route_status)
     message_ids = dict.fromkeys(
         str(record.get(key) or "")
         for key in ("message_id", "reminder_message_id")
@@ -2968,7 +3306,12 @@ def handle_workflow_card_action(
     event: dict[str, Any],
     payload: dict[str, Any],
 ) -> bool:
-    if payload.get("action") != "workflow_decision":
+    action = str(payload.get("action") or "")
+    if action not in {
+        "workflow_decision",
+        "workflow_switch_task",
+        "workflow_keep_current_task",
+    }:
         return False
     workflow_id = str(payload.get("workflow_id") or "")
     event_id = str(payload.get("event_id") or "")
@@ -2982,6 +3325,37 @@ def handle_workflow_card_action(
         return True
     bridge_event_id = str(event.get("event_id") or "")
     if not bridge_event_id:
+        return True
+    if action in {"workflow_switch_task", "workflow_keep_current_task"}:
+        processed_key = f"workflow-route:{bridge_event_id}"
+        if not mark_processed(load_state(), processed_key):
+            return True
+        user_id = str(event.get("operator_id") or event.get("sender_id") or "")
+        target_task_id = str(payload.get("task_id") or "")
+        if target_task_id != workflow_codex_task_id():
+            log("workflow route ignored reason=target-mismatch")
+            return True
+        if action == "workflow_switch_task":
+            target_task = task_by_id(target_task_id, user_id)
+            if target_task is None:
+                patch_workflow_completed_cards(record, "目标 Task 当前不可用")
+                return True
+            with _state_lock:
+                state = load_state()
+                state.setdefault("selected", {})[user_id] = target_task_id
+                state.setdefault("last_projects", {})[user_id] = target_task["project"]
+                remember_recent_task(state, user_id, target_task_id)
+                save_state(state)
+            patch_workflow_completed_cards(record, "已切换到目标 Task")
+            refresh_user_task_identity_cards(
+                user_id,
+                "当前 Task 已切换",
+                target_task,
+            )
+            log("workflow route switched to dedicated Codex Task")
+            return True
+        patch_workflow_completed_cards(record, "已保持当前 Task")
+        log("workflow route kept current Codex Task")
         return True
     outcome, _recovery = _workflow_store.consume_token_decision(
         workflow_id,
@@ -3347,6 +3721,7 @@ def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
     templates = {
         "running": ("blue", "运行中", "blue"),
         "approval": ("yellow", "等待授权", "yellow"),
+        "desktop_unavailable": ("yellow", "等待选择", "yellow"),
         "completed": ("green", "已完成", "green"),
         "stopped": ("grey", "已停止", "neutral"),
         "failed": ("red", "未完成", "red"),
@@ -3390,6 +3765,65 @@ def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
                     },
                 },
             }
+        )
+    elif outcome == "desktop_unavailable" and run.get("fallback_id"):
+        fallback_id = str(run["fallback_id"])
+        elements.extend(
+            [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "重试 Desktop"},
+                    "type": "primary_filled",
+                    "width": "fill",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "retry_desktop",
+                                "fallback_id": fallback_id,
+                            },
+                        }
+                    ],
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "使用备用 CLI…"},
+                    "type": "default",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "use_cli_fallback",
+                                "fallback_id": fallback_id,
+                            },
+                        }
+                    ],
+                    "confirm": {
+                        "title": {"tag": "plain_text", "content": "使用备用 Codex CLI？"},
+                        "text": {
+                            "tag": "plain_text",
+                            "content": (
+                                "运行期间 Codex Desktop 不能实时显示这轮内容，"
+                                "完成后重新打开 Task 才能看到。"
+                            ),
+                        },
+                    },
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "取消本条消息"},
+                    "type": "default",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "cancel_cli_fallback",
+                                "fallback_id": fallback_id,
+                            },
+                        }
+                    ],
+                },
+            ]
         )
     return {
         "schema": "2.0",
@@ -5110,18 +5544,6 @@ def begin_desktop_following(
             },
         },
     )
-    send_ipc_message(
-        connection,
-        {
-            "type": "request",
-            "requestId": str(uuid.uuid4()),
-            "sourceClientId": client_id,
-            "version": 1,
-            "method": "thread-follower-load-complete-history",
-            "params": {"conversationId": thread_id},
-            "timeoutMs": 30000,
-        },
-    )
 
 
 def set_run_ipc(
@@ -5302,6 +5724,63 @@ def pending_inputs(state: dict[str, Any]) -> list[dict[str, Any]]:
         pending = []
         state["pending_inputs"] = pending
     return pending
+
+
+def pending_cli_fallbacks(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    pending = state.setdefault("pending_cli_fallbacks", {})
+    if not isinstance(pending, dict):
+        pending = {}
+        state["pending_cli_fallbacks"] = pending
+    return pending
+
+
+def remember_cli_fallback(
+    run: dict[str, Any],
+    content: str,
+    image_keys: list[str],
+    file_keys: list[str],
+    raw_content: str,
+    message_type: str,
+    reason: str,
+) -> str:
+    fallback_id = str(uuid.uuid4())
+    now = time.time()
+    entry = {
+        "fallback_id": fallback_id,
+        "user_id": str(run["user_id"]),
+        "chat_id": str(run["chat_id"]),
+        "source_message_id": str(run["source_message_id"]),
+        "progress_message_id": str(run.get("progress_message_id") or ""),
+        "task": run["task"],
+        "content": content,
+        "image_keys": image_keys,
+        "file_keys": file_keys,
+        "raw_content": raw_content,
+        "message_type": message_type,
+        "reason": reason,
+        "created_at": now,
+    }
+    with _state_lock:
+        state = load_state()
+        pending = pending_cli_fallbacks(state)
+        expired = [
+            key
+            for key, value in pending.items()
+            if not isinstance(value, dict)
+            or now - float(value.get("created_at") or 0) > CLI_FALLBACK_TTL_SECONDS
+        ]
+        for key in expired:
+            pending.pop(key, None)
+        pending[fallback_id] = entry
+        if len(pending) > MAX_PENDING_CLI_FALLBACKS:
+            oldest = sorted(
+                pending,
+                key=lambda key: float(pending[key].get("created_at") or 0),
+            )
+            for key in oldest[:-MAX_PENDING_CLI_FALLBACKS]:
+                pending.pop(key, None)
+        save_state(state)
+    return fallback_id
 
 
 def queued_position(
@@ -5546,6 +6025,31 @@ def start_claimed_run(
     update_current_status_card(str(run["user_id"]))
 
 
+def cli_fallback_entry(
+    fallback_id: str,
+    user_id: str,
+    chat_id: str,
+) -> dict[str, Any] | None:
+    with _state_lock:
+        entry = pending_cli_fallbacks(load_state()).get(fallback_id)
+        if (
+            not isinstance(entry, dict)
+            or str(entry.get("user_id") or "") != user_id
+            or (chat_id and str(entry.get("chat_id") or "") != chat_id)
+        ):
+            return None
+        return dict(entry)
+
+
+def remove_cli_fallback(fallback_id: str) -> dict[str, Any] | None:
+    with _state_lock:
+        state = load_state()
+        removed = pending_cli_fallbacks(state).pop(fallback_id, None)
+        if removed is not None:
+            save_state(state)
+        return dict(removed) if isinstance(removed, dict) else None
+
+
 def start_next_queued_input(task_id: str, now: float | None = None) -> bool:
     timestamp = time.time() if now is None else now
     with _active_runs_lock:
@@ -5665,6 +6169,28 @@ def approval_from_request(request: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def approval_requests_from_stream_change(
+    change: dict[str, Any],
+) -> list[dict[str, Any]]:
+    approvals: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            approval = approval_from_request(value)
+            if approval is not None and approval["request_id"] not in seen:
+                seen.add(approval["request_id"])
+                approvals.append(approval)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(change)
+    return approvals
+
+
 def publish_approval(run: dict[str, Any], approval: dict[str, Any]) -> None:
     request_id = str(approval["request_id"])
     with _active_runs_lock:
@@ -5754,13 +6280,11 @@ def wait_for_desktop_turn(
     cancel_event: threading.Event | None = None,
     cancel_confirmed: threading.Event | None = None,
     ipc_connection: socket.socket | None = None,
-    client_id: str = "",
     on_ipc_response: Callable[[dict[str, Any]], bool] | None = None,
 ) -> tuple[bool, str, list[str]]:
     deadline = time.monotonic() + 3600
     cancelled_at: float | None = None
     last_elapsed_update = 0.0
-    last_snapshot_request = 0.0
     images: list[str] = []
     with rollout_path.open("r", encoding="utf-8") as handle:
         handle.seek(start_offset)
@@ -5799,35 +6323,9 @@ def wait_for_desktop_turn(
                         ):
                             params = frame.get("params")
                             change = params.get("change") if isinstance(params, dict) else None
-                            if isinstance(change, dict) and change.get("type") == "snapshot":
-                                conversation = change.get("conversationState")
-                                requests = conversation.get("requests") if isinstance(conversation, dict) else None
-                                if isinstance(requests, list) and on_approval is not None:
-                                    for request in requests:
-                                        if isinstance(request, dict):
-                                            approval = approval_from_request(request)
-                                            if approval is not None:
-                                                on_approval(approval)
-                            elif (
-                                isinstance(change, dict)
-                                and change.get("type") == "patches"
-                                and client_id
-                                and now - last_snapshot_request >= 1
-                            ):
-                                snapshot_id = str(uuid.uuid4())
-                                send_ipc_message(
-                                    ipc_connection,
-                                    {
-                                        "type": "request",
-                                        "requestId": snapshot_id,
-                                        "sourceClientId": client_id,
-                                        "version": 1,
-                                        "method": "thread-follower-load-complete-history",
-                                        "params": {"conversationId": str(params.get("conversationId") or "")},
-                                        "timeoutMs": 30000,
-                                    },
-                                )
-                                last_snapshot_request = now
+                            if isinstance(change, dict) and on_approval is not None:
+                                for approval in approval_requests_from_stream_change(change):
+                                    on_approval(approval)
             line = handle.readline()
             if not line:
                 time.sleep(0.25)
@@ -5917,8 +6415,12 @@ def run_codex_via_desktop(
     on_ipc_response: Callable[[dict[str, Any]], bool] | None = None,
 ) -> tuple[str, str, list[str]]:
     rollout_path = rollout_path_for_task(thread_id)
-    if not DESKTOP_IPC_SOCKET.exists() or not rollout_path or not rollout_path.exists():
-        return "unavailable", "", []
+    if not DESKTOP_IPC_SOCKET.exists():
+        log("desktop unavailable reason=ipc-socket-missing")
+        return "unavailable", "ipc-socket-missing", []
+    if not rollout_path or not rollout_path.exists():
+        log("desktop unavailable reason=task-record-missing")
+        return "unavailable", "task-record-missing", []
     start_offset = rollout_path.stat().st_size
     turn_request_attempted = False
     turn_confirmed = False
@@ -5966,7 +6468,8 @@ def run_codex_via_desktop(
             if response.get("resultType") != "success":
                 error = " ".join(str(response.get("error") or "unknown error").split())[-2000:]
                 if error == "no-client-found":
-                    return "unavailable", "", []
+                    log("desktop unavailable reason=no-client-found")
+                    return "unavailable", "no-client-found", []
                 log(f"desktop turn failed error={error}")
                 if any(marker in error.lower() for marker in ("active turn", "already running", "busy")):
                     return (
@@ -6009,7 +6512,6 @@ def run_codex_via_desktop(
                 cancel_event,
                 cancel_confirmed,
                 connection,
-                client_id,
                 on_ipc_response,
             )
             return ("completed" if success else "failed"), result, images
@@ -6030,7 +6532,9 @@ def run_codex_via_desktop(
                 "为避免重复执行，本条不会再次提交。请在桌面版查看该 task。",
                 [],
             )
-        return "unavailable", "", []
+        reason = "ipc-timeout" if isinstance(exc, socket.timeout) else "ipc-connect-failed"
+        log(f"desktop unavailable reason={reason}")
+        return "unavailable", reason, []
     except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         log(f"desktop IPC failed: {type(exc).__name__}: {exc}")
         if turn_confirmed:
@@ -6047,11 +6551,8 @@ def run_codex_via_desktop(
                 "为避免重复执行，本条不会再次提交。请在桌面版查看该 task。",
                 [],
             )
-        return (
-            "failed",
-            "没有成功发送到 Codex Desktop。详细原因已记录到 Mac 的桥接日志。",
-            [],
-        )
+        log("desktop unavailable reason=ipc-initialize-failed")
+        return "unavailable", "ipc-initialize-failed", []
 
 def run_codex(
     thread_id: str,
@@ -6066,6 +6567,7 @@ def run_codex(
     cancel_confirmed: threading.Event | None = None,
     on_ipc_ready: Callable[[socket.socket, str], None] | None = None,
     on_ipc_response: Callable[[dict[str, Any]], bool] | None = None,
+    use_cli_fallback: bool = False,
 ) -> tuple[bool, str, list[str]]:
     if cancel_event is not None and cancel_event.is_set():
         if cancel_confirmed is not None:
@@ -6083,24 +6585,27 @@ def run_codex(
         except Exception as exc:
             log(f"running status reply failed: {type(exc).__name__}: {exc}")
 
-    desktop_status, desktop_result, desktop_images = run_codex_via_desktop(
-        thread_id,
-        prompt,
-        on_started=lambda: notify_started("Codex Desktop 已接收，正在运行"),
-        input_images=input_images or [],
-        input_files=input_files or [],
-        on_turn_started=on_turn_started,
-        on_progress=on_progress,
-        on_approval=on_approval,
-        cancel_event=cancel_event,
-        cancel_confirmed=cancel_confirmed,
-        on_ipc_ready=on_ipc_ready,
-        on_ipc_response=on_ipc_response,
-    )
-    if desktop_status == "completed":
-        return True, desktop_result, desktop_images
-    if desktop_status == "failed":
-        return False, desktop_result, []
+    if not use_cli_fallback:
+        desktop_status, desktop_result, desktop_images = run_codex_via_desktop(
+            thread_id,
+            prompt,
+            on_started=lambda: notify_started("Codex Desktop 已接收，正在运行"),
+            input_images=input_images or [],
+            input_files=input_files or [],
+            on_turn_started=on_turn_started,
+            on_progress=on_progress,
+            on_approval=on_approval,
+            cancel_event=cancel_event,
+            cancel_confirmed=cancel_confirmed,
+            on_ipc_ready=on_ipc_ready,
+            on_ipc_response=on_ipc_response,
+        )
+        if desktop_status == "completed":
+            return True, desktop_result, desktop_images
+        if desktop_status == "failed":
+            return False, desktop_result, []
+        raise DesktopUnavailableError(desktop_result or "unknown")
+    log("cli fallback explicitly confirmed by user")
 
     environment = os.environ.copy()
     environment["CODEX_FEISHU_BRIDGE"] = "1"
@@ -6367,6 +6872,7 @@ def process_message_run(
                     client_id,
                 ),
                 on_ipc_response=lambda response: complete_run_ipc_response(run, response),
+                use_cli_fallback=run.get("use_cli_fallback") is True,
             )
             if success:
                 restore_pending_task_name(
@@ -6378,6 +6884,24 @@ def process_message_run(
         success = False
         result = "已按你的要求停止运行。"
         rollout_images = []
+    except DesktopUnavailableError as exc:
+        success = False
+        result = str(exc)
+        rollout_images = []
+        try:
+            fallback_id = remember_cli_fallback(
+                run,
+                prompt,
+                image_keys,
+                file_keys,
+                raw_content,
+                message_type,
+                exc.reason,
+            )
+        except (OSError, RuntimeError, ValueError) as state_exc:
+            log(f"cli fallback state failed: {type(state_exc).__name__}")
+        else:
+            run["fallback_id"] = fallback_id
     except RuntimeError as exc:
         success = False
         result = str(exc) or "附件处理失败。"
@@ -6404,10 +6928,21 @@ def process_message_run(
             return
         stop_requested = cancel_event.is_set()
         stopped = stop_requested and run["cancel_confirmed"].is_set()
-        outcome = "stopped" if stopped else "completed" if success else "failed"
+        waiting_for_choice = bool(run.get("fallback_id"))
+        outcome = (
+            "stopped"
+            if stopped
+            else "desktop_unavailable"
+            if waiting_for_choice
+            else "completed"
+            if success
+            else "failed"
+        )
         status = (
             "已停止"
             if stopped
+            else "等待你选择执行方式"
+            if waiting_for_choice
             else "停止未确认"
             if stop_requested
             else "正在发送结果"
@@ -6415,18 +6950,31 @@ def process_message_run(
             else "运行未完成"
         )
         set_run_progress(run, status, outcome, force=True)
-        label = "已停止" if stopped else "已完成" if success else "未完成"
+        label = (
+            "已停止"
+            if stopped
+            else "等待选择"
+            if waiting_for_choice
+            else "已完成"
+            if success
+            else "未完成"
+        )
         is_current = task_is_current(str(run["user_id"]), str(task["id"]))
         prefix = task_status_prefix(task, label, is_current)
         clean_result, images = prepare_result_images(result, rollout_images)
         clean_result, files = prepare_result_files(clean_result)
-        record_task_exchange(
-            str(run["user_id"]),
-            str(task["id"]),
-            answer=clean_result,
-            completed_at=time.time(),
+        if not waiting_for_choice:
+            record_task_exchange(
+                str(run["user_id"]),
+                str(task["id"]),
+                answer=clean_result,
+                completed_at=time.time(),
+            )
+        delivered = reply_or_queue(
+            message_id,
+            prefix + clean_result,
+            "desktop-unavailable" if waiting_for_choice else "final",
         )
-        delivered = reply_or_queue(message_id, prefix + clean_result, "final")
         failed_images = 0
         queued_images = 0
         for index, image in enumerate(images, start=1):
@@ -6725,6 +7273,85 @@ def handle_card_event(event: dict[str, Any]) -> None:
         action = str(payload.get("action") or "")
         if workflow_notifications_enabled() and handle_workflow_card_action(event, payload):
             return
+        if action in {"retry_desktop", "use_cli_fallback", "cancel_cli_fallback"}:
+            fallback_id = str(payload.get("fallback_id") or "")
+            entry = cli_fallback_entry(fallback_id, user_id, chat_id)
+            if entry is None:
+                reply(
+                    message_id,
+                    "这个执行选择已失效或已经处理，请重新发送消息。",
+                    f"cli-fallback-stale-{event_id}",
+                )
+                return
+            with _state_lock:
+                state = load_state()
+                if not mark_processed(state, f"card:{event_id}"):
+                    return
+            if action == "cancel_cli_fallback":
+                if remove_cli_fallback(fallback_id) is None:
+                    return
+                canceled = new_run(
+                    user_id,
+                    chat_id,
+                    str(entry["source_message_id"]),
+                    entry["task"],
+                    list(entry.get("image_keys") or []),
+                    list(entry.get("file_keys") or []),
+                    message_id or str(entry.get("progress_message_id") or ""),
+                )
+                canceled["status"] = "已取消，本条消息未提交"
+                canceled["outcome"] = "stopped"
+                if message_id:
+                    patch_card(message_id, build_run_card(canceled))
+                update_current_status_card(user_id)
+                log("cli fallback canceled by user")
+                return
+            try:
+                task = task_by_id(str(entry["task"]["id"]), user_id)
+            except (OSError, sqlite3.Error):
+                task = None
+            if task is None:
+                remove_cli_fallback(fallback_id)
+                reply(
+                    message_id,
+                    "这个 Task 已归档、删除或当前用户已无权访问，本条消息没有提交。",
+                    f"cli-fallback-task-missing-{event_id}",
+                )
+                return
+            run = new_run(
+                user_id,
+                chat_id,
+                str(entry["source_message_id"]),
+                task,
+                list(entry.get("image_keys") or []),
+                list(entry.get("file_keys") or []),
+                message_id or str(entry.get("progress_message_id") or ""),
+            )
+            run["status"] = (
+                "已确认，准备使用备用 Codex CLI"
+                if action == "use_cli_fallback"
+                else "正在重新连接 Codex Desktop"
+            )
+            run["use_cli_fallback"] = action == "use_cli_fallback"
+            if not claim_active_run(run):
+                reply(
+                    message_id,
+                    "这个 Task 当前正在运行，请完成后再次点击。",
+                    f"cli-fallback-busy-{event_id}",
+                )
+                return
+            if remove_cli_fallback(fallback_id) is None:
+                remove_active_run(str(run["run_id"]))
+                return
+            start_claimed_run(
+                run,
+                str(entry.get("content") or ""),
+                list(entry.get("image_keys") or []),
+                list(entry.get("file_keys") or []),
+                str(entry.get("raw_content") or ""),
+                str(entry.get("message_type") or "text"),
+            )
+            return
         if action == "cancel_queued_input":
             with _state_lock:
                 state = load_state()
@@ -6756,6 +7383,25 @@ def handle_card_event(event: dict[str, Any]) -> None:
                 if not mark_processed(state, f"card:{event_id}"):
                     return
             update_current_status_card(user_id, ensure=True)
+            return
+        if action == "refresh_codex_usage":
+            with _state_lock:
+                state = load_state()
+                if not mark_processed(state, f"card:{event_id}"):
+                    return
+            if message_id:
+                patch_card(
+                    message_id,
+                    build_codex_usage_card(
+                        codex_usage_snapshot(),
+                        "正在刷新用量",
+                    ),
+                )
+            threading.Thread(
+                target=refresh_codex_usage_card,
+                args=(message_id,),
+                daemon=True,
+            ).start()
             return
         if action in {
             "task_page",
@@ -7259,6 +7905,7 @@ def handle_menu_event(event: dict[str, Any]) -> None:
         TASK_MENU_EVENT_KEY,
         NEW_TASK_MENU_EVENT_KEY,
         ARCHIVE_TASK_MENU_EVENT_KEY,
+        USAGE_MENU_EVENT_KEY,
     } or not authorized_user(user_id):
         return
     event_id = str(event.get("event_id") or "")
@@ -7280,6 +7927,14 @@ def handle_menu_event(event: dict[str, Any]) -> None:
             state,
             build_new_task_card(projects, selected_project),
             f"new-task-{event_id}",
+        )
+        return
+    if event_key == USAGE_MENU_EVENT_KEY:
+        send_menu_card(
+            user_id,
+            state,
+            build_codex_usage_card(codex_usage_snapshot()),
+            f"codex-usage-{event_id}",
         )
         return
     task = selected_task(user_id, state)
@@ -7518,8 +8173,12 @@ def main() -> int:
     next_input_retry = 0.0
     next_workflow_retry = 0.0
     next_runtime_status = 0.0
+    next_usage_refresh = 0.0
     while any(consumer.poll() is None for consumer in _consumers):
         now = time.time()
+        if now >= next_usage_refresh:
+            threading.Thread(target=refresh_codex_usage, daemon=True).start()
+            next_usage_refresh = now + 60
         if now >= next_runtime_status:
             write_runtime_status()
             next_runtime_status = now + 5

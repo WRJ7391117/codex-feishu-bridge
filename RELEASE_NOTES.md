@@ -1,5 +1,18 @@
 # Release Notes
 
+## 1.7.0 (build 30, unreleased)
+
+- Reads live account limits from Codex app-server `account/rateLimits/read` instead of estimating quota from tokens or stale rollout logs.
+- Shows remaining percentage, window duration, and reset time for each Codex limit bucket in the Mac control center.
+- Adds a dedicated “Codex 用量” Bot menu and compact refreshable usage card for all bridge-allowlisted users, keeping account usage out of Task status cards and showing the same Mac account quota to each authorized user.
+- Refreshes usage in the background every minute so Feishu event handling and Task execution remain responsive.
+- Reflows the configuration sheet into a fixed header and footer with one scrollable content area, labeled user fields, grouped user cards, and collapsed advanced Event Key settings.
+- Adds regression coverage for multi-bucket normalization, remaining-percentage calculation, and allowlisted-user card visibility and refresh.
+- Labels workflow human-gate cards with both their dedicated target Task and the user's current chat Task, explicitly preserving the current Task unless the user chooses to switch.
+- Adds post-decision “切换到目标 Task” and “保持当前 Task” actions and removes the need for ambiguous follow-up text such as “已点击”.
+- Stops silently falling back when Codex Desktop IPC is unavailable, records the precise reason, and presents explicit retry, confirmed CLI fallback, and cancel actions in Feishu.
+- Prevents duplicate Desktop user bubbles by subscribing to live state without replaying complete history; approval requests are extracted directly from snapshot and patch broadcasts.
+
 ## 1.6.1 (build 24)
 
 - Uploads supported local PDF, Office, text, and code files explicitly linked by the Codex result, with per-file/count limits and stable filenames.
