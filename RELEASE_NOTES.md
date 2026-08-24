@@ -1,6 +1,6 @@
 # Release Notes
 
-## 1.7.0 (build 30, unreleased)
+## 1.7.0 (build 30)
 
 - Reads live account limits from Codex app-server `account/rateLimits/read` instead of estimating quota from tokens or stale rollout logs.
 - Shows remaining percentage, window duration, and reset time for each Codex limit bucket in the Mac control center.
