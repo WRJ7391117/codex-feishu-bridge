@@ -42,7 +42,7 @@ Use this skill for the local macOS bridge published at `WRJ7391117/codex-feishu-
    - for attachment changes, text, image, file, and audio round trips plus the Bot's message-resource permissions
    - for remote-control changes, a real progress-card patch, stop confirmation, and one-time approval callback
    - for workflow changes, dry-run, safe status, durable retry, one-time decision consumption, card completion patch, and recovery into the configured dedicated Task
-   - for Task-management changes, verify all four Bot menu Event Keys, including `codex_usage`, then use a disposable authorized-project Task for create/search/archive acceptance; restore archived test data afterward
+   - for Task-management changes, verify all five Bot menu Event Keys, including `current_task` and `codex_usage`, then use a disposable authorized-project Task for create/search/archive acceptance; restore archived test data afterward
 
 ## Standard commands
 

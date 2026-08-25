@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -240,6 +240,9 @@ EVENT_KEYS = (
     "card.action.trigger",
     "application.bot.menu_v6",
 )
+CURRENT_TASK_MENU_EVENT_KEY = str(
+    CONFIG.get("current_task_menu_event_key") or "current_task"
+)
 TASK_MENU_EVENT_KEY = str(CONFIG.get("task_menu_event_key") or "select_task")
 NEW_TASK_MENU_EVENT_KEY = str(
     CONFIG.get("new_task_menu_event_key") or "new_task"
@@ -290,12 +293,17 @@ _consumers: list[subprocess.Popen[str]] = []
 _state_lock = threading.RLock()
 _active_runs_lock = threading.RLock()
 _active_runs: dict[str, dict[str, Any]] = {}
+_result_delivery_locks_lock = threading.Lock()
+_result_delivery_locks: dict[str, Any] = {}
 _last_feishu_event_at = 0.0
 _runtime_status_lock = threading.Lock()
 _last_runtime_status_signature: tuple[Any, ...] | None = None
 _codex_usage_lock = threading.Lock()
 _codex_usage: dict[str, Any] = {}
 _codex_usage_refreshing = False
+_task_usage_cache_lock = threading.Lock()
+_task_usage_cache: dict[tuple[str, str, int, str], tuple[float, dict[str, Any]]] = {}
+TASK_USAGE_CACHE_SECONDS = 300
 
 
 class DesktopUnavailableError(RuntimeError):
@@ -1159,6 +1167,30 @@ def build_codex_usage_card(
     buttons = [
         {
             "tag": "button",
+            "text": {"tag": "plain_text", "content": "当日 Task 用量分析"},
+            "type": "default",
+            "width": "fill",
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {"action": "show_daily_task_usage_analysis"},
+                }
+            ],
+        },
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "当期 Task 用量分析"},
+            "type": "default",
+            "width": "fill",
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {"action": "show_period_task_usage_analysis"},
+                }
+            ],
+        },
+        {
+            "tag": "button",
             "text": {"tag": "plain_text", "content": "刷新用量"},
             "type": "primary_filled",
             "width": "fill",
@@ -1197,6 +1229,390 @@ def build_codex_usage_card(
             ],
         },
     }
+
+
+def usage_analysis_button(label: str, action: str, primary: bool = False) -> dict[str, Any]:
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": label},
+        "type": "primary_filled" if primary else "default",
+        "width": "fill",
+        "behaviors": [
+            {
+                "type": "callback",
+                "value": {"action": action},
+            }
+        ],
+    }
+
+
+def task_usage_time_range(
+    scope: str,
+    usage: dict[str, Any],
+    now: float | None = None,
+) -> dict[str, Any]:
+    end_at = time.time() if now is None else now
+    if scope == "daily":
+        local_now = datetime.fromtimestamp(end_at).astimezone()
+        start_at = local_now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        return {
+            "scope": scope,
+            "title": "当日 Task 用量分析",
+            "subtitle": time.strftime("%m-%d 00:00 至现在", time.localtime(end_at)),
+            "start_at": start_at,
+            "end_at": end_at,
+            "fallback": False,
+        }
+    window = next(
+        (
+            window
+            for bucket in usage.get("buckets", [])
+            if isinstance(bucket, dict) and str(bucket.get("id") or "") == "codex"
+            for window in bucket.get("windows", [])
+            if isinstance(window, dict)
+            and int(window.get("window_minutes") or 0) > 0
+            and int(window.get("resets_at") or 0) > 0
+        ),
+        None,
+    )
+    if window is None:
+        start_at = end_at - 7 * 24 * 60 * 60
+        reset_at = 0
+    else:
+        reset_at = int(window["resets_at"])
+        start_at = reset_at - int(window["window_minutes"]) * 60
+    return {
+        "scope": scope,
+        "title": "当期 Task 用量分析",
+        "subtitle": (
+            f"{time.strftime('%m-%d %H:%M', time.localtime(start_at))} 至 "
+            f"{time.strftime('%m-%d %H:%M', time.localtime(reset_at))} 重置"
+            if reset_at
+            else "最近 7 天（额度周期暂不可用）"
+        ),
+        "start_at": start_at,
+        "end_at": end_at,
+        "fallback": not bool(reset_at),
+    }
+
+
+def rollout_timestamp(value: Any) -> float:
+    if not isinstance(value, str) or not value:
+        return 0
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except ValueError:
+        return 0
+
+
+def rollout_offset_for_time(path: Path, since: float) -> int:
+    timestamp_pattern = re.compile(br'"timestamp"\s*:\s*"([^"]+)"')
+    size = path.stat().st_size
+    low, high = 0, size
+    with path.open("rb") as handle:
+        while high - low > 4096:
+            middle = (low + high) // 2
+            handle.seek(middle)
+            if middle:
+                handle.readline()
+            prefix = handle.readline(4096)
+            match = timestamp_pattern.search(prefix)
+            observed = rollout_timestamp(
+                match.group(1).decode("utf-8", errors="ignore") if match else ""
+            )
+            if observed and observed < since:
+                low = handle.tell()
+            else:
+                high = middle
+    return max(0, low - 1)
+
+
+def task_usage_from_rollout(path: Path, since: float, until: float) -> dict[str, int]:
+    fields = (
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    )
+    result = {field: 0 for field in fields}
+    result.update(
+        {
+            "model_calls": 0,
+            "turns": 0,
+            "tool_calls": 0,
+            "compactions": 0,
+            "file_changes": 0,
+            "subagent_events": 0,
+        }
+    )
+    markers = (
+        b'"token_count"',
+        b'"user_message"',
+        b'"custom_tool_call"',
+        b'"function_call"',
+        b'"context_compacted"',
+        b'"patch_apply_end"',
+        b'"sub_agent_activity"',
+    )
+    previous_total: dict[str, int] | None = None
+    with path.open("rb") as handle:
+        offset = rollout_offset_for_time(path, since)
+        handle.seek(offset)
+        if offset:
+            handle.readline()
+        for raw_line in handle:
+            if not any(marker in raw_line for marker in markers):
+                continue
+            try:
+                record = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            observed = rollout_timestamp(record.get("timestamp"))
+            if observed < since:
+                continue
+            if observed > until:
+                break
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            payload_type = str(payload.get("type") or "")
+            record_type = str(record.get("type") or "")
+            if record_type == "event_msg" and payload_type == "token_count":
+                info = payload.get("info")
+                if not isinstance(info, dict):
+                    continue
+                total_raw = info.get("total_token_usage")
+                last_raw = info.get("last_token_usage")
+                if not isinstance(total_raw, dict) or not isinstance(last_raw, dict):
+                    continue
+                total = {field: max(0, int(total_raw.get(field) or 0)) for field in fields}
+                if previous_total == total:
+                    continue
+                if previous_total is not None and all(
+                    total[field] >= previous_total[field] for field in fields
+                ):
+                    delta = {
+                        field: total[field] - previous_total[field] for field in fields
+                    }
+                else:
+                    delta = {
+                        field: max(0, int(last_raw.get(field) or 0)) for field in fields
+                    }
+                for field in fields:
+                    result[field] += delta[field]
+                result["model_calls"] += 1
+                previous_total = total
+            elif record_type == "event_msg" and payload_type == "user_message":
+                result["turns"] += 1
+            elif record_type == "response_item" and payload_type in {
+                "custom_tool_call",
+                "function_call",
+            }:
+                result["tool_calls"] += 1
+            elif record_type == "event_msg" and payload_type == "context_compacted":
+                result["compactions"] += 1
+            elif record_type == "event_msg" and payload_type == "patch_apply_end":
+                result["file_changes"] += 1
+            elif record_type == "event_msg" and payload_type == "sub_agent_activity":
+                result["subagent_events"] += 1
+    return result
+
+
+def task_usage_reason(item: dict[str, Any], median_per_call: float) -> tuple[str, str]:
+    total = int(item.get("total_tokens") or 0)
+    calls = max(1, int(item.get("model_calls") or 0))
+    turns = int(item.get("turns") or 0)
+    tools = int(item.get("tool_calls") or 0)
+    compactions = int(item.get("compactions") or 0)
+    per_call = total / calls
+    input_tokens = max(1, int(item.get("input_tokens") or 0))
+    output_tokens = max(1, int(item.get("output_tokens") or 0))
+    cached_ratio = int(item.get("cached_input_tokens") or 0) / input_tokens
+    reasoning_ratio = int(item.get("reasoning_output_tokens") or 0) / output_tokens
+    reasons: list[str] = []
+    if cached_ratio >= 0.6:
+        reasons.append(f"长上下文/缓存输入 {cached_ratio:.0%}")
+    if tools >= 5:
+        reasons.append(f"工具调用 {tools} 次")
+    if reasoning_ratio >= 0.3:
+        reasons.append(f"推理输出占比 {reasoning_ratio:.0%}")
+    if compactions:
+        reasons.append(f"上下文压缩 {compactions} 次")
+    if not reasons:
+        reasons.append(f"{turns} 轮交互、{calls} 次模型调用")
+    unusually_large_call = calls >= 2 and per_call > max(50_000, median_per_call * 1.8)
+    long_context_pressure = compactions >= 2 and cached_ratio >= 0.75
+    if unusually_large_call or long_context_pressure:
+        assessment = "偏高，需要关注"
+    elif calls >= max(6, turns * 2) or tools >= 10:
+        assessment = "正常，任务活跃度较高"
+    else:
+        assessment = "正常"
+    return assessment, "；".join(reasons[:3])
+
+
+def analyze_user_task_usage(
+    user_id: str,
+    time_range: dict[str, Any],
+    force: bool = False,
+) -> dict[str, Any]:
+    cache_key = (
+        user_id,
+        str(time_range["scope"]),
+        int(float(time_range["start_at"])),
+        "\0".join(sorted(allowed_projects_for(user_id))),
+    )
+    with _task_usage_cache_lock:
+        cached = _task_usage_cache.get(cache_key)
+        if not force and cached and time.time() - cached[0] < TASK_USAGE_CACHE_SECONDS:
+            return json.loads(json.dumps(cached[1]))
+    tasks = recent_tasks(user_id) + archived_tasks(user_id)
+    unique_tasks = {str(task["id"]): task for task in tasks}
+    items: list[dict[str, Any]] = []
+    since = float(time_range["start_at"])
+    until = float(time_range["end_at"])
+    for task in unique_tasks.values():
+        path = rollout_path_for_task(str(task["id"]))
+        if path is None or not path.is_file() or path.stat().st_mtime < since:
+            continue
+        metrics = task_usage_from_rollout(path, since, until)
+        if int(metrics.get("total_tokens") or 0) <= 0:
+            continue
+        items.append({"task": task, **metrics})
+    items.sort(key=lambda item: int(item["total_tokens"]), reverse=True)
+    total_tokens = sum(int(item["total_tokens"]) for item in items)
+    per_call_values = sorted(
+        int(item["total_tokens"]) / max(1, int(item["model_calls"]))
+        for item in items
+    )
+    median_per_call = (
+        per_call_values[len(per_call_values) // 2] if per_call_values else 0
+    )
+    for item in items:
+        item["share_percent"] = round(
+            int(item["total_tokens"]) / total_tokens * 100 if total_tokens else 0
+        )
+        assessment, reason = task_usage_reason(item, median_per_call)
+        item["assessment"] = assessment
+        item["reason"] = reason
+    analysis = {
+        **time_range,
+        "tasks": items,
+        "total_tokens": total_tokens,
+        "analyzed_at": time.time(),
+    }
+    with _task_usage_cache_lock:
+        _task_usage_cache[cache_key] = (time.time(), analysis)
+    return json.loads(json.dumps(analysis))
+
+
+def compact_token_count(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(value)
+
+
+def build_task_usage_analysis_card(
+    analysis: dict[str, Any],
+    status: str = "",
+) -> dict[str, Any]:
+    title = str(analysis.get("title") or "Task 用量分析")
+    subtitle = str(analysis.get("subtitle") or "正在统计")
+    lines: list[str] = []
+    if status:
+        lines.append(f"✅ **{card_markdown_escape(status)}**")
+    tasks = analysis.get("tasks", [])
+    total = int(analysis.get("total_tokens") or 0)
+    if tasks:
+        lines.append(
+            f"共 {len(tasks)} 个活跃 Task · 可见 Token 合计 {compact_token_count(total)}"
+        )
+        for index, item in enumerate(tasks[:5], start=1):
+            task = item.get("task", {})
+            identity = f"{task.get('project') or '无项目'} · {task.get('title') or '未命名 Task'}"
+            calls = max(1, int(item.get("model_calls") or 0))
+            per_call = int(item.get("total_tokens") or 0) // calls
+            lines.extend(
+                [
+                    f"**{index}. {card_markdown_escape(identity)}**",
+                    f"用量：{compact_token_count(int(item['total_tokens']))} Token "
+                    f"· 占可见 Task {int(item.get('share_percent') or 0)}% "
+                    f"· 单次模型调用约 {compact_token_count(per_call)}",
+                    f"判断：{card_markdown_escape(str(item.get('assessment') or '正常'))}",
+                    f"主要原因：{card_markdown_escape(str(item.get('reason') or '常规交互'))}",
+                ]
+            )
+    else:
+        lines.append("这个统计区间内没有检测到可见 Task 的 Token 用量。")
+    if analysis.get("fallback"):
+        lines.append("<font color='orange'>官方额度周期暂不可用，当前按最近 7 天统计。</font>")
+    lines.append(
+        "<font color='grey'>仅统计你有权查看的项目；Token 用于 Task 间比较和异常诊断，"
+        "不等同于官方额度或账单的按 Task 扣减。偏高表示单次调用明显高于同期 Task，"
+        "或长上下文伴随反复压缩。</font>"
+    )
+    refresh_action = (
+        "show_daily_task_usage_analysis"
+        if analysis.get("scope") == "daily"
+        else "show_period_task_usage_analysis"
+    )
+    return {
+        "schema": "2.0",
+        "config": {
+            "update_multi": True,
+            "width_mode": "default",
+            "enable_forward": False,
+            "summary": {"content": title},
+        },
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "subtitle": {"tag": "plain_text", "content": subtitle},
+            "template": "blue",
+            "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": [
+                {"tag": "markdown", "content": "\n\n".join(lines)},
+                usage_analysis_button("重新分析", refresh_action, True),
+                usage_analysis_button("返回实时用量", "show_codex_usage"),
+            ],
+        },
+    }
+
+
+def build_task_usage_loading_card(scope: str) -> dict[str, Any]:
+    time_range = task_usage_time_range(scope, codex_usage_snapshot())
+    return build_task_usage_analysis_card(time_range, "正在读取 Task 用量并分析原因")
+
+
+def refresh_task_usage_analysis_card(
+    user_id: str,
+    message_id: str,
+    scope: str,
+) -> None:
+    refresh_codex_usage()
+    time_range = task_usage_time_range(scope, codex_usage_snapshot())
+    try:
+        analysis = analyze_user_task_usage(user_id, time_range, force=True)
+        card = build_task_usage_analysis_card(analysis, "分析已更新")
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        log(f"Task usage analysis failed: {type(exc).__name__}")
+        card = build_task_usage_analysis_card(
+            {**time_range, "tasks": [], "total_tokens": 0},
+            "分析暂时不可用，请稍后重试",
+        )
+    if message_id:
+        patch_card(message_id, card)
 
 
 def refresh_codex_usage_card(message_id: str) -> None:
@@ -4069,9 +4485,10 @@ def normalized_content(content: str) -> str:
 def help_text() -> str:
     return (
         "可用命令：\n"
-        "机器人菜单“选择 Task” —— 选择当前 Task 或恢复已归档 Task\n"
+        "机器人菜单 TASK →“当前 Task” —— 查看当前状态卡\n"
+        "机器人菜单 TASK →“选择 Task” —— 选择当前 Task 或恢复已归档 Task\n"
         "机器人菜单“新建 Task” —— 选择项目并新建 Task\n"
-        "机器人菜单“归档 Task” —— 可取消或二次确认归档当前 Task\n"
+        "机器人菜单 TASK →“归档当前 Task” —— 可取消或二次确认归档当前 Task\n"
         "对话 —— 用文字打开 Task 选择卡片（备用）\n"
         "选择 N —— 文字选择 task（备用）\n"
         "搜索 关键词 —— 按标题搜索当前项目的 Task\n"
@@ -5094,6 +5511,31 @@ def task_is_current(user_id: str, task_id: str) -> bool:
         return str(state.get("selected", {}).get(user_id) or "") == task_id
 
 
+def result_delivery_lock(user_id: str) -> Any:
+    with _result_delivery_locks_lock:
+        lock = _result_delivery_locks.get(user_id)
+        if lock is None:
+            lock = threading.Lock()
+            _result_delivery_locks[user_id] = lock
+        return lock
+
+
+def follow_result_task(user_id: str, task: dict[str, str]) -> bool:
+    current_task = task_by_id(str(task["id"]), user_id)
+    if current_task is None:
+        return False
+    with _state_lock:
+        state = load_state()
+        selected = state.setdefault("selected", {})
+        if str(selected.get(user_id) or "") == str(current_task["id"]):
+            return False
+        selected[user_id] = current_task["id"]
+        state.setdefault("last_projects", {})[user_id] = current_task["project"]
+        remember_recent_task(state, user_id, str(current_task["id"]))
+        save_state(state)
+    return True
+
+
 def build_current_status_card(
     task: dict[str, str],
     status: str,
@@ -5265,12 +5707,15 @@ def update_current_status_card(
     change: str = "",
     task: dict[str, str] | None = None,
     ensure: bool = False,
+    force_new: bool = False,
 ) -> bool:
     with _state_lock:
         state = load_state()
         current_id = str(state.get("selected", {}).get(user_id) or "")
         record = state.get("current_status_cards", {}).get(user_id, {})
         message_id = str(record.get("message_id") or "") if isinstance(record, dict) else ""
+    if force_new:
+        message_id = ""
     if task is None and current_id:
         task = next(
             (
@@ -6949,7 +7394,6 @@ def process_message_run(
             if success
             else "运行未完成"
         )
-        set_run_progress(run, status, outcome, force=True)
         label = (
             "已停止"
             if stopped
@@ -6959,8 +7403,6 @@ def process_message_run(
             if success
             else "未完成"
         )
-        is_current = task_is_current(str(run["user_id"]), str(task["id"]))
-        prefix = task_status_prefix(task, label, is_current)
         clean_result, images = prepare_result_images(result, rollout_images)
         clean_result, files = prepare_result_files(clean_result)
         if not waiting_for_choice:
@@ -6970,11 +7412,32 @@ def process_message_run(
                 answer=clean_result,
                 completed_at=time.time(),
             )
-        delivered = reply_or_queue(
-            message_id,
-            prefix + clean_result,
-            "desktop-unavailable" if waiting_for_choice else "final",
-        )
+        user_id = str(run["user_id"])
+        followed_result = False
+        with result_delivery_lock(user_id):
+            if outcome in {"completed", "stopped", "failed"}:
+                followed_result = follow_result_task(user_id, task)
+                run["is_current_task"] = task_is_current(
+                    user_id,
+                    str(task["id"]),
+                )
+            set_run_progress(run, status, outcome, force=True)
+            prefix = task_status_prefix(
+                task,
+                label,
+                run["is_current_task"] is not False,
+            )
+            delivered = reply_or_queue(
+                message_id,
+                prefix + clean_result,
+                "desktop-unavailable" if waiting_for_choice else "final",
+            )
+        if followed_result:
+            refresh_user_task_identity_cards(
+                user_id,
+                "当前 Task 已跟随最新结果",
+                task,
+            )
         failed_images = 0
         queued_images = 0
         for index, image in enumerate(images, start=1):
@@ -7403,6 +7866,31 @@ def handle_card_event(event: dict[str, Any]) -> None:
                 daemon=True,
             ).start()
             return
+        if action == "show_codex_usage":
+            with _state_lock:
+                state = load_state()
+                if not mark_processed(state, f"card:{event_id}"):
+                    return
+            if message_id:
+                patch_card(message_id, build_codex_usage_card(codex_usage_snapshot()))
+            return
+        if action in {
+            "show_daily_task_usage_analysis",
+            "show_period_task_usage_analysis",
+        }:
+            with _state_lock:
+                state = load_state()
+                if not mark_processed(state, f"card:{event_id}"):
+                    return
+            scope = "daily" if action == "show_daily_task_usage_analysis" else "period"
+            if message_id:
+                patch_card(message_id, build_task_usage_loading_card(scope))
+            threading.Thread(
+                target=refresh_task_usage_analysis_card,
+                args=(user_id, message_id, scope),
+                daemon=True,
+            ).start()
+            return
         if action in {
             "task_page",
             "archived_task_page",
@@ -7576,7 +8064,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     if requested_task_id and requested_task_id != str(task["id"]):
                         reply(
                             message_id,
-                            "当前 Task 已经变化，请重新点击机器人菜单中的“归档 Task”。",
+                            "当前 Task 已经变化，请重新点击 TASK →“归档当前 Task”。",
                             f"archive-stale-{event_id}",
                         )
                         return
@@ -7902,6 +8390,7 @@ def handle_menu_event(event: dict[str, Any]) -> None:
     user_id = str(event.get("operator_id") or "")
     event_key = str(event.get("event_key") or "")
     if event_key not in {
+        CURRENT_TASK_MENU_EVENT_KEY,
         TASK_MENU_EVENT_KEY,
         NEW_TASK_MENU_EVENT_KEY,
         ARCHIVE_TASK_MENU_EVENT_KEY,
@@ -7913,6 +8402,18 @@ def handle_menu_event(event: dict[str, Any]) -> None:
         return
     state = load_state()
     if not mark_processed(state, f"menu:{event_id}"):
+        return
+    if event_key == CURRENT_TASK_MENU_EVENT_KEY:
+        task = selected_task(user_id, state)
+        if task is None:
+            send_task_card(user_id, state, event_id)
+            return
+        update_current_status_card(
+            user_id,
+            task=task,
+            ensure=True,
+            force_new=True,
+        )
         return
     if event_key == TASK_MENU_EVENT_KEY:
         send_task_card(user_id, state, event_id)

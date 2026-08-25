@@ -15,7 +15,7 @@ Common interpretations:
 
 - Listener starts but card selection does nothing: callback configuration is usually not enabled in the Feishu console.
 - Project/Task selection succeeds but Feishu shows `108002`: verify the installed runtime is using the bundled `lark-cli 1.0.89-codex-feishu.2`. Official v1.0.89 routes the card action through the generic custom-event handler and does not return the card-action response Feishu expects within three seconds.
-- Bot menu click does nothing: the menu action must be “push event” and its Event Key must match the corresponding configured key; the usage menu uses `usage_menu_event_key=codex_usage`.
+- Bot menu click does nothing: each clickable submenu must use “push event” and its Event Key must match the corresponding configured key. `TASK` is only the parent grouping; its children use `current_task`, `select_task`, `new_task`, and `archive_task`, while the top-level usage menu uses `codex_usage`.
 - Every message asks to select again: inspect `state.json` ownership, confirm selection is keyed by that user's open_id, and verify their project rule still includes the selected Task.
 - A user sees no Tasks: their project names must exactly match the Codex Desktop sidebar; use `*` only when the Mac owner intends to grant all projects.
 - A message stays queued: confirm the active Task eventually completes, inspect `pending input loop failed`, and verify that the Task still exists and remains within that user's project access. If Codex Desktop reports the Task is still busy after a bridge restart, the bridge waits 15 seconds and retries rather than duplicating the turn.

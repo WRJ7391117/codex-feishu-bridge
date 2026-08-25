@@ -140,6 +140,7 @@ def validate_config(payload) -> None:
     string_fields = (
         "lark_profile",
         "allowed_sender_id",
+        "current_task_menu_event_key",
         "task_menu_event_key",
         "new_task_menu_event_key",
         "archive_task_menu_event_key",

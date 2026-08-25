@@ -364,6 +364,30 @@ class RemoteFeatureTests(unittest.TestCase):
             "当前 Task",
         )
 
+    def test_forced_current_status_card_is_sent_as_the_latest_message(self):
+        task = self.tasks()[0]
+        self.bridge.save_state(
+            {
+                "selected": {"ou_admin": task["id"]},
+                "current_status_cards": {
+                    "ou_admin": {
+                        "message_id": "om_old_status",
+                        "chat_id": "oc_test",
+                    }
+                },
+            }
+        )
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.assertTrue(
+            self.bridge.update_current_status_card(
+                "ou_admin", task=task, ensure=True, force_new=True
+            )
+        )
+
+        self.bridge.patch_card.assert_not_called()
+        self.bridge.send_card.assert_called_once()
+
     def test_current_status_card_shows_recent_exchange_and_favorite(self):
         card = self.bridge.build_current_status_card(
             self.tasks()[0],
@@ -448,7 +472,176 @@ class RemoteFeatureTests(unittest.TestCase):
         ]
         self.assertNotIn("Codex 用量", status_content)
         self.assertIn("剩余 37%", usage_content)
-        self.assertEqual(usage_buttons, ["刷新用量"])
+        self.assertEqual(
+            usage_buttons,
+            ["当日 Task 用量分析", "当期 Task 用量分析", "刷新用量"],
+        )
+
+    def test_task_usage_parser_deduplicates_token_events_and_counts_causes(self):
+        rollout = Path(self.temporary.name) / "rollout.jsonl"
+        fields = {
+            "input_tokens": 100,
+            "cached_input_tokens": 60,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 40,
+            "reasoning_output_tokens": 20,
+            "total_tokens": 140,
+        }
+
+        def token_event(timestamp, total, last):
+            return {
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": total,
+                        "last_token_usage": last,
+                    },
+                },
+            }
+
+        second = {key: value * 2 for key, value in fields.items()}
+        records = [
+            {
+                "timestamp": "2026-08-24T23:00:00Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_reasoning", "text": "x" * 200},
+            }
+            for _ in range(40)
+        ] + [
+            token_event("2026-08-25T00:10:00Z", fields, fields),
+            token_event("2026-08-25T00:10:01Z", fields, fields),
+            {
+                "timestamp": "2026-08-25T00:11:00Z",
+                "type": "response_item",
+                "payload": {"type": "custom_tool_call"},
+            },
+            {
+                "timestamp": "2026-08-25T00:12:00Z",
+                "type": "event_msg",
+                "payload": {"type": "context_compacted"},
+            },
+            token_event("2026-08-25T00:13:00Z", second, fields),
+        ]
+        rollout.write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n",
+            encoding="utf-8",
+        )
+
+        metrics = self.bridge.task_usage_from_rollout(
+            rollout,
+            1_787_616_000,
+            1_787_619_600,
+        )
+
+        self.assertEqual(metrics["total_tokens"], 280)
+        self.assertEqual(metrics["model_calls"], 2)
+        self.assertEqual(metrics["tool_calls"], 1)
+        self.assertEqual(metrics["compactions"], 1)
+
+    def test_daily_and_period_task_usage_cards_explain_rank_and_normality(self):
+        usage = {
+            "buckets": [
+                {
+                    "id": "codex",
+                    "name": "Codex",
+                    "windows": [
+                        {
+                            "remaining_percent": 37,
+                            "window_minutes": 10_080,
+                            "resets_at": 700_000,
+                        }
+                    ],
+                }
+            ],
+            "updated_at": 100_000,
+        }
+        daily_range = self.bridge.task_usage_time_range("daily", usage, now=100_000)
+        period_range = self.bridge.task_usage_time_range("period", usage, now=100_000)
+        item = {
+            "task": {"project": "deepori", "title": "Architecture"},
+            "total_tokens": 200_000,
+            "model_calls": 4,
+            "turns": 1,
+            "tool_calls": 8,
+            "share_percent": 80,
+            "assessment": "偏高，需要关注",
+            "reason": "长上下文/缓存输入 90%；工具调用 8 次",
+        }
+        daily = self.bridge.build_task_usage_analysis_card(
+            {**daily_range, "tasks": [item], "total_tokens": 200_000}
+        )
+        period = self.bridge.build_task_usage_analysis_card(
+            {**period_range, "tasks": [item], "total_tokens": 200_000}
+        )
+
+        self.assertEqual(daily["header"]["title"]["content"], "当日 Task 用量分析")
+        self.assertEqual(period["header"]["title"]["content"], "当期 Task 用量分析")
+        for card in (daily, period):
+            content = card["body"]["elements"][0]["content"]
+            self.assertIn("deepori · Architecture", content)
+            self.assertIn("偏高，需要关注", content)
+            self.assertIn("长上下文", content)
+            self.assertIn("不等同于官方额度", content)
+            buttons = [
+                element.get("text", {}).get("content")
+                for element in card["body"]["elements"]
+                if element.get("tag") == "button"
+            ]
+            self.assertIn("返回实时用量", buttons)
+
+    def test_task_usage_analysis_buttons_start_background_analysis(self):
+        self.bridge.patch_card = mock.Mock(return_value=True)
+        analysis_thread = mock.Mock()
+        thread_factory = mock.Mock(return_value=analysis_thread)
+        with self.bridge._codex_usage_lock:
+            self.bridge._codex_usage = {
+                "buckets": [],
+                "updated_at": 1_000,
+            }
+
+        with mock.patch.object(self.bridge.threading, "Thread", thread_factory):
+            for index, action in enumerate(
+                (
+                    "show_daily_task_usage_analysis",
+                    "show_period_task_usage_analysis",
+                    "show_codex_usage",
+                )
+            ):
+                with self.subTest(action=action):
+                    self.bridge.handle_card_event(
+                        {
+                            "event_id": f"evt-usage-view-{index}",
+                            "message_id": "om_status",
+                            "chat_id": "oc_test",
+                            "operator_id": "ou_admin",
+                            "action_tag": "button",
+                            "action_value": json.dumps({"action": action}),
+                        }
+                    )
+
+        titles = [
+            call.args[1]["header"]["title"]["content"]
+            for call in self.bridge.patch_card.call_args_list
+        ]
+        self.assertEqual(
+            titles,
+            ["当日 Task 用量分析", "当期 Task 用量分析", "Codex 用量"],
+        )
+        self.assertEqual(thread_factory.call_count, 2)
+        self.assertIs(
+            thread_factory.call_args_list[0].kwargs["target"],
+            self.bridge.refresh_task_usage_analysis_card,
+        )
+        self.assertEqual(
+            thread_factory.call_args_list[0].kwargs["args"],
+            ("ou_admin", "om_status", "daily"),
+        )
+        self.assertEqual(
+            thread_factory.call_args_list[1].kwargs["args"],
+            ("ou_admin", "om_status", "period"),
+        )
 
     def test_usage_menu_sends_refreshable_card_to_all_authorized_users(self):
         self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
@@ -476,6 +669,59 @@ class RemoteFeatureTests(unittest.TestCase):
                 for element in card["body"]["elements"]
                 if element.get("tag") == "button"
             ])
+
+    def test_current_task_menu_opens_current_status_card_directly(self):
+        task = self.tasks()[0]
+        self.bridge.selected_task = mock.Mock(return_value=task)
+        self.bridge.update_current_status_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_menu_event(
+            {
+                "event_id": "evt-current-task-menu",
+                "event_key": "current_task",
+                "operator_id": "ou_admin",
+            }
+        )
+
+        self.bridge.update_current_status_card.assert_called_once_with(
+            "ou_admin", task=task, ensure=True, force_new=True
+        )
+        self.bridge.send_card.assert_not_called()
+
+    def test_current_task_menu_opens_selector_only_when_no_task_is_selected(self):
+        self.bridge.selected_task = mock.Mock(return_value=None)
+        self.bridge.send_task_card = mock.Mock()
+
+        self.bridge.handle_menu_event(
+            {
+                "event_id": "evt-current-task-menu-empty",
+                "event_key": "current_task",
+                "operator_id": "ou_admin",
+            }
+        )
+
+        self.bridge.send_task_card.assert_called_once()
+
+    def test_task_menu_event_keys_have_five_distinct_defaults(self):
+        event_keys = (
+            self.bridge.CURRENT_TASK_MENU_EVENT_KEY,
+            self.bridge.TASK_MENU_EVENT_KEY,
+            self.bridge.NEW_TASK_MENU_EVENT_KEY,
+            self.bridge.ARCHIVE_TASK_MENU_EVENT_KEY,
+            self.bridge.USAGE_MENU_EVENT_KEY,
+        )
+
+        self.assertEqual(
+            event_keys,
+            (
+                "current_task",
+                "select_task",
+                "new_task",
+                "archive_task",
+                "codex_usage",
+            ),
+        )
+        self.assertEqual(len(set(event_keys)), 5)
 
     def test_authorized_user_usage_button_starts_live_refresh_with_visible_feedback(self):
         self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
@@ -1063,7 +1309,9 @@ class RemoteFeatureTests(unittest.TestCase):
             return_value=(True, "oc_test", "om_task_card")
         )
 
-        for index, event_key in enumerate(("select_task", "new_task", "archive_task", "codex_usage")):
+        for index, event_key in enumerate(
+            ("current_task", "select_task", "new_task", "archive_task", "codex_usage")
+        ):
             self.bridge.handle_menu_event(
                 {
                     "event_id": f"evt-unauthorized-{index}",
@@ -1416,6 +1664,64 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertLess(elapsed, 0.5)
         self.assertIsNotNone(self.bridge.active_run_for_task("task-a"))
         gate.set()
+
+    def test_completed_result_becomes_current_before_its_reply_is_sent(self):
+        task_a, task_b = self.tasks()[:2]
+        state = self.bridge.load_state()
+        state.setdefault("selected", {})["ou_admin"] = task_b["id"]
+        self.bridge.save_state(state)
+        run = self.bridge.new_run(
+            "ou_admin",
+            "oc_test",
+            "om_task_a",
+            task_a,
+            [],
+            [],
+        )
+        observed = {}
+        self.bridge.task_by_id = lambda task_id, user_id: (
+            task_a if task_id == task_a["id"] else task_b
+        )
+        self.bridge.run_codex = lambda *args, **kwargs: (True, "A 的最终结果", [])
+        self.bridge.restore_pending_task_name = lambda *args: False
+        self.bridge.set_run_progress = mock.Mock()
+        self.bridge.refresh_user_task_identity_cards = mock.Mock()
+        self.bridge.update_current_status_card = lambda *args, **kwargs: True
+        self.bridge.start_next_queued_input = lambda *args: None
+        self.bridge.remove_active_run = lambda *args: None
+
+        def deliver(message_id, content, kind):
+            observed["selected"] = self.bridge.load_state()["selected"]["ou_admin"]
+            observed["content"] = content
+            return True
+
+        self.bridge.reply_or_queue = deliver
+        self.bridge.process_message_run(run, "执行 A", [], [], "", "text")
+
+        self.assertEqual(observed["selected"], task_a["id"])
+        self.assertTrue(observed["content"].startswith("🟢 当前 Task\n"))
+        self.assertIn("Task：Home", observed["content"])
+        self.bridge.refresh_user_task_identity_cards.assert_called_once_with(
+            "ou_admin",
+            "当前 Task 已跟随最新结果",
+            task_a,
+        )
+
+    def test_latest_completed_result_wins_across_parallel_tasks(self):
+        task_a, task_b = self.tasks()[:2]
+        state = self.bridge.load_state()
+        state.setdefault("selected", {})["ou_admin"] = task_b["id"]
+        self.bridge.save_state(state)
+        self.bridge.task_by_id = lambda task_id, user_id: next(
+            task for task in (task_a, task_b) if task["id"] == task_id
+        )
+
+        self.assertTrue(self.bridge.follow_result_task("ou_admin", task_a))
+        self.assertTrue(self.bridge.follow_result_task("ou_admin", task_b))
+        self.assertEqual(
+            self.bridge.load_state()["selected"]["ou_admin"],
+            task_b["id"],
+        )
 
     def test_busy_task_queues_message_and_runs_it_next(self):
         gate = threading.Event()

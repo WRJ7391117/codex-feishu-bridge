@@ -1852,12 +1852,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.7.0")
-        self.assertEqual(info["CFBundleVersion"], "30")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.8.3")
+        self.assertEqual(info["CFBundleVersion"], "34")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.7.0 (build 30)", readme)
-        self.assertIn("1.7.0 (build 30", release_notes)
+        self.assertIn("1.8.3 (build 34)", readme)
+        self.assertIn("1.8.3 (build 34", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):
@@ -1903,6 +1903,11 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         self.assertIn('"备注名"', configuration)
         self.assertIn('"用户 open_id"', configuration)
         self.assertIn('"允许项目"', configuration)
+        self.assertIn('"当前 Task"', configuration)
+        self.assertIn('"额度用量"', configuration)
+        self.assertIn('config["current_task_menu_event_key"] = currentTaskEventKey', source)
+        self.assertIn("五个机器人菜单 Event Key 都不能为空", source)
+        self.assertIn("五个机器人菜单 Event Key 不能重复", source)
         self.assertIn('Text("保存后，正在运行的桥接会自动重启并保留当前 Task。")', configuration)
 
 

@@ -1,5 +1,21 @@
 # Release Notes
 
+## 1.8.3 (build 34)
+
+- Reorganizes the Feishu Bot menu into a `TASK` main menu with “当前 Task”, “选择 Task”, “新建 Task”, and “归档当前 Task” submenus, plus a separate top-level “额度用量” entry.
+- Adds the `current_task` menu event, which opens the persistent current-Task status card directly without entering the Task selector.
+- Validates all five Bot menu Event Keys as non-empty and unique in the Mac App configuration.
+
+## 1.8.2 (build 33, unreleased)
+
+- Adds “当日 Task 用量分析” and “当期 Task 用量分析” as second-level actions inside the Feishu “Codex 用量” card without requiring new Bot menu configuration.
+- Ranks only Tasks visible to the authorized Feishu user by Codex rollout Token usage for local-day or current main-quota-period boundaries.
+- Explains high use from structured metrics such as cached long-context input, model-call frequency, reasoning output, tool calls, and context compaction, then labels each Task as normal, normally active, or unusually high.
+- Reads only the relevant time range from local rollouts in a background worker, keeps a five-minute in-memory cache, and states that Task Token comparisons are not exact per-Task billing or quota deductions.
+- Supersedes the unreleased local `1.8.0 (build 31)` quota-curve prototype with Task-attributed analysis.
+- Makes the current Feishu Task follow the latest terminal result: completed, failed, and stopped Tasks become current immediately before their final text reply, while ordinary progress updates never steal focus.
+- Serializes terminal-result selection and text delivery per Feishu user so concurrent Tasks leave the last delivered result as the current Task and relabel other active cards accurately.
+
 ## 1.7.0 (build 30)
 
 - Reads live account limits from Codex app-server `account/rateLimits/read` instead of estimating quota from tokens or stale rollout logs.

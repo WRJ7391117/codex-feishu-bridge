@@ -10,6 +10,7 @@
   ],
   "allowed_chat_ids": [],
   "allow_access_requests": true,
+  "current_task_menu_event_key": "current_task",
   "task_menu_event_key": "select_task",
   "new_task_menu_event_key": "new_task",
   "archive_task_menu_event_key": "archive_task",

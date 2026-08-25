@@ -392,6 +392,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var draftProfile = "codex-notify"
     @Published var draftUsers = [AuthorizedUserDraft()]
     @Published var draftChats = ""
+    @Published var draftCurrentTaskEventKey = "current_task"
     @Published var draftEventKey = "select_task"
     @Published var draftNewTaskEventKey = "new_task"
     @Published var draftArchiveTaskEventKey = "archive_task"
@@ -540,6 +541,9 @@ private final class BridgeViewModel: ObservableObject {
             draftUsers = [AuthorizedUserDraft()]
         }
         draftChats = (config["allowed_chat_ids"] as? [String] ?? []).joined(separator: ",")
+        draftCurrentTaskEventKey = String(
+            describing: config["current_task_menu_event_key"] ?? "current_task"
+        )
         draftEventKey = String(describing: config["task_menu_event_key"] ?? "select_task")
         draftNewTaskEventKey = String(
             describing: config["new_task_menu_event_key"] ?? "new_task"
@@ -559,6 +563,7 @@ private final class BridgeViewModel: ObservableObject {
 
     func saveConfiguration() {
         let profile = draftProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentTaskEventKey = draftCurrentTaskEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let eventKey = draftEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let newTaskEventKey = draftNewTaskEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let archiveTaskEventKey = draftArchiveTaskEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -604,6 +609,7 @@ private final class BridgeViewModel: ObservableObject {
         saveConfiguration(
             profile: profile,
             users: users,
+            currentTaskEventKey: currentTaskEventKey,
             eventKey: eventKey,
             newTaskEventKey: newTaskEventKey,
             archiveTaskEventKey: archiveTaskEventKey,
@@ -614,18 +620,25 @@ private final class BridgeViewModel: ObservableObject {
     private func saveConfiguration(
         profile: String,
         users: [(name: String, openID: String, projects: [String], index: Int)],
+        currentTaskEventKey: String,
         eventKey: String,
         newTaskEventKey: String,
         archiveTaskEventKey: String,
         usageEventKey: String
     ) {
-        let menuEventKeys = [eventKey, newTaskEventKey, archiveTaskEventKey, usageEventKey]
+        let menuEventKeys = [
+            currentTaskEventKey,
+            eventKey,
+            newTaskEventKey,
+            archiveTaskEventKey,
+            usageEventKey,
+        ]
         guard menuEventKeys.allSatisfy({ !$0.isEmpty }) else {
-            presentError(title: "配置未保存", message: "四个机器人菜单 Event Key 都不能为空。")
+            presentError(title: "配置未保存", message: "五个机器人菜单 Event Key 都不能为空。")
             return
         }
         guard Set(menuEventKeys).count == menuEventKeys.count else {
-            presentError(title: "配置未保存", message: "四个机器人菜单 Event Key 不能重复。")
+            presentError(title: "配置未保存", message: "五个机器人菜单 Event Key 不能重复。")
             return
         }
 
@@ -643,6 +656,7 @@ private final class BridgeViewModel: ObservableObject {
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        config["current_task_menu_event_key"] = currentTaskEventKey
         config["task_menu_event_key"] = eventKey
         config["new_task_menu_event_key"] = newTaskEventKey
         config["archive_task_menu_event_key"] = archiveTaskEventKey
@@ -1123,6 +1137,12 @@ private struct ConfigurationView: View {
             DisclosureGroup("机器人菜单 Event Key", isExpanded: $showAdvancedSettings) {
                 VStack(alignment: .leading, spacing: 10) {
                     configurationField(
+                        "当前 Task",
+                        placeholder: "current_task",
+                        text: $model.draftCurrentTaskEventKey,
+                        monospaced: true
+                    )
+                    configurationField(
                         "选择 Task",
                         placeholder: "select_task",
                         text: $model.draftEventKey,
@@ -1135,13 +1155,13 @@ private struct ConfigurationView: View {
                         monospaced: true
                     )
                     configurationField(
-                        "归档 Task",
+                        "归档当前 Task",
                         placeholder: "archive_task",
                         text: $model.draftArchiveTaskEventKey,
                         monospaced: true
                     )
                     configurationField(
-                        "Codex 用量",
+                        "额度用量",
                         placeholder: "codex_usage",
                         text: $model.draftUsageEventKey,
                         monospaced: true
