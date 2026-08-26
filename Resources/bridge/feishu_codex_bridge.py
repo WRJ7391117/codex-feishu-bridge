@@ -286,6 +286,7 @@ MAX_PENDING_CLI_FALLBACKS = 50
 CLI_FALLBACK_TTL_SECONDS = 24 * 60 * 60
 SQLITE_READ_RETRY_DELAYS = (0.2, 0.5)
 DESKTOP_UNAVAILABLE_RETRY_DELAYS = (0.3, 0.7)
+DESKTOP_TASK_ACTIVATION_SETTLE_SECONDS = 0.75
 ALLOW_ACCESS_REQUESTS = CONFIG.get("allow_access_requests", True) is not False
 TASKS_PER_PAGE = max(10, min(50, int(CONFIG.get("tasks_per_page", 50))))
 RECENT_TASK_LIMIT = 20
@@ -7475,6 +7476,71 @@ def rollout_images_since(rollout_path: Path | None, start_offset: int) -> list[s
     return images
 
 
+def frontmost_application_bundle_id() -> str:
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/osascript",
+                "-e",
+                "tell application \"System Events\" to get bundle identifier "
+                "of first application process whose frontmost is true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    bundle_id = result.stdout.strip() if result.returncode == 0 else ""
+    return bundle_id if re.fullmatch(r"[A-Za-z0-9.-]+", bundle_id) else ""
+
+
+def activate_desktop_task(thread_id: str) -> bool:
+    try:
+        normalized_thread_id = str(uuid.UUID(thread_id))
+    except ValueError:
+        log("desktop task activation failed reason=invalid-task-id")
+        return False
+    if normalized_thread_id != thread_id.lower():
+        log("desktop task activation failed reason=noncanonical-task-id")
+        return False
+
+    previous_bundle_id = frontmost_application_bundle_id()
+    try:
+        opened = subprocess.run(
+            [
+                "/usr/bin/open",
+                "-g",
+                f"codex://threads/{normalized_thread_id}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"desktop task activation failed reason={type(exc).__name__}")
+        return False
+    if opened.returncode != 0:
+        log("desktop task activation failed reason=open-command")
+        return False
+
+    time.sleep(DESKTOP_TASK_ACTIVATION_SETTLE_SECONDS)
+    if previous_bundle_id and previous_bundle_id != "com.openai.codex":
+        try:
+            restored = subprocess.run(
+                ["/usr/bin/open", "-b", previous_bundle_id],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if restored.returncode != 0:
+                log("desktop task activation focus restore failed")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log(f"desktop task activation focus restore failed: {type(exc).__name__}")
+    log("desktop task activation requested")
+    return True
+
+
 def run_codex_via_desktop(
     thread_id: str,
     prompt: str,
@@ -7661,6 +7727,7 @@ def run_codex(
             log(f"running status reply failed: {type(exc).__name__}: {exc}")
 
     if not use_cli_fallback:
+        activation_attempted = False
         for attempt in range(len(DESKTOP_UNAVAILABLE_RETRY_DELAYS) + 1):
             desktop_status, desktop_result, desktop_images = run_codex_via_desktop(
                 thread_id,
@@ -7686,6 +7753,10 @@ def run_codex(
                 if cancel_confirmed is not None:
                     cancel_confirmed.set()
                 return False, "已按你的要求停止运行。", []
+            if desktop_result == "no-client-found" and not activation_attempted:
+                activation_attempted = True
+                if not activate_desktop_task(thread_id):
+                    break
             log(
                 f"desktop unavailable retry reason={desktop_result} "
                 f"attempt={attempt + 1}"

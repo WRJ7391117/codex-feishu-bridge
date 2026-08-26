@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.9.4 (build 40)
+
+- Automatically activates the exact target Task through Codex Desktop's supported deep link after the first definite `no-client-found`, then retries through the existing Desktop IPC path.
+- Restores the previously frontmost macOS app after activation so a Feishu submission does not leave Codex Desktop in front.
+- Activates at most once per accepted message, never retries an uncertain submission, and keeps the manual Desktop/CLI/cancel card when activation itself fails.
+
 ## 1.9.3 (build 39)
 
 - Immediately disables the “重试 Desktop” action and shows “正在重试 Desktop…” after the callback is accepted, preventing ambiguous repeated taps.

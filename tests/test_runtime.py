@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -148,6 +149,71 @@ class RuntimeCompatibilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.reason, "no-client-found")
         self.assertIn("尚未提交", str(raised.exception))
         popen.assert_not_called()
+
+    def test_no_client_found_activates_task_then_submits_once(self):
+        self.bridge.run_codex_via_desktop = mock.Mock(
+            side_effect=(
+                ("unavailable", "no-client-found", []),
+                ("completed", "done", []),
+            )
+        )
+        self.bridge.activate_desktop_task = mock.Mock(return_value=True)
+
+        with mock.patch.object(self.bridge.time, "sleep"):
+            result = self.bridge.run_codex(
+                "00000000-0000-0000-0000-000000000001",
+                "hello",
+            )
+
+        self.assertEqual(result, (True, "done", []))
+        self.assertEqual(self.bridge.run_codex_via_desktop.call_count, 2)
+        self.bridge.activate_desktop_task.assert_called_once_with(
+            "00000000-0000-0000-0000-000000000001"
+        )
+
+    def test_failed_task_activation_falls_back_to_manual_choice(self):
+        self.bridge.run_codex_via_desktop = mock.Mock(
+            return_value=("unavailable", "no-client-found", [])
+        )
+        self.bridge.activate_desktop_task = mock.Mock(return_value=False)
+
+        with self.assertRaises(self.bridge.DesktopUnavailableError) as raised:
+            self.bridge.run_codex(
+                "00000000-0000-0000-0000-000000000001",
+                "hello",
+            )
+
+        self.assertEqual(raised.exception.reason, "no-client-found")
+        self.bridge.run_codex_via_desktop.assert_called_once()
+        self.bridge.activate_desktop_task.assert_called_once()
+
+    def test_task_activation_uses_deep_link_and_restores_previous_app(self):
+        completed = subprocess.CompletedProcess([], 0, "com.apple.finder\n", "")
+        opened = subprocess.CompletedProcess([], 0, "", "")
+        restored = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(
+            self.bridge.subprocess,
+            "run",
+            side_effect=(completed, opened, restored),
+        ) as run, mock.patch.object(self.bridge.time, "sleep") as sleep:
+            activated = self.bridge.activate_desktop_task(
+                "00000000-0000-0000-0000-000000000001"
+            )
+
+        self.assertTrue(activated)
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            [
+                "/usr/bin/open",
+                "-g",
+                "codex://threads/00000000-0000-0000-0000-000000000001",
+            ],
+        )
+        self.assertEqual(
+            run.call_args_list[2].args[0],
+            ["/usr/bin/open", "-b", "com.apple.finder"],
+        )
+        sleep.assert_called_once()
 
     def test_explicit_cli_fallback_skips_desktop(self):
         self.bridge.run_codex_via_desktop = mock.Mock()

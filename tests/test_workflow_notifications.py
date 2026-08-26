@@ -1100,7 +1100,11 @@ class WorkflowBridgeTests(unittest.TestCase):
             self.bridge,
             "run_codex_via_desktop",
             side_effect=desktop_call,
-        ) as desktop, mock.patch.object(self.bridge.time, "sleep") as sleep:
+        ) as desktop, mock.patch.object(
+            self.bridge,
+            "activate_desktop_task",
+            return_value=True,
+        ) as activate, mock.patch.object(self.bridge.time, "sleep") as sleep:
             result = self.bridge.run_codex(
                 "task-a",
                 "hello",
@@ -1109,6 +1113,7 @@ class WorkflowBridgeTests(unittest.TestCase):
 
         self.assertEqual(result, (True, "done", []))
         self.assertEqual(desktop.call_count, 2)
+        activate.assert_called_once_with("task-a")
         sleep.assert_called_once_with(0.3)
         self.assertEqual(started, ["Codex Desktop 已接收，正在运行"])
 
@@ -2153,12 +2158,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.9.3")
-        self.assertEqual(info["CFBundleVersion"], "39")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.9.4")
+        self.assertEqual(info["CFBundleVersion"], "40")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.9.3 (build 39)", readme)
-        self.assertIn("1.9.3 (build 39", release_notes)
+        self.assertIn("1.9.4 (build 40)", readme)
+        self.assertIn("1.9.4 (build 40", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):
