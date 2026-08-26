@@ -2153,12 +2153,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.9.0")
-        self.assertEqual(info["CFBundleVersion"], "36")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.9.1")
+        self.assertEqual(info["CFBundleVersion"], "37")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.9.0 (build 36)", readme)
-        self.assertIn("1.9.0 (build 36", release_notes)
+        self.assertIn("1.9.1 (build 37)", readme)
+        self.assertIn("1.9.1 (build 37", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):
@@ -2206,6 +2206,7 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         self.assertIn('"允许项目"', configuration)
         self.assertIn('"当前 Task"', configuration)
         self.assertIn('"额度用量"', configuration)
+        self.assertIn('"接续桌面 Task"', configuration)
         self.assertIn('config["current_task_menu_event_key"] = currentTaskEventKey', source)
         self.assertIn("六个机器人菜单 Event Key 都不能为空", source)
         self.assertIn("六个机器人菜单 Event Key 不能重复", source)

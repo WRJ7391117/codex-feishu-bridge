@@ -1,5 +1,12 @@
 # Release Notes
 
+## 1.9.1 (build 37, unreleased)
+
+- Renames the top-level Feishu menu to “接续桌面 Task” so its Codex Desktop Task handoff purpose is visible at a glance.
+- Uses only the requesting user's bridge-selected current Task; it never guesses another running or recently used Task.
+- Shows the exact project, Task title, and latest Desktop state before handoff, with explicit “接续这个 Task”, “选择其他 Task”, and “取消” actions.
+- Revalidates the user's current Task when confirmation is clicked so a stale card cannot subscribe to the wrong Task; Roger, Miller, and future allowlisted users remain independently routed.
+
 ## 1.9.0 (build 36, unreleased)
 
 - Adds the top-level Feishu “接续桌面” menu (`sync_desktop`) for one-tap handoff from Codex Desktop to mobile Feishu.

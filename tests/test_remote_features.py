@@ -743,14 +743,13 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(snapshot["message"], "桌面结果")
         self.assertEqual(snapshot["cursor_offset"], rollout.stat().st_size)
 
-    def test_desktop_sync_menu_subscribes_to_running_desktop_turn(self):
+    def test_desktop_sync_menu_requires_confirmation_for_selected_current_task(self):
         task = self.tasks()[0]
         rollout = Path(self.temporary.name) / "rollout.jsonl"
         rollout.write_text(
             json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-running"}}) + "\n",
             encoding="utf-8",
         )
-        self.bridge.recent_tasks = lambda user_id: [task]
         self.bridge.selected_task = lambda user_id, state: task
         self.bridge.rollout_path_for_task = lambda task_id: rollout
 
@@ -762,11 +761,85 @@ class RemoteFeatureTests(unittest.TestCase):
             }
         )
 
+        self.assertNotIn(
+            "ou_admin",
+            self.bridge.load_state().get("desktop_result_subscriptions", {}),
+        )
+        card = self.bridge.send_card.call_args.args[1]
+        self.assertEqual(card["header"]["title"]["content"], "Task：Home")
+        self.assertEqual(card["header"]["subtitle"]["content"], "项目：deepori")
+        self.assertEqual(
+            [tag["text"]["content"] for tag in card["header"]["text_tag_list"]],
+            ["当前 Task", "运行中"],
+        )
+        buttons = {
+            element.get("text", {}).get("content"): element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "button"
+        }
+        self.assertEqual(
+            buttons["接续这个 Task"]["behaviors"][0]["value"],
+            {"action": "confirm_desktop_sync", "task_id": "task-a"},
+        )
+        self.assertIn("选择其他 Task", buttons)
+        self.assertIn("取消", buttons)
+
+    def test_confirm_desktop_sync_subscribes_to_selected_running_task(self):
+        task = self.tasks()[0]
+        rollout = Path(self.temporary.name) / "rollout.jsonl"
+        rollout.write_text(
+            json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-running"}}) + "\n",
+            encoding="utf-8",
+        )
+        self.bridge.selected_task = lambda user_id, state: task
+        self.bridge.rollout_path_for_task = lambda task_id: rollout
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-confirm-desktop-sync",
+                "message_id": "om_sync",
+                "chat_id": "oc_test",
+                "operator_id": "ou_admin",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "confirm_desktop_sync", "task_id": "task-a"}
+                ),
+            }
+        )
+
         subscription = self.bridge.load_state()["desktop_result_subscriptions"]["ou_admin"]
         self.assertEqual(subscription["task_id"], "task-a")
         self.assertEqual(subscription["turn_id"], "turn-running")
-        card = self.bridge.send_card.call_args.args[1]
+        card = self.bridge.patch_card.call_args.args[1]
         self.assertEqual(card["header"]["text_tag_list"][1]["text"]["content"], "运行中")
+
+    def test_confirm_desktop_sync_rejects_stale_task_after_current_task_changes(self):
+        current = self.tasks()[1]
+        self.bridge.selected_task = lambda user_id, state: current
+        self.bridge.rollout_path_for_task = lambda task_id: Path(self.temporary.name) / "missing"
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-stale-desktop-sync",
+                "message_id": "om_sync",
+                "chat_id": "oc_test",
+                "operator_id": "ou_admin",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "confirm_desktop_sync", "task_id": "task-a"}
+                ),
+            }
+        )
+
+        card = self.bridge.patch_card.call_args.args[1]
+        self.assertEqual(card["header"]["title"]["content"], "Task：Site")
+        self.assertIn("当前 Task 已变化", card["body"]["elements"][0]["content"])
+        self.assertNotIn(
+            "ou_admin",
+            self.bridge.load_state().get("desktop_result_subscriptions", {}),
+        )
 
     def test_desktop_sync_subscription_pushes_result_when_turn_completes(self):
         task = self.tasks()[0]
@@ -816,7 +889,55 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertIn("最终结果", self.bridge.reply_or_queue.call_args.args[1])
         self.bridge.follow_result_task.assert_called_once_with("ou_admin", task)
 
-    def test_desktop_sync_menu_immediately_pushes_latest_completed_result(self):
+    def test_desktop_sync_menu_never_guesses_a_task_when_none_is_selected(self):
+        task = self.tasks()[0]
+        self.bridge.recent_tasks = lambda user_id: [task]
+        self.bridge.selected_task = lambda user_id, state: None
+        self.bridge.send_task_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_menu_event(
+            {
+                "event_id": "evt-desktop-completed",
+                "event_key": "sync_desktop",
+                "operator_id": "ou_admin",
+            }
+        )
+
+        self.bridge.send_task_card.assert_called_once()
+        self.bridge.send_card.assert_not_called()
+        self.assertNotIn("ou_admin", self.bridge.load_state().get("selected", {}))
+        self.assertNotIn(
+            "ou_admin",
+            self.bridge.load_state().get("desktop_result_subscriptions", {}),
+        )
+
+    def test_desktop_sync_confirmation_uses_each_users_independent_current_task(self):
+        tasks_by_user = {
+            "ou_admin": self.tasks()[0],
+            "ou_miller": self.tasks()[1],
+        }
+        self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
+        self.bridge.selected_task = lambda user_id, state: tasks_by_user[user_id]
+        self.bridge.rollout_path_for_task = (
+            lambda task_id: Path(self.temporary.name) / f"{task_id}.missing"
+        )
+
+        for index, user_id in enumerate(tasks_by_user):
+            self.bridge.handle_menu_event(
+                {
+                    "event_id": f"evt-desktop-user-{index}",
+                    "event_key": "sync_desktop",
+                    "operator_id": user_id,
+                }
+            )
+
+        sent = [call.args for call in self.bridge.send_card.call_args_list]
+        self.assertEqual(sent[0][0], "ou_admin")
+        self.assertEqual(sent[0][1]["header"]["title"]["content"], "Task：Home")
+        self.assertEqual(sent[1][0], "ou_miller")
+        self.assertEqual(sent[1][1]["header"]["title"]["content"], "Task：Site")
+
+    def test_confirm_desktop_sync_immediately_pushes_selected_completed_result(self):
         task = self.tasks()[0]
         rollout = Path(self.temporary.name) / "rollout.jsonl"
         records = [
@@ -827,25 +948,28 @@ class RemoteFeatureTests(unittest.TestCase):
             "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
             encoding="utf-8",
         )
-        self.bridge.recent_tasks = lambda user_id: [task]
-        self.bridge.selected_task = lambda user_id, state: None
+        self.bridge.selected_task = lambda user_id, state: task
         self.bridge.rollout_path_for_task = lambda task_id: rollout
         self.bridge.patch_card = mock.Mock(return_value=True)
         self.bridge.reply_or_queue = mock.Mock(return_value=True)
         self.bridge.update_current_status_card = mock.Mock(return_value=True)
         self.bridge.refresh_user_task_identity_cards = mock.Mock()
         self.bridge.record_task_exchange = mock.Mock()
-        self.bridge.follow_result_task = mock.Mock(return_value=True)
+        self.bridge.follow_result_task = mock.Mock(return_value=False)
 
-        self.bridge.handle_menu_event(
+        self.bridge.handle_card_event(
             {
                 "event_id": "evt-desktop-completed",
-                "event_key": "sync_desktop",
+                "message_id": "om_sync",
+                "chat_id": "oc_test",
                 "operator_id": "ou_admin",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "confirm_desktop_sync", "task_id": "task-a"}
+                ),
             }
         )
 
-        self.assertEqual(self.bridge.load_state()["selected"]["ou_admin"], "task-a")
         self.assertIn("已经完成", self.bridge.reply_or_queue.call_args.args[1])
         self.assertNotIn(
             "ou_admin",
@@ -859,19 +983,50 @@ class RemoteFeatureTests(unittest.TestCase):
             json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-owned"}}) + "\n",
             encoding="utf-8",
         )
-        self.bridge.recent_tasks = lambda user_id: [task]
         self.bridge.selected_task = lambda user_id, state: task
         self.bridge.rollout_path_for_task = lambda task_id: rollout
         self.bridge.active_run_for_task = lambda task_id: {"user_id": "ou_admin"}
+        self.bridge.patch_card = mock.Mock(return_value=True)
 
-        self.bridge.handle_menu_event(
+        self.bridge.handle_card_event(
             {
                 "event_id": "evt-desktop-owned",
-                "event_key": "sync_desktop",
+                "message_id": "om_sync",
+                "chat_id": "oc_test",
                 "operator_id": "ou_admin",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "confirm_desktop_sync", "task_id": "task-a"}
+                ),
             }
         )
 
+        self.assertNotIn(
+            "ou_admin",
+            self.bridge.load_state().get("desktop_result_subscriptions", {}),
+        )
+
+    def test_cancel_desktop_sync_keeps_current_task_and_creates_no_subscription(self):
+        task = self.tasks()[0]
+        self.bridge.selected_task = lambda user_id, state: task
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-cancel-desktop-sync",
+                "message_id": "om_sync",
+                "chat_id": "oc_test",
+                "operator_id": "ou_admin",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "cancel_desktop_sync", "task_id": "task-a"}
+                ),
+            }
+        )
+
+        card = self.bridge.patch_card.call_args.args[1]
+        self.assertEqual(card["header"]["text_tag_list"][0]["text"]["content"], "已取消")
+        self.assertIn("当前 Task 保持不变", card["body"]["elements"][0]["content"])
         self.assertNotIn(
             "ou_admin",
             self.bridge.load_state().get("desktop_result_subscriptions", {}),

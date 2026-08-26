@@ -289,7 +289,6 @@ DESKTOP_UNAVAILABLE_RETRY_DELAYS = (0.3, 0.7)
 ALLOW_ACCESS_REQUESTS = CONFIG.get("allow_access_requests", True) is not False
 TASKS_PER_PAGE = max(10, min(50, int(CONFIG.get("tasks_per_page", 50))))
 RECENT_TASK_LIMIT = 20
-DESKTOP_SYNC_CANDIDATE_LIMIT = 10
 TASK_SUMMARY_CHARS = 120
 
 _last_reply_failure_reason = ""
@@ -4296,7 +4295,6 @@ def task_role_tag(is_current: bool, other_label: str) -> dict[str, Any]:
 def build_desktop_sync_card(
     task: dict[str, str],
     status: str,
-    running_count: int = 0,
 ) -> dict[str, Any]:
     running = status == "running"
     completed = status == "completed"
@@ -4305,8 +4303,6 @@ def build_desktop_sync_card(
     tag_color = "blue" if running else "green" if completed else "neutral"
     if running:
         message = "Codex Desktop 正在运行。桥接会持续跟踪，完成后自动把结果推送到这里。"
-        if running_count > 1:
-            message += f"\n\n检测到 {running_count} 个运行中的 Task，已接续最近使用的这个 Task。"
     elif completed:
         message = "已读取 Codex Desktop 中这个 Task 的最新完成结果，正在推送。"
     else:
@@ -4317,7 +4313,7 @@ def build_desktop_sync_card(
             "update_multi": True,
             "width_mode": "default",
             "enable_forward": False,
-            "summary": {"content": f"桌面接续 · {task['title']} · {tag_text}"},
+            "summary": {"content": f"接续桌面 Task · {task['title']} · {tag_text}"},
         },
         "header": {
             "title": {"tag": "plain_text", "content": task_title_text(task)},
@@ -4326,7 +4322,7 @@ def build_desktop_sync_card(
             "text_tag_list": [
                 {
                     "tag": "text_tag",
-                    "text": {"tag": "plain_text", "content": "桌面接续"},
+                    "text": {"tag": "plain_text", "content": "接续桌面 Task"},
                     "color": "blue",
                 },
                 {
@@ -4340,6 +4336,149 @@ def build_desktop_sync_card(
             "direction": "vertical",
             "padding": "12px 12px 20px 12px",
             "elements": [{"tag": "markdown", "content": message}],
+        },
+    }
+
+
+def build_desktop_sync_confirmation_card(
+    task: dict[str, str],
+    status: str,
+    current_changed: bool = False,
+) -> dict[str, Any]:
+    status_text = (
+        "运行中"
+        if status == "running"
+        else "已有完成结果"
+        if status == "completed"
+        else "暂无完成结果"
+    )
+    status_color = (
+        "blue"
+        if status == "running"
+        else "green"
+        if status == "completed"
+        else "neutral"
+    )
+    message = (
+        "⚠️ **当前 Task 已变化，请重新核对后再接续。**"
+        if current_changed
+        else "**准备接续桥接中选择的当前 Task。**"
+    )
+    message += (
+        f"\n\n项目：**{card_markdown_escape(task['project'])}**"
+        f"\nTask：**{card_markdown_escape(task['title'])}**"
+        f"\n状态：**{status_text}**"
+        "\n\n如果不是你要接续的 Task，请先选择其他 Task。"
+    )
+    return {
+        "schema": "2.0",
+        "config": {
+            "update_multi": True,
+            "width_mode": "default",
+            "enable_forward": False,
+            "summary": {"content": f"确认接续桌面 Task · {task['title']}"},
+        },
+        "header": {
+            "title": {"tag": "plain_text", "content": task_title_text(task)},
+            "subtitle": {"tag": "plain_text", "content": task_project_text(task)},
+            "template": "blue",
+            "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
+            "text_tag_list": [
+                current_task_tag(),
+                {
+                    "tag": "text_tag",
+                    "text": {"tag": "plain_text", "content": status_text},
+                    "color": status_color,
+                },
+            ],
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": [
+                {"tag": "markdown", "content": message},
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "接续这个 Task"},
+                    "type": "primary_filled",
+                    "width": "fill",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "confirm_desktop_sync",
+                                "task_id": str(task["id"]),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "选择其他 Task"},
+                    "type": "default",
+                    "width": "fill",
+                    "behaviors": [
+                        {"type": "callback", "value": {"action": "show_task_selector"}}
+                    ],
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "取消"},
+                    "type": "default",
+                    "width": "fill",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "cancel_desktop_sync",
+                                "task_id": str(task["id"]),
+                            },
+                        }
+                    ],
+                },
+            ],
+        },
+    }
+
+
+def build_desktop_sync_canceled_card(task: dict[str, str] | None) -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {
+            "update_multi": True,
+            "width_mode": "default",
+            "enable_forward": False,
+            "summary": {"content": "已取消接续桌面 Task"},
+        },
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": task_title_text(task) if task else "接续桌面 Task",
+            },
+            "subtitle": {
+                "tag": "plain_text",
+                "content": task_project_text(task) if task else "没有有效的当前 Task",
+            },
+            "template": "grey",
+            "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
+            "text_tag_list": [
+                {
+                    "tag": "text_tag",
+                    "text": {"tag": "plain_text", "content": "已取消"},
+                    "color": "neutral",
+                }
+            ],
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": "已取消，本次没有接续或订阅任何桌面 Task。当前 Task 保持不变。",
+                }
+            ],
         },
     }
 
@@ -5558,31 +5697,15 @@ def desktop_result_subscriptions(state: dict[str, Any]) -> dict[str, dict[str, A
     return subscriptions
 
 
-def desktop_sync_candidate(
+def desktop_sync_current_snapshot(
     user_id: str,
     state: dict[str, Any],
-) -> tuple[dict[str, str] | None, dict[str, Any], int]:
-    tasks = recent_tasks(user_id)
-    if not tasks:
-        return None, {"status": "none"}, 0
-    selected = selected_task(user_id, state)
-    snapshots: list[tuple[dict[str, str], dict[str, Any]]] = []
-    for task in tasks[:DESKTOP_SYNC_CANDIDATE_LIMIT]:
-        snapshots.append(
-            (task, latest_rollout_turn(rollout_path_for_task(str(task["id"]))))
-        )
-    running = [item for item in snapshots if item[1].get("status") == "running"]
-    if running:
-        candidate = next(
-            (
-                item
-                for item in running
-                if selected is not None and item[0]["id"] == selected["id"]
-            ),
-            running[0],
-        )
-        return candidate[0], candidate[1], len(running)
-    return snapshots[0][0], snapshots[0][1], 0
+) -> tuple[dict[str, str] | None, dict[str, Any]]:
+    task = selected_task(user_id, state)
+    if task is None:
+        return None, {"status": "none"}
+    snapshot = latest_rollout_turn(rollout_path_for_task(str(task["id"])))
+    return task, snapshot
 
 
 def deliver_desktop_sync_result(
@@ -5651,29 +5774,37 @@ def deliver_desktop_sync_result(
 
 
 def start_desktop_sync(user_id: str, state: dict[str, Any], event_id: str) -> None:
-    task, snapshot, running_count = desktop_sync_candidate(user_id, state)
+    task, snapshot = desktop_sync_current_snapshot(user_id, state)
     if task is None:
         send_task_card(user_id, state, event_id)
         log("menu handled key=sync_desktop result=task-selector")
         return
-    with _state_lock:
-        state = load_state()
-        state.setdefault("selected", {})[user_id] = task["id"]
-        state.setdefault("last_projects", {})[user_id] = task["project"]
-        remember_recent_task(state, user_id, str(task["id"]))
-        save_state(state)
+    send_menu_card(
+        user_id,
+        state,
+        build_desktop_sync_confirmation_card(
+            task,
+            str(snapshot.get("status") or "none"),
+        ),
+        f"desktop-sync-confirm-{event_id}",
+    )
+    log("menu handled key=sync_desktop result=confirmation-card")
+
+
+def confirm_desktop_sync(
+    user_id: str,
+    task: dict[str, str],
+    event_id: str,
+    message_id: str,
+    chat_id: str,
+) -> None:
+    snapshot = latest_rollout_turn(rollout_path_for_task(str(task["id"])))
     card = build_desktop_sync_card(
         task,
         str(snapshot.get("status") or "none"),
-        running_count,
     )
-    success, chat_id, message_id = send_card(
-        user_id,
-        card,
-        f"desktop-sync-{event_id}",
-    )
-    if not success or not message_id:
-        log("menu handled key=sync_desktop result=send-failed")
+    if not message_id or not patch_card(message_id, card):
+        log("card handled action=confirm_desktop_sync result=patch-failed")
         return
     if chat_id:
         with _state_lock:
@@ -5682,7 +5813,7 @@ def start_desktop_sync(user_id: str, state: dict[str, Any], event_id: str) -> No
     if snapshot.get("status") == "running":
         active = active_run_for_task(str(task["id"]))
         if active is not None and str(active.get("user_id") or "") == user_id:
-            log("menu handled key=sync_desktop result=already-tracked")
+            log("card handled action=confirm_desktop_sync result=already-tracked")
             return
         with _state_lock:
             state = load_state()
@@ -5697,13 +5828,13 @@ def start_desktop_sync(user_id: str, state: dict[str, Any], event_id: str) -> No
                 "next_check_at": 0,
             }
             save_state(state)
-        log("menu handled key=sync_desktop result=subscribed")
+        log("card handled action=confirm_desktop_sync result=subscribed")
         return
     if snapshot.get("status") == "completed":
         deliver_desktop_sync_result(user_id, task, message_id, snapshot)
-        log("menu handled key=sync_desktop result=completed")
+        log("card handled action=confirm_desktop_sync result=completed")
         return
-    log("menu handled key=sync_desktop result=no-result")
+    log("card handled action=confirm_desktop_sync result=no-result")
 
 
 def retry_desktop_result_subscriptions(now: float | None = None) -> bool:
@@ -5735,7 +5866,7 @@ def retry_desktop_result_subscriptions(now: float | None = None) -> bool:
     ):
         snapshot = {
             "status": "missing",
-            "message": "桌面接续已失效，请重新点击“接续桌面”。",
+            "message": "桌面 Task 接续已失效，请重新点击“接续桌面 Task”。",
         }
     else:
         snapshot = advance_rollout_turn(
@@ -5759,7 +5890,7 @@ def retry_desktop_result_subscriptions(now: float | None = None) -> bool:
     elif message_id:
         reply_or_queue(
             message_id,
-            "桌面接续已失效：该 Task 已归档、删除或不再属于你的授权项目。请重新点击“接续桌面”。",
+            "桌面 Task 接续已失效：该 Task 已归档、删除或不再属于你的授权项目。请重新点击“接续桌面 Task”。",
             "final",
         )
     with _state_lock:
@@ -8243,6 +8374,48 @@ def handle_card_event(event: dict[str, Any]) -> None:
         payload = action_payload(event)
         action = str(payload.get("action") or "")
         if workflow_notifications_enabled() and handle_workflow_card_action(event, payload):
+            return
+        if action in {"confirm_desktop_sync", "cancel_desktop_sync"}:
+            with _state_lock:
+                state = load_state()
+                if not mark_processed(state, f"card:{event_id}"):
+                    return
+                task = selected_task(user_id, state)
+            if action == "cancel_desktop_sync":
+                if message_id:
+                    patch_card(message_id, build_desktop_sync_canceled_card(task))
+                log("card handled action=cancel_desktop_sync result=canceled")
+                return
+            requested_task_id = str(payload.get("task_id") or "")
+            if task is None:
+                card = task_card_for_state(user_id, state)
+                if message_id:
+                    remember_card_context(state, user_id, message_id, card)
+                    patch_card(message_id, card)
+                log("card handled action=confirm_desktop_sync result=task-selector")
+                return
+            snapshot = latest_rollout_turn(
+                rollout_path_for_task(str(task["id"]))
+            )
+            if requested_task_id != str(task["id"]):
+                if message_id:
+                    patch_card(
+                        message_id,
+                        build_desktop_sync_confirmation_card(
+                            task,
+                            str(snapshot.get("status") or "none"),
+                            current_changed=True,
+                        ),
+                    )
+                log("card handled action=confirm_desktop_sync result=current-changed")
+                return
+            confirm_desktop_sync(
+                user_id,
+                task,
+                event_id,
+                message_id,
+                chat_id,
+            )
             return
         if action in {"retry_desktop", "use_cli_fallback", "cancel_cli_fallback"}:
             fallback_id = str(payload.get("fallback_id") or "")

@@ -1176,7 +1176,7 @@ private struct ConfigurationView: View {
                         monospaced: true
                     )
                     configurationField(
-                        "接续桌面",
+                        "接续桌面 Task",
                         placeholder: "sync_desktop",
                         text: $model.draftDesktopSyncEventKey,
                         monospaced: true
