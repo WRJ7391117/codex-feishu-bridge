@@ -145,6 +145,7 @@ def validate_config(payload) -> None:
         "new_task_menu_event_key",
         "archive_task_menu_event_key",
         "usage_menu_event_key",
+        "desktop_sync_menu_event_key",
         "lark_cli_path",
         "codex_cli_path",
     )
@@ -359,6 +360,75 @@ finally:
     temporary.unlink(missing_ok=True)
 PY
 fi
+/usr/bin/python3 - "${support_dir}/config.json" <<'PY'
+import json
+import os
+from pathlib import Path
+import secrets
+import stat
+import sys
+
+path = Path(sys.argv[1])
+defaults = {
+    "current_task_menu_event_key": "current_task",
+    "task_menu_event_key": "select_task",
+    "new_task_menu_event_key": "new_task",
+    "archive_task_menu_event_key": "archive_task",
+    "usage_menu_event_key": "codex_usage",
+    "desktop_sync_menu_event_key": "sync_desktop",
+}
+before = path.lstat()
+descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    opened = os.fstat(descriptor)
+    if (
+        opened.st_dev != before.st_dev
+        or opened.st_ino != before.st_ino
+        or not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != os.getuid()
+    ):
+        raise SystemExit("existing bridge config changed during installation")
+    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+        descriptor = -1
+        payload = json.load(handle)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+
+changed = False
+for key, value in defaults.items():
+    if key not in payload:
+        payload[key] = value
+        changed = True
+if not changed:
+    raise SystemExit(0)
+
+temporary = path.parent / (
+    f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+)
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(temporary, flags, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    current = path.lstat()
+    if current.st_dev != before.st_dev or current.st_ino != before.st_ino:
+        raise SystemExit("existing bridge config changed during installation")
+    os.replace(temporary, path)
+    directory = os.open(
+        path.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    temporary.unlink(missing_ok=True)
+PY
 /usr/bin/python3 - \
     "${support_dir}/config.json" \
     "${HOME}/.codex/feishu-bridge/state.json" \

@@ -1,5 +1,19 @@
 # Release Notes
 
+## 1.9.0 (build 36, unreleased)
+
+- Adds the top-level Feishu “接续桌面” menu (`sync_desktop`) for one-tap handoff from Codex Desktop to mobile Feishu.
+- Immediately returns the latest completed Desktop result, or persists a per-user subscription when the selected Desktop Task is still running and pushes its result on completion.
+- Chooses an authorized running Task first and otherwise the most recently used Desktop Task, clearly labels the chosen project and Task, follows it as the user's current Task, and preserves subscriptions across bridge restarts.
+- Returns result text, generated or linked images, and explicitly linked local files through the existing durable Feishu delivery path without duplicating a bridge-owned run's normal final reply.
+
+- Expires pending CLI-fallback choices after 24 hours both in the background and when an old card is clicked; a newly accepted turn also invalidates older choices for the same user and Task.
+- Retries transient Codex Desktop `no-client-found`/pre-submit connection failures and read-only Task-database `OperationalError` failures with short bounded delays, while never replaying an uncertain turn submission.
+- Adds privacy-safe Bot menu audit records containing only the configured leaf Event Key and card result, without user, Chat, Task, event, or message identifiers.
+- Atomically fills all six Bot menu Event Keys into older local configs without changing existing custom keys, users, project access, Chat bindings, or workflow settings.
+- Keeps the bundled patched `lark-cli` doctor output but hides only the false same-base update warning; a genuine newer upstream base-version warning remains visible.
+- Isolates installer regression tests from the real per-user LaunchAgent so a test package cannot stop or replace the running bridge.
+
 ## 1.8.3 (build 34)
 
 - Reorganizes the Feishu Bot menu into a `TASK` main menu with “当前 Task”, “选择 Task”, “新建 Task”, and “归档当前 Task” submenus, plus a separate top-level “额度用量” entry.

@@ -731,6 +731,19 @@ class InstallerSafetyTests(unittest.TestCase):
             "install.sh",
         ):
             shutil.copy2(ROOT / "Resources/bridge" / name, package / name)
+        installer = package / "install.sh"
+        isolated_label = (
+            f"com.deepori.codex-feishu-bridge.tests.{os.getpid()}.{id(root)}"
+        )
+        installer.write_text(
+            installer.read_text(encoding="utf-8")
+            .replace("com.deepori.codex-feishu-bridge", isolated_label)
+            .replace(
+                "com.openai.codex.feishu-bridge",
+                isolated_label + ".legacy",
+            ),
+            encoding="utf-8",
+        )
         lark_cli = package / "lark-cli"
         lark_cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         lark_cli.chmod(0o755)
@@ -826,6 +839,50 @@ class InstallerSafetyTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("pending Feishu work", result.stderr)
             self.assertEqual(runtime.read_bytes(), original_runtime)
+
+    def test_installer_adds_missing_menu_keys_without_overwriting_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package, home, config_path, _workflow_path, _runtime = (
+                self._installer_fixture(Path(directory))
+            )
+            original = json.loads(config_path.read_text(encoding="utf-8"))
+            original["task_menu_event_key"] = "custom_select_task"
+            original["preserved_setting"] = {"enabled": True}
+            config_path.write_text(json.dumps(original), encoding="utf-8")
+            config_path.chmod(0o600)
+
+            result = self._run_installer(package, home)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            migrated = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {
+                    key: migrated.get(key)
+                    for key in (
+                        "current_task_menu_event_key",
+                        "task_menu_event_key",
+                        "new_task_menu_event_key",
+                        "archive_task_menu_event_key",
+                        "usage_menu_event_key",
+                        "desktop_sync_menu_event_key",
+                    )
+                },
+                {
+                    "current_task_menu_event_key": "current_task",
+                    "task_menu_event_key": "custom_select_task",
+                    "new_task_menu_event_key": "new_task",
+                    "archive_task_menu_event_key": "archive_task",
+                    "usage_menu_event_key": "codex_usage",
+                    "desktop_sync_menu_event_key": "sync_desktop",
+                },
+            )
+            self.assertEqual(migrated["allowed_users"], original["allowed_users"])
+            self.assertEqual(
+                migrated["workflow_notifications"],
+                original["workflow_notifications"],
+            )
+            self.assertEqual(migrated["preserved_setting"], {"enabled": True})
+            self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
 
     def test_invalid_existing_config_fails_before_runtime_or_service_changes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -936,10 +993,159 @@ class WorkflowBridgeTests(unittest.TestCase):
         self.bridge._workflow_decision_inbox = self.bridge.WorkflowDecisionInbox(
             self.bridge.WORKFLOW_DECISION_INBOX_PATH
         )
+        self.bridge.WORKFLOW_SOCKET_PATH = directory / "workflow-notifications.sock"
+        self.bridge.WORKFLOW_CONTROL_SOCKET_PATH = directory / "workflow-control.sock"
 
     def tearDown(self):
         self.bridge.stop_workflow_socket_server()
         self.temporary.cleanup()
+
+    def test_expired_cli_fallback_is_removed_when_card_is_opened(self):
+        state = self.bridge.load_state()
+        state["pending_cli_fallbacks"] = {
+            "expired": {
+                "fallback_id": "expired",
+                "user_id": "ou_admin",
+                "chat_id": "oc_private",
+                "created_at": 100,
+            }
+        }
+        self.bridge.save_state(state)
+
+        with mock.patch.object(self.bridge.time, "time", return_value=100 + self.bridge.CLI_FALLBACK_TTL_SECONDS + 1):
+            entry = self.bridge.cli_fallback_entry(
+                "expired",
+                "ou_admin",
+                "oc_private",
+            )
+
+        self.assertIsNone(entry)
+        self.assertEqual(
+            self.bridge.load_state().get("pending_cli_fallbacks"),
+            {},
+        )
+
+    def test_started_task_invalidates_only_matching_cli_fallbacks(self):
+        state = self.bridge.load_state()
+        state["pending_cli_fallbacks"] = {
+            "matching": {
+                "user_id": "ou_admin",
+                "task": {"id": "task-a"},
+                "created_at": 100,
+            },
+            "other-task": {
+                "user_id": "ou_admin",
+                "task": {"id": "task-b"},
+                "created_at": 100,
+            },
+            "other-user": {
+                "user_id": "ou_other",
+                "task": {"id": "task-a"},
+                "created_at": 100,
+            },
+        }
+        self.bridge.save_state(state)
+
+        removed = self.bridge.invalidate_cli_fallbacks("ou_admin", "task-a")
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(
+            set(self.bridge.load_state()["pending_cli_fallbacks"]),
+            {"other-task", "other-user"},
+        )
+
+    def test_task_list_retries_transient_sqlite_operational_error(self):
+        with mock.patch.object(
+            self.bridge,
+            "_read_tasks_by_archive_state",
+            side_effect=[self.bridge.sqlite3.OperationalError("busy"), []],
+        ) as read, mock.patch.object(self.bridge.time, "sleep") as sleep:
+            tasks = self.bridge.tasks_by_archive_state("ou_admin", False)
+
+        self.assertEqual(tasks, [])
+        self.assertEqual(read.call_count, 2)
+        sleep.assert_called_once_with(0.2)
+
+    def test_task_lookup_stops_after_bounded_sqlite_retries(self):
+        with mock.patch.object(
+            self.bridge,
+            "_read_task_by_id",
+            side_effect=self.bridge.sqlite3.OperationalError("unavailable"),
+        ) as read, mock.patch.object(self.bridge.time, "sleep") as sleep:
+            with self.assertRaises(self.bridge.sqlite3.OperationalError):
+                self.bridge.task_by_id("task-a", "ou_admin")
+
+        self.assertEqual(read.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            [0.2, 0.5],
+        )
+
+    def test_desktop_no_client_found_is_retried_before_cli_fallback(self):
+        statuses = iter(
+            [
+                ("unavailable", "no-client-found", []),
+                ("completed", "done", []),
+            ]
+        )
+
+        def desktop_call(*_args, **kwargs):
+            status = next(statuses)
+            if status[0] == "completed":
+                kwargs["on_started"]()
+            return status
+
+        started = []
+        with mock.patch.object(
+            self.bridge,
+            "run_codex_via_desktop",
+            side_effect=desktop_call,
+        ) as desktop, mock.patch.object(self.bridge.time, "sleep") as sleep:
+            result = self.bridge.run_codex(
+                "task-a",
+                "hello",
+                on_started=started.append,
+            )
+
+        self.assertEqual(result, (True, "done", []))
+        self.assertEqual(desktop.call_count, 2)
+        sleep.assert_called_once_with(0.3)
+        self.assertEqual(started, ["Codex Desktop 已接收，正在运行"])
+
+    def test_desktop_uncertain_submission_is_never_retried(self):
+        with mock.patch.object(
+            self.bridge,
+            "run_codex_via_desktop",
+            return_value=("failed", "提交状态不确定", []),
+        ) as desktop, mock.patch.object(self.bridge.time, "sleep") as sleep:
+            result = self.bridge.run_codex("task-a", "hello")
+
+        self.assertEqual(result, (False, "提交状态不确定", []))
+        desktop.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_menu_audit_log_records_only_leaf_key_and_result(self):
+        event = {
+            "operator_id": "ou_admin",
+            "event_key": self.bridge.TASK_MENU_EVENT_KEY,
+            "event_id": "menu-event",
+        }
+        with mock.patch.object(self.bridge, "load_state", return_value={}), mock.patch.object(
+            self.bridge,
+            "mark_processed",
+            return_value=True,
+        ), mock.patch.object(self.bridge, "send_task_card") as send, mock.patch.object(
+            self.bridge,
+            "log",
+        ) as log:
+            self.bridge.handle_menu_event(event)
+
+        send.assert_called_once()
+        log.assert_called_once_with(
+            f"menu handled key={self.bridge.TASK_MENU_EVENT_KEY} result=task-selector"
+        )
+        self.assertNotIn("ou_admin", log.call_args.args[0])
+        self.assertNotIn("menu-event", log.call_args.args[0])
 
     def enqueue_delivered_request(self):
         payload = workflow_payload()
@@ -1848,16 +2054,111 @@ class WorkflowClientTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["error"], "bridge_unavailable")
 
 
+class DiagnosticScriptTests(unittest.TestCase):
+    @staticmethod
+    def _run_diagnose(doctor_payload: dict) -> subprocess.CompletedProcess:
+        temporary = tempfile.TemporaryDirectory()
+        home = Path(temporary.name)
+        support = home / "Library/Application Support/Codex Feishu Bridge"
+        support.mkdir(parents=True)
+        (support / "config.json").write_text(
+            json.dumps({"lark_profile": "codex-notify"}),
+            encoding="utf-8",
+        )
+        (support / "bridge.py").write_text(
+            'print("{\\"ok\\": true}")\n',
+            encoding="utf-8",
+        )
+        lark_cli = support / "lark-cli"
+        lark_cli.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *--version*) printf '%s\\n' '1.0.89-codex-feishu.2' ;;\n"
+            f"  *doctor*) printf '%s\\n' '{json.dumps(doctor_payload)}' ;;\n"
+            "  *'event status'*) printf '%s\\n' "
+            "'{\"apps\":[{\"active_consumers\":3}]}' ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        lark_cli.chmod(0o755)
+        workflow_config = support / "workflow-config"
+        workflow_config.write_text(
+            "#!/bin/sh\nprintf '%s\\n' disabled\n",
+            encoding="utf-8",
+        )
+        workflow_config.chmod(0o755)
+        environment = os.environ.copy()
+        environment["HOME"] = str(home)
+        result = subprocess.run(
+            [str(ROOT / "Resources/bridge/diagnose.sh")],
+            text=True,
+            capture_output=True,
+            env=environment,
+        )
+        temporary.cleanup()
+        return result
+
+    def test_diagnose_hides_only_same_base_patched_cli_update_warning(self):
+        payload = {
+            "checks": [
+                {
+                    "name": "cli_version",
+                    "status": "pass",
+                    "message": "1.0.89-codex-feishu.2",
+                },
+                {
+                    "name": "cli_update",
+                    "status": "warn",
+                    "message": "1.0.89-codex-feishu.2 → 1.0.89 available",
+                },
+                {
+                    "name": "user_identity",
+                    "status": "warn",
+                    "message": "User identity: missing (no user logged in)",
+                },
+            ],
+            "ok": True,
+        }
+
+        result = self._run_diagnose(payload)
+
+        self.assertNotIn('"name": "cli_update"', result.stdout)
+        self.assertIn('"name": "user_identity"', result.stdout)
+
+    def test_diagnose_keeps_real_new_base_cli_update_warning(self):
+        payload = {
+            "checks": [
+                {
+                    "name": "cli_version",
+                    "status": "pass",
+                    "message": "1.0.89-codex-feishu.2",
+                },
+                {
+                    "name": "cli_update",
+                    "status": "warn",
+                    "message": "1.0.89-codex-feishu.2 → 1.0.90 available",
+                },
+            ],
+            "ok": True,
+        }
+
+        result = self._run_diagnose(payload)
+
+        self.assertIn('"name": "cli_update"', result.stdout)
+        self.assertIn("1.0.90 available", result.stdout)
+
+
 class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.8.3")
-        self.assertEqual(info["CFBundleVersion"], "34")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.9.0")
+        self.assertEqual(info["CFBundleVersion"], "36")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.8.3 (build 34)", readme)
-        self.assertIn("1.8.3 (build 34", release_notes)
+        self.assertIn("1.9.0 (build 36)", readme)
+        self.assertIn("1.9.0 (build 36", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):
@@ -1906,8 +2207,9 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         self.assertIn('"当前 Task"', configuration)
         self.assertIn('"额度用量"', configuration)
         self.assertIn('config["current_task_menu_event_key"] = currentTaskEventKey', source)
-        self.assertIn("五个机器人菜单 Event Key 都不能为空", source)
-        self.assertIn("五个机器人菜单 Event Key 不能重复", source)
+        self.assertIn("六个机器人菜单 Event Key 都不能为空", source)
+        self.assertIn("六个机器人菜单 Event Key 不能重复", source)
+        self.assertIn('config["desktop_sync_menu_event_key"] = desktopSyncEventKey', source)
         self.assertIn('Text("保存后，正在运行的桥接会自动重启并保留当前 Task。")', configuration)
 
 

@@ -53,8 +53,49 @@ except Exception:
     print("codex-notify")
 PY
 )
-    LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1 LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1 \
-        "${lark_cli}" --profile "${profile}" doctor 2>&1 || result=1
+    doctor_status=0
+    doctor_output="$(
+        LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1 LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1 \
+            "${lark_cli}" --profile "${profile}" doctor 2>&1
+    )" || doctor_status=$?
+    if (( doctor_status != 0 )); then
+        result=1
+    fi
+    print -r -- "${doctor_output}" | /usr/bin/python3 -c '
+import json
+import re
+import sys
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw)
+except json.JSONDecodeError:
+    sys.stdout.write(raw)
+    raise SystemExit(0)
+checks = payload.get("checks")
+if isinstance(checks, list):
+    current = next(
+        (
+            str(check.get("message") or "")
+            for check in checks
+            if isinstance(check, dict) and check.get("name") == "cli_version"
+        ),
+        "",
+    )
+    match = re.fullmatch(r"(\d+\.\d+\.\d+)-codex-feishu\.\d+", current)
+    if match:
+        ignored_message = f"{current} → {match.group(1)} available"
+        payload["checks"] = [
+            check
+            for check in checks
+            if not (
+                isinstance(check, dict)
+                and check.get("name") == "cli_update"
+                and check.get("message") == ignored_message
+            )
+        ]
+print(json.dumps(payload, ensure_ascii=False, indent=2))
+' || result=1
     event_status="$(
         LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1 LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1 \
             "${lark_cli}" --profile "${profile}" event status --current --json 2>&1

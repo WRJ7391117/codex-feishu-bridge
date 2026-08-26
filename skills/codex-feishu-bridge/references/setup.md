@@ -11,11 +11,11 @@ Run `lark-cli update` when the user has authorized an update. Configure a dedica
 
 The installed bridge prefers its bundled `lark-cli 1.0.89-codex-feishu.2`. It registers `card.action.trigger` with the SDK's card-action handler and durably spools Ori One workflow decisions before returning Feishu's synchronous callback response. The system CLI and bundled CLI share the same Profile and Keychain credentials. General bridge use may explicitly override `lark_cli_path`, but workflow mode fails closed unless it uses the bundled CLI.
 
-Source release `1.8.3 (build 34)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
+Source package `1.9.0 (build 36)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
 
 ## Feishu console
 
-Enable long-connection delivery and subscribe to `im.message.receive_v1` and `application.bot.menu_v6`. Enable callback configuration for `card.action.trigger`. Configure a `TASK` main menu with four push-event submenus: “当前 Task” with Event Key `current_task`, “选择 Task” with `select_task`, “新建 Task” with `new_task`, and “归档当前 Task” with `archive_task`. Add a separate top-level “额度用量” push-event menu with `codex_usage`. Keep the same five values in the Mac App configuration, publish a new Feishu app version, and allow about five minutes for the menu to appear. Bot menus are available only in P2P chats with the Bot.
+Enable long-connection delivery and subscribe to `im.message.receive_v1` and `application.bot.menu_v6`. Enable callback configuration for `card.action.trigger`. Configure a `TASK` main menu with four push-event submenus: “当前 Task” with Event Key `current_task`, “选择 Task” with `select_task`, “新建 Task” with `new_task`, and “归档当前 Task” with `archive_task`. Add top-level “接续桌面” and “额度用量” push-event menus with `sync_desktop` and `codex_usage`. Keep the same six values in the Mac App configuration, publish a new Feishu app version, and allow about five minutes for the menu to appear. Bot menus are available only in P2P chats with the Bot.
 
 The bot needs message receive/read/send permissions. Incoming image support also requires permission to read the matching message resource; `im:resource` is needed to upload result images. Follow `missing_scopes` from lark-cli rather than guessing broader permissions.
 

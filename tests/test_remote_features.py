@@ -702,13 +702,14 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.bridge.send_task_card.assert_called_once()
 
-    def test_task_menu_event_keys_have_five_distinct_defaults(self):
+    def test_task_menu_event_keys_have_six_distinct_defaults(self):
         event_keys = (
             self.bridge.CURRENT_TASK_MENU_EVENT_KEY,
             self.bridge.TASK_MENU_EVENT_KEY,
             self.bridge.NEW_TASK_MENU_EVENT_KEY,
             self.bridge.ARCHIVE_TASK_MENU_EVENT_KEY,
             self.bridge.USAGE_MENU_EVENT_KEY,
+            self.bridge.DESKTOP_SYNC_MENU_EVENT_KEY,
         )
 
         self.assertEqual(
@@ -719,9 +720,162 @@ class RemoteFeatureTests(unittest.TestCase):
                 "new_task",
                 "archive_task",
                 "codex_usage",
+                "sync_desktop",
             ),
         )
-        self.assertEqual(len(set(event_keys)), 5)
+        self.assertEqual(len(set(event_keys)), 6)
+
+    def test_latest_rollout_turn_reads_completed_desktop_result(self):
+        rollout = Path(self.temporary.name) / "rollout.jsonl"
+        records = [
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-1"}},
+            {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-1", "last_agent_message": "桌面结果"}},
+        ]
+        rollout.write_text(
+            "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+            encoding="utf-8",
+        )
+
+        snapshot = self.bridge.latest_rollout_turn(rollout)
+
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["turn_id"], "turn-1")
+        self.assertEqual(snapshot["message"], "桌面结果")
+        self.assertEqual(snapshot["cursor_offset"], rollout.stat().st_size)
+
+    def test_desktop_sync_menu_subscribes_to_running_desktop_turn(self):
+        task = self.tasks()[0]
+        rollout = Path(self.temporary.name) / "rollout.jsonl"
+        rollout.write_text(
+            json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-running"}}) + "\n",
+            encoding="utf-8",
+        )
+        self.bridge.recent_tasks = lambda user_id: [task]
+        self.bridge.selected_task = lambda user_id, state: task
+        self.bridge.rollout_path_for_task = lambda task_id: rollout
+
+        self.bridge.handle_menu_event(
+            {
+                "event_id": "evt-desktop-sync",
+                "event_key": "sync_desktop",
+                "operator_id": "ou_admin",
+            }
+        )
+
+        subscription = self.bridge.load_state()["desktop_result_subscriptions"]["ou_admin"]
+        self.assertEqual(subscription["task_id"], "task-a")
+        self.assertEqual(subscription["turn_id"], "turn-running")
+        card = self.bridge.send_card.call_args.args[1]
+        self.assertEqual(card["header"]["text_tag_list"][1]["text"]["content"], "运行中")
+
+    def test_desktop_sync_subscription_pushes_result_when_turn_completes(self):
+        task = self.tasks()[0]
+        rollout = Path(self.temporary.name) / "rollout.jsonl"
+        started = {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-running"}}
+        rollout.write_text(json.dumps(started) + "\n", encoding="utf-8")
+        cursor = rollout.stat().st_size
+        self.bridge.task_by_id = lambda task_id, user_id: task
+        self.bridge.rollout_path_for_task = lambda task_id: rollout
+        self.bridge.patch_card = mock.Mock(return_value=True)
+        self.bridge.reply_or_queue = mock.Mock(return_value=True)
+        self.bridge.update_current_status_card = mock.Mock(return_value=True)
+        self.bridge.refresh_user_task_identity_cards = mock.Mock()
+        self.bridge.record_task_exchange = mock.Mock()
+        self.bridge.follow_result_task = mock.Mock(return_value=True)
+        state = self.bridge.load_state()
+        state["desktop_result_subscriptions"] = {
+            "ou_admin": {
+                "task_id": "task-a",
+                "turn_id": "turn-running",
+                "message_id": "om_sync",
+                "chat_id": "oc_test",
+                "cursor_offset": cursor,
+                "images": [],
+                "created_at": time.time(),
+                "next_check_at": 0,
+            }
+        }
+        self.bridge.save_state(state)
+        completed = {
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-running",
+                "last_agent_message": "最终结果",
+            },
+        }
+        with rollout.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(completed, ensure_ascii=False) + "\n")
+
+        self.assertTrue(self.bridge.retry_desktop_result_subscriptions())
+
+        self.assertNotIn(
+            "ou_admin",
+            self.bridge.load_state().get("desktop_result_subscriptions", {}),
+        )
+        self.assertIn("最终结果", self.bridge.reply_or_queue.call_args.args[1])
+        self.bridge.follow_result_task.assert_called_once_with("ou_admin", task)
+
+    def test_desktop_sync_menu_immediately_pushes_latest_completed_result(self):
+        task = self.tasks()[0]
+        rollout = Path(self.temporary.name) / "rollout.jsonl"
+        records = [
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-complete"}},
+            {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-complete", "last_agent_message": "已经完成"}},
+        ]
+        rollout.write_text(
+            "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        self.bridge.recent_tasks = lambda user_id: [task]
+        self.bridge.selected_task = lambda user_id, state: None
+        self.bridge.rollout_path_for_task = lambda task_id: rollout
+        self.bridge.patch_card = mock.Mock(return_value=True)
+        self.bridge.reply_or_queue = mock.Mock(return_value=True)
+        self.bridge.update_current_status_card = mock.Mock(return_value=True)
+        self.bridge.refresh_user_task_identity_cards = mock.Mock()
+        self.bridge.record_task_exchange = mock.Mock()
+        self.bridge.follow_result_task = mock.Mock(return_value=True)
+
+        self.bridge.handle_menu_event(
+            {
+                "event_id": "evt-desktop-completed",
+                "event_key": "sync_desktop",
+                "operator_id": "ou_admin",
+            }
+        )
+
+        self.assertEqual(self.bridge.load_state()["selected"]["ou_admin"], "task-a")
+        self.assertIn("已经完成", self.bridge.reply_or_queue.call_args.args[1])
+        self.assertNotIn(
+            "ou_admin",
+            self.bridge.load_state().get("desktop_result_subscriptions", {}),
+        )
+
+    def test_desktop_sync_does_not_duplicate_a_run_already_owned_by_same_user(self):
+        task = self.tasks()[0]
+        rollout = Path(self.temporary.name) / "rollout.jsonl"
+        rollout.write_text(
+            json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-owned"}}) + "\n",
+            encoding="utf-8",
+        )
+        self.bridge.recent_tasks = lambda user_id: [task]
+        self.bridge.selected_task = lambda user_id, state: task
+        self.bridge.rollout_path_for_task = lambda task_id: rollout
+        self.bridge.active_run_for_task = lambda task_id: {"user_id": "ou_admin"}
+
+        self.bridge.handle_menu_event(
+            {
+                "event_id": "evt-desktop-owned",
+                "event_key": "sync_desktop",
+                "operator_id": "ou_admin",
+            }
+        )
+
+        self.assertNotIn(
+            "ou_admin",
+            self.bridge.load_state().get("desktop_result_subscriptions", {}),
+        )
 
     def test_authorized_user_usage_button_starts_live_refresh_with_visible_feedback(self):
         self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}

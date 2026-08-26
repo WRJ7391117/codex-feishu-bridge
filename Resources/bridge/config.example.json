@@ -15,6 +15,7 @@
   "new_task_menu_event_key": "new_task",
   "archive_task_menu_event_key": "archive_task",
   "usage_menu_event_key": "codex_usage",
+  "desktop_sync_menu_event_key": "sync_desktop",
   "max_prompt_chars": 12000,
   "max_reply_chars": 3000,
   "max_result_images": 8,

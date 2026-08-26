@@ -397,6 +397,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var draftNewTaskEventKey = "new_task"
     @Published var draftArchiveTaskEventKey = "archive_task"
     @Published var draftUsageEventKey = "codex_usage"
+    @Published var draftDesktopSyncEventKey = "sync_desktop"
     @Published var draftMaxConcurrentRuns = 2
 
     init(bridge: BridgeController) {
@@ -554,6 +555,9 @@ private final class BridgeViewModel: ObservableObject {
         draftUsageEventKey = String(
             describing: config["usage_menu_event_key"] ?? "codex_usage"
         )
+        draftDesktopSyncEventKey = String(
+            describing: config["desktop_sync_menu_event_key"] ?? "sync_desktop"
+        )
         draftMaxConcurrentRuns = min(
             8,
             max(1, (config["max_concurrent_runs"] as? NSNumber)?.intValue ?? 2)
@@ -568,6 +572,7 @@ private final class BridgeViewModel: ObservableObject {
         let newTaskEventKey = draftNewTaskEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let archiveTaskEventKey = draftArchiveTaskEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let usageEventKey = draftUsageEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let desktopSyncEventKey = draftDesktopSyncEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !profile.isEmpty else {
             presentError(title: "配置未保存", message: "lark-cli Profile 不能为空。")
             return
@@ -613,7 +618,8 @@ private final class BridgeViewModel: ObservableObject {
             eventKey: eventKey,
             newTaskEventKey: newTaskEventKey,
             archiveTaskEventKey: archiveTaskEventKey,
-            usageEventKey: usageEventKey
+            usageEventKey: usageEventKey,
+            desktopSyncEventKey: desktopSyncEventKey
         )
     }
 
@@ -624,7 +630,8 @@ private final class BridgeViewModel: ObservableObject {
         eventKey: String,
         newTaskEventKey: String,
         archiveTaskEventKey: String,
-        usageEventKey: String
+        usageEventKey: String,
+        desktopSyncEventKey: String
     ) {
         let menuEventKeys = [
             currentTaskEventKey,
@@ -632,13 +639,14 @@ private final class BridgeViewModel: ObservableObject {
             newTaskEventKey,
             archiveTaskEventKey,
             usageEventKey,
+            desktopSyncEventKey,
         ]
         guard menuEventKeys.allSatisfy({ !$0.isEmpty }) else {
-            presentError(title: "配置未保存", message: "五个机器人菜单 Event Key 都不能为空。")
+            presentError(title: "配置未保存", message: "六个机器人菜单 Event Key 都不能为空。")
             return
         }
         guard Set(menuEventKeys).count == menuEventKeys.count else {
-            presentError(title: "配置未保存", message: "五个机器人菜单 Event Key 不能重复。")
+            presentError(title: "配置未保存", message: "六个机器人菜单 Event Key 不能重复。")
             return
         }
 
@@ -661,6 +669,7 @@ private final class BridgeViewModel: ObservableObject {
         config["new_task_menu_event_key"] = newTaskEventKey
         config["archive_task_menu_event_key"] = archiveTaskEventKey
         config["usage_menu_event_key"] = usageEventKey
+        config["desktop_sync_menu_event_key"] = desktopSyncEventKey
         config["max_concurrent_runs"] = min(8, max(1, draftMaxConcurrentRuns))
         config["max_prompt_chars"] = config["max_prompt_chars"] ?? 12000
         config["max_reply_chars"] = config["max_reply_chars"] ?? 3000
@@ -1164,6 +1173,12 @@ private struct ConfigurationView: View {
                         "额度用量",
                         placeholder: "codex_usage",
                         text: $model.draftUsageEventKey,
+                        monospaced: true
+                    )
+                    configurationField(
+                        "接续桌面",
+                        placeholder: "sync_desktop",
+                        text: $model.draftDesktopSyncEventKey,
                         monospaced: true
                     )
                 }

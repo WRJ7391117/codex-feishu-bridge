@@ -253,6 +253,9 @@ ARCHIVE_TASK_MENU_EVENT_KEY = str(
 USAGE_MENU_EVENT_KEY = str(
     CONFIG.get("usage_menu_event_key") or "codex_usage"
 )
+DESKTOP_SYNC_MENU_EVENT_KEY = str(
+    CONFIG.get("desktop_sync_menu_event_key") or "sync_desktop"
+)
 REPLY_RETRY_DELAYS = (1.0, 2.0)
 CARD_PATCH_RETRY_DELAYS = (1.0, 2.0)
 PENDING_REPLY_DELAYS = (15, 30, 60, 120, 300, 600)
@@ -281,9 +284,12 @@ MAX_PENDING_INPUTS_PER_TASK = max(
 MAX_CONCURRENT_RUNS = max(1, int(CONFIG.get("max_concurrent_runs", 2)))
 MAX_PENDING_CLI_FALLBACKS = 50
 CLI_FALLBACK_TTL_SECONDS = 24 * 60 * 60
+SQLITE_READ_RETRY_DELAYS = (0.2, 0.5)
+DESKTOP_UNAVAILABLE_RETRY_DELAYS = (0.3, 0.7)
 ALLOW_ACCESS_REQUESTS = CONFIG.get("allow_access_requests", True) is not False
 TASKS_PER_PAGE = max(10, min(50, int(CONFIG.get("tasks_per_page", 50))))
 RECENT_TASK_LIMIT = 20
+DESKTOP_SYNC_CANDIDATE_LIMIT = 10
 TASK_SUMMARY_CHARS = 120
 
 _last_reply_failure_reason = ""
@@ -604,10 +610,19 @@ def available_project_names(user_id: str) -> list[str]:
     )
 
 
-def tasks_by_archive_state(
-    user_id: str,
-    archived: bool,
-) -> list[dict[str, str]]:
+def retry_sqlite_read(operation: Callable[[], Any]) -> Any:
+    for attempt in range(len(SQLITE_READ_RETRY_DELAYS) + 1):
+        try:
+            return operation()
+        except sqlite3.OperationalError:
+            if attempt >= len(SQLITE_READ_RETRY_DELAYS):
+                raise
+            log(f"task database read retry attempt={attempt + 1}")
+            time.sleep(SQLITE_READ_RETRY_DELAYS[attempt])
+    raise RuntimeError("unreachable")
+
+
+def _read_tasks_by_archive_state(archived: bool) -> list[sqlite3.Row]:
     state_db = state_db_path()
     connection = sqlite3.connect(
         f"file:{DESKTOP_CATALOG_DB}?mode=ro",
@@ -638,6 +653,14 @@ def tasks_by_archive_state(
         ).fetchall()
     finally:
         connection.close()
+    return rows
+
+
+def tasks_by_archive_state(
+    user_id: str,
+    archived: bool,
+) -> list[dict[str, str]]:
+    rows = retry_sqlite_read(lambda: _read_tasks_by_archive_state(archived))
     project_names = desktop_project_names()
     projects = desktop_projects()
     names_by_id = {project["id"]: project["name"] for project in projects}
@@ -670,7 +693,7 @@ def archived_tasks(user_id: str) -> list[dict[str, str]]:
     return tasks_by_archive_state(user_id, archived=True)
 
 
-def task_by_id(thread_id: str, user_id: str) -> dict[str, str] | None:
+def _read_task_by_id(thread_id: str) -> sqlite3.Row | None:
     state_db = state_db_path()
     connection = sqlite3.connect(
         f"file:{DESKTOP_CATALOG_DB}?mode=ro",
@@ -717,6 +740,11 @@ def task_by_id(thread_id: str, user_id: str) -> dict[str, str] | None:
             ).fetchone()
     finally:
         connection.close()
+    return row
+
+
+def task_by_id(thread_id: str, user_id: str) -> dict[str, str] | None:
+    row = retry_sqlite_read(lambda: _read_task_by_id(thread_id))
     if row is None:
         return None
     project_names = desktop_project_names()
@@ -755,6 +783,140 @@ def rollout_path_for_task(thread_id: str) -> Path | None:
     finally:
         connection.close()
     return Path(str(row[0])) if row and row[0] else None
+
+
+def latest_rollout_turn(path: Path | None) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "status": "none",
+        "turn_id": "",
+        "message": "",
+        "images": [],
+        "cursor_offset": 0,
+    }
+    if path is None or not path.is_file():
+        return snapshot
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            while True:
+                line_start = handle.tell()
+                line = handle.readline()
+                if not line:
+                    snapshot["cursor_offset"] = line_start
+                    break
+                if not line.endswith("\n"):
+                    snapshot["cursor_offset"] = line_start
+                    break
+                snapshot["cursor_offset"] = handle.tell()
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                event_type = str(payload.get("type") or "")
+                if event_type == "task_started":
+                    snapshot = {
+                        "status": "running",
+                        "turn_id": str(payload.get("turn_id") or ""),
+                        "message": "",
+                        "images": [],
+                        "cursor_offset": handle.tell(),
+                    }
+                    continue
+                if snapshot["status"] != "running":
+                    continue
+                if event_type == "image_generation_end":
+                    image = normalized_image_reference(
+                        str(payload.get("saved_path") or "")
+                    )
+                    if image is not None and image not in snapshot["images"]:
+                        snapshot["images"].append(image)
+                    continue
+                if str(payload.get("turn_id") or "") != snapshot["turn_id"]:
+                    continue
+                if event_type == "task_complete":
+                    snapshot["status"] = "completed"
+                    snapshot["message"] = str(
+                        payload.get("last_agent_message") or ""
+                    ).strip()
+                elif event_type in {"task_failed", "turn_aborted"}:
+                    snapshot["status"] = "failed"
+                    snapshot["message"] = "Codex Desktop 没有完成这一轮运行。"
+    except OSError:
+        return {
+            "status": "none",
+            "turn_id": "",
+            "message": "",
+            "images": [],
+            "cursor_offset": 0,
+        }
+    return snapshot
+
+
+def advance_rollout_turn(
+    path: Path | None,
+    turn_id: str,
+    cursor_offset: int,
+    existing_images: list[str] | None = None,
+) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "status": "running",
+        "turn_id": turn_id,
+        "message": "",
+        "images": list(existing_images or []),
+        "cursor_offset": max(0, int(cursor_offset)),
+    }
+    if path is None or not path.is_file() or not turn_id:
+        snapshot["status"] = "missing"
+        return snapshot
+    try:
+        if path.stat().st_size < snapshot["cursor_offset"]:
+            snapshot["status"] = "missing"
+            return snapshot
+        with path.open("r", encoding="utf-8") as handle:
+            handle.seek(snapshot["cursor_offset"])
+            while True:
+                line_start = handle.tell()
+                line = handle.readline()
+                if not line:
+                    snapshot["cursor_offset"] = line_start
+                    break
+                if not line.endswith("\n"):
+                    snapshot["cursor_offset"] = line_start
+                    break
+                snapshot["cursor_offset"] = handle.tell()
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                event_type = str(payload.get("type") or "")
+                if event_type == "image_generation_end":
+                    image = normalized_image_reference(
+                        str(payload.get("saved_path") or "")
+                    )
+                    if image is not None and image not in snapshot["images"]:
+                        snapshot["images"].append(image)
+                    continue
+                payload_turn_id = str(payload.get("turn_id") or "")
+                if payload_turn_id != turn_id:
+                    continue
+                if event_type == "task_complete":
+                    snapshot["status"] = "completed"
+                    snapshot["message"] = str(
+                        payload.get("last_agent_message") or ""
+                    ).strip()
+                    break
+                if event_type in {"task_failed", "turn_aborted"}:
+                    snapshot["status"] = "failed"
+                    snapshot["message"] = "Codex Desktop 没有完成这一轮运行。"
+                    break
+    except OSError:
+        snapshot["status"] = "missing"
+    return snapshot
 
 
 def task_working_directory(thread_id: str) -> str:
@@ -4131,6 +4293,57 @@ def task_role_tag(is_current: bool, other_label: str) -> dict[str, Any]:
     }
 
 
+def build_desktop_sync_card(
+    task: dict[str, str],
+    status: str,
+    running_count: int = 0,
+) -> dict[str, Any]:
+    running = status == "running"
+    completed = status == "completed"
+    template = "blue" if running else "green" if completed else "grey"
+    tag_text = "运行中" if running else "已找到结果" if completed else "暂无结果"
+    tag_color = "blue" if running else "green" if completed else "neutral"
+    if running:
+        message = "Codex Desktop 正在运行。桥接会持续跟踪，完成后自动把结果推送到这里。"
+        if running_count > 1:
+            message += f"\n\n检测到 {running_count} 个运行中的 Task，已接续最近使用的这个 Task。"
+    elif completed:
+        message = "已读取 Codex Desktop 中这个 Task 的最新完成结果，正在推送。"
+    else:
+        message = "这个 Task 暂时没有可同步的完成结果。"
+    return {
+        "schema": "2.0",
+        "config": {
+            "update_multi": True,
+            "width_mode": "default",
+            "enable_forward": False,
+            "summary": {"content": f"桌面接续 · {task['title']} · {tag_text}"},
+        },
+        "header": {
+            "title": {"tag": "plain_text", "content": task_title_text(task)},
+            "subtitle": {"tag": "plain_text", "content": task_project_text(task)},
+            "template": template,
+            "text_tag_list": [
+                {
+                    "tag": "text_tag",
+                    "text": {"tag": "plain_text", "content": "桌面接续"},
+                    "color": "blue",
+                },
+                {
+                    "tag": "text_tag",
+                    "text": {"tag": "plain_text", "content": tag_text},
+                    "color": tag_color,
+                },
+            ],
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "elements": [{"tag": "markdown", "content": message}],
+        },
+    }
+
+
 def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
     status = str(run.get("status") or "正在准备")
     outcome = str(run.get("outcome") or "running")
@@ -5337,6 +5550,228 @@ def send_menu_card(
         return success
 
 
+def desktop_result_subscriptions(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    subscriptions = state.setdefault("desktop_result_subscriptions", {})
+    if not isinstance(subscriptions, dict):
+        subscriptions = {}
+        state["desktop_result_subscriptions"] = subscriptions
+    return subscriptions
+
+
+def desktop_sync_candidate(
+    user_id: str,
+    state: dict[str, Any],
+) -> tuple[dict[str, str] | None, dict[str, Any], int]:
+    tasks = recent_tasks(user_id)
+    if not tasks:
+        return None, {"status": "none"}, 0
+    selected = selected_task(user_id, state)
+    snapshots: list[tuple[dict[str, str], dict[str, Any]]] = []
+    for task in tasks[:DESKTOP_SYNC_CANDIDATE_LIMIT]:
+        snapshots.append(
+            (task, latest_rollout_turn(rollout_path_for_task(str(task["id"]))))
+        )
+    running = [item for item in snapshots if item[1].get("status") == "running"]
+    if running:
+        candidate = next(
+            (
+                item
+                for item in running
+                if selected is not None and item[0]["id"] == selected["id"]
+            ),
+            running[0],
+        )
+        return candidate[0], candidate[1], len(running)
+    return snapshots[0][0], snapshots[0][1], 0
+
+
+def deliver_desktop_sync_result(
+    user_id: str,
+    task: dict[str, str],
+    message_id: str,
+    snapshot: dict[str, Any],
+) -> None:
+    status = str(snapshot.get("status") or "missing")
+    patch_card(message_id, build_desktop_sync_card(task, status))
+    if status == "completed":
+        result = str(snapshot.get("message") or "").strip()
+        result = result or "Codex 已完成，但没有返回文字结果。"
+        clean_result, images = prepare_result_images(
+            result,
+            [str(item) for item in snapshot.get("images", [])],
+        )
+        clean_result, files = prepare_result_files(clean_result)
+        record_task_exchange(
+            user_id,
+            str(task["id"]),
+            answer=clean_result,
+            completed_at=time.time(),
+        )
+        with result_delivery_lock(user_id):
+            followed = follow_result_task(user_id, task)
+            delivered = reply_or_queue(
+                message_id,
+                task_status_prefix(task, "桌面结果已同步") + clean_result,
+                "final",
+            )
+        if followed:
+            refresh_user_task_identity_cards(
+                user_id,
+                "当前 Task 已跟随桌面结果",
+                task,
+            )
+        for index, image in enumerate(images, start=1):
+            if not reply_image(message_id, image, index):
+                queue_pending_image(
+                    message_id,
+                    image,
+                    index,
+                    current_reply_failure_reason() or "飞书 API 调用失败",
+                )
+        for index, file_path in enumerate(files, start=1):
+            if not reply_file(message_id, file_path, index):
+                queue_pending_file(
+                    message_id,
+                    file_path,
+                    index,
+                    current_reply_failure_reason() or "飞书 API 调用失败",
+                )
+        log(
+            "desktop sync result delivered "
+            f"text={delivered} images={len(images)} files={len(files)}"
+        )
+    else:
+        reply_or_queue(
+            message_id,
+            task_status_prefix(task, "桌面运行未完成")
+            + str(snapshot.get("message") or "没有读取到可同步的完成结果。"),
+            "final",
+        )
+    update_current_status_card(user_id, task=task)
+
+
+def start_desktop_sync(user_id: str, state: dict[str, Any], event_id: str) -> None:
+    task, snapshot, running_count = desktop_sync_candidate(user_id, state)
+    if task is None:
+        send_task_card(user_id, state, event_id)
+        log("menu handled key=sync_desktop result=task-selector")
+        return
+    with _state_lock:
+        state = load_state()
+        state.setdefault("selected", {})[user_id] = task["id"]
+        state.setdefault("last_projects", {})[user_id] = task["project"]
+        remember_recent_task(state, user_id, str(task["id"]))
+        save_state(state)
+    card = build_desktop_sync_card(
+        task,
+        str(snapshot.get("status") or "none"),
+        running_count,
+    )
+    success, chat_id, message_id = send_card(
+        user_id,
+        card,
+        f"desktop-sync-{event_id}",
+    )
+    if not success or not message_id:
+        log("menu handled key=sync_desktop result=send-failed")
+        return
+    if chat_id:
+        with _state_lock:
+            state = load_state()
+            authorize_chat(state, user_id, chat_id)
+    if snapshot.get("status") == "running":
+        active = active_run_for_task(str(task["id"]))
+        if active is not None and str(active.get("user_id") or "") == user_id:
+            log("menu handled key=sync_desktop result=already-tracked")
+            return
+        with _state_lock:
+            state = load_state()
+            desktop_result_subscriptions(state)[user_id] = {
+                "task_id": str(task["id"]),
+                "turn_id": str(snapshot.get("turn_id") or ""),
+                "message_id": message_id,
+                "chat_id": chat_id or "",
+                "cursor_offset": int(snapshot.get("cursor_offset") or 0),
+                "images": list(snapshot.get("images") or []),
+                "created_at": time.time(),
+                "next_check_at": 0,
+            }
+            save_state(state)
+        log("menu handled key=sync_desktop result=subscribed")
+        return
+    if snapshot.get("status") == "completed":
+        deliver_desktop_sync_result(user_id, task, message_id, snapshot)
+        log("menu handled key=sync_desktop result=completed")
+        return
+    log("menu handled key=sync_desktop result=no-result")
+
+
+def retry_desktop_result_subscriptions(now: float | None = None) -> bool:
+    timestamp = time.time() if now is None else now
+    with _state_lock:
+        state = load_state()
+        subscriptions = desktop_result_subscriptions(state)
+        selected = next(
+            (
+                (user_id, dict(value))
+                for user_id, value in subscriptions.items()
+                if isinstance(value, dict)
+                and float(value.get("next_check_at") or 0) <= timestamp
+            ),
+            None,
+        )
+    if selected is None:
+        return False
+    user_id, subscription = selected
+    task_id = str(subscription.get("task_id") or "")
+    turn_id = str(subscription.get("turn_id") or "")
+    message_id = str(subscription.get("message_id") or "")
+    task = task_by_id(task_id, user_id) if authorized_user(user_id) else None
+    if (
+        task is None
+        or not turn_id
+        or not message_id
+        or timestamp - float(subscription.get("created_at") or 0) > 24 * 60 * 60
+    ):
+        snapshot = {
+            "status": "missing",
+            "message": "桌面接续已失效，请重新点击“接续桌面”。",
+        }
+    else:
+        snapshot = advance_rollout_turn(
+            rollout_path_for_task(task_id),
+            turn_id,
+            int(subscription.get("cursor_offset") or 0),
+            [str(item) for item in subscription.get("images", [])],
+        )
+    if snapshot.get("status") == "running":
+        with _state_lock:
+            state = load_state()
+            current = desktop_result_subscriptions(state).get(user_id)
+            if isinstance(current, dict) and current.get("turn_id") == turn_id:
+                current["cursor_offset"] = int(snapshot.get("cursor_offset") or 0)
+                current["images"] = list(snapshot.get("images") or [])
+                current["next_check_at"] = timestamp + 1
+                save_state(state)
+        return True
+    if task is not None:
+        deliver_desktop_sync_result(user_id, task, message_id, snapshot)
+    elif message_id:
+        reply_or_queue(
+            message_id,
+            "桌面接续已失效：该 Task 已归档、删除或不再属于你的授权项目。请重新点击“接续桌面”。",
+            "final",
+        )
+    with _state_lock:
+        state = load_state()
+        current = desktop_result_subscriptions(state).get(user_id)
+        if isinstance(current, dict) and current.get("turn_id") == turn_id:
+            desktop_result_subscriptions(state).pop(user_id, None)
+            save_state(state)
+    log(f"desktop sync subscription finished status={snapshot.get('status')}")
+    return True
+
+
 def authorize_chat(state: dict[str, Any], user_id: str, chat_id: str) -> None:
     with _state_lock:
         if not chat_id.startswith("oc_"):
@@ -6179,6 +6614,58 @@ def pending_cli_fallbacks(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return pending
 
 
+def prune_cli_fallbacks(
+    state: dict[str, Any],
+    now: float | None = None,
+) -> int:
+    timestamp = time.time() if now is None else now
+    pending = pending_cli_fallbacks(state)
+    expired = []
+    for fallback_id, value in pending.items():
+        if not isinstance(value, dict):
+            expired.append(fallback_id)
+            continue
+        try:
+            created_at = float(value.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created_at = 0
+        if timestamp - created_at > CLI_FALLBACK_TTL_SECONDS:
+            expired.append(fallback_id)
+    for fallback_id in expired:
+        pending.pop(fallback_id, None)
+    return len(expired)
+
+
+def expire_cli_fallbacks(now: float | None = None) -> int:
+    with _state_lock:
+        state = load_state()
+        removed = prune_cli_fallbacks(state, now)
+        if removed:
+            save_state(state)
+            log(f"cli fallback expired count={removed}")
+        return removed
+
+
+def invalidate_cli_fallbacks(user_id: str, task_id: str) -> int:
+    with _state_lock:
+        state = load_state()
+        pending = pending_cli_fallbacks(state)
+        stale = [
+            fallback_id
+            for fallback_id, entry in pending.items()
+            if isinstance(entry, dict)
+            and str(entry.get("user_id") or "") == user_id
+            and isinstance(entry.get("task"), dict)
+            and str(entry["task"].get("id") or "") == task_id
+        ]
+        for fallback_id in stale:
+            pending.pop(fallback_id, None)
+        if stale:
+            save_state(state)
+            log(f"cli fallback superseded count={len(stale)}")
+        return len(stale)
+
+
 def remember_cli_fallback(
     run: dict[str, Any],
     content: str,
@@ -6208,14 +6695,7 @@ def remember_cli_fallback(
     with _state_lock:
         state = load_state()
         pending = pending_cli_fallbacks(state)
-        expired = [
-            key
-            for key, value in pending.items()
-            if not isinstance(value, dict)
-            or now - float(value.get("created_at") or 0) > CLI_FALLBACK_TTL_SECONDS
-        ]
-        for key in expired:
-            pending.pop(key, None)
+        prune_cli_fallbacks(state, now)
         pending[fallback_id] = entry
         if len(pending) > MAX_PENDING_CLI_FALLBACKS:
             oldest = sorted(
@@ -6476,7 +6956,11 @@ def cli_fallback_entry(
     chat_id: str,
 ) -> dict[str, Any] | None:
     with _state_lock:
-        entry = pending_cli_fallbacks(load_state()).get(fallback_id)
+        state = load_state()
+        removed = prune_cli_fallbacks(state)
+        if removed:
+            save_state(state)
+        entry = pending_cli_fallbacks(state).get(fallback_id)
         if (
             not isinstance(entry, dict)
             or str(entry.get("user_id") or "") != user_id
@@ -7031,20 +7515,36 @@ def run_codex(
             log(f"running status reply failed: {type(exc).__name__}: {exc}")
 
     if not use_cli_fallback:
-        desktop_status, desktop_result, desktop_images = run_codex_via_desktop(
-            thread_id,
-            prompt,
-            on_started=lambda: notify_started("Codex Desktop 已接收，正在运行"),
-            input_images=input_images or [],
-            input_files=input_files or [],
-            on_turn_started=on_turn_started,
-            on_progress=on_progress,
-            on_approval=on_approval,
-            cancel_event=cancel_event,
-            cancel_confirmed=cancel_confirmed,
-            on_ipc_ready=on_ipc_ready,
-            on_ipc_response=on_ipc_response,
-        )
+        for attempt in range(len(DESKTOP_UNAVAILABLE_RETRY_DELAYS) + 1):
+            desktop_status, desktop_result, desktop_images = run_codex_via_desktop(
+                thread_id,
+                prompt,
+                on_started=lambda: notify_started("Codex Desktop 已接收，正在运行"),
+                input_images=input_images or [],
+                input_files=input_files or [],
+                on_turn_started=on_turn_started,
+                on_progress=on_progress,
+                on_approval=on_approval,
+                cancel_event=cancel_event,
+                cancel_confirmed=cancel_confirmed,
+                on_ipc_ready=on_ipc_ready,
+                on_ipc_response=on_ipc_response,
+            )
+            if (
+                desktop_status != "unavailable"
+                or desktop_result not in {"no-client-found", "ipc-connect-failed"}
+                or attempt >= len(DESKTOP_UNAVAILABLE_RETRY_DELAYS)
+            ):
+                break
+            if cancel_event is not None and cancel_event.is_set():
+                if cancel_confirmed is not None:
+                    cancel_confirmed.set()
+                return False, "已按你的要求停止运行。", []
+            log(
+                f"desktop unavailable retry reason={desktop_result} "
+                f"attempt={attempt + 1}"
+            )
+            time.sleep(DESKTOP_UNAVAILABLE_RETRY_DELAYS[attempt])
         if desktop_status == "completed":
             return True, desktop_result, desktop_images
         if desktop_status == "failed":
@@ -7088,7 +7588,6 @@ def run_codex(
                 "本轮消息包含以下已下载到本机临时目录的飞书附件，请直接读取：\n"
                 + "\n".join(attachment_lines)
             ).strip()
-        notify_started("正在通过备用 Codex CLI 启动")
         try:
             process = subprocess.Popen(
                 command,
@@ -7101,6 +7600,7 @@ def run_codex(
         except OSError as exc:
             log(f"codex resume start failed error={type(exc).__name__}")
             return False, "无法启动本机 Codex CLI，详细原因已记录到桥接日志。", []
+        notify_started("正在通过备用 Codex CLI 启动")
         deadline = time.monotonic() + 3600
         last_progress = 0.0
         stdout = ""
@@ -7245,6 +7745,14 @@ def queue_busy_run(
     return True
 
 
+def message_run_started(run: dict[str, Any], status: str) -> None:
+    invalidate_cli_fallbacks(
+        str(run["user_id"]),
+        str(run["task"]["id"]),
+    )
+    set_run_progress(run, status, force=True)
+
+
 def process_message_run(
     run: dict[str, Any],
     prompt: str,
@@ -7303,7 +7811,7 @@ def process_message_run(
             success, result, rollout_images = run_codex(
                 str(task["id"]),
                 prompt,
-                on_started=lambda status: set_run_progress(run, status, force=True),
+                on_started=lambda status: message_run_started(run, status),
                 input_images=input_images,
                 input_files=input_files,
                 on_turn_started=lambda turn_id: set_run_turn_id(run, turn_id),
@@ -8395,6 +8903,7 @@ def handle_menu_event(event: dict[str, Any]) -> None:
         NEW_TASK_MENU_EVENT_KEY,
         ARCHIVE_TASK_MENU_EVENT_KEY,
         USAGE_MENU_EVENT_KEY,
+        DESKTOP_SYNC_MENU_EVENT_KEY,
     } or not authorized_user(user_id):
         return
     event_id = str(event.get("event_id") or "")
@@ -8407,6 +8916,7 @@ def handle_menu_event(event: dict[str, Any]) -> None:
         task = selected_task(user_id, state)
         if task is None:
             send_task_card(user_id, state, event_id)
+            log(f"menu handled key={event_key} result=task-selector")
             return
         update_current_status_card(
             user_id,
@@ -8414,9 +8924,11 @@ def handle_menu_event(event: dict[str, Any]) -> None:
             ensure=True,
             force_new=True,
         )
+        log(f"menu handled key={event_key} result=status-card")
         return
     if event_key == TASK_MENU_EVENT_KEY:
         send_task_card(user_id, state, event_id)
+        log(f"menu handled key={event_key} result=task-selector")
         return
     if event_key == NEW_TASK_MENU_EVENT_KEY:
         projects = available_project_names(user_id)
@@ -8429,6 +8941,7 @@ def handle_menu_event(event: dict[str, Any]) -> None:
             build_new_task_card(projects, selected_project),
             f"new-task-{event_id}",
         )
+        log(f"menu handled key={event_key} result=new-task-card")
         return
     if event_key == USAGE_MENU_EVENT_KEY:
         send_menu_card(
@@ -8437,6 +8950,10 @@ def handle_menu_event(event: dict[str, Any]) -> None:
             build_codex_usage_card(codex_usage_snapshot()),
             f"codex-usage-{event_id}",
         )
+        log(f"menu handled key={event_key} result=usage-card")
+        return
+    if event_key == DESKTOP_SYNC_MENU_EVENT_KEY:
+        start_desktop_sync(user_id, state, event_id)
         return
     task = selected_task(user_id, state)
     busy = bool(task and active_run_for_task(str(task["id"])) is not None)
@@ -8446,6 +8963,7 @@ def handle_menu_event(event: dict[str, Any]) -> None:
         build_archive_task_card(task, busy=busy),
         f"archive-task-{event_id}",
     )
+    log(f"menu handled key={event_key} result=archive-card")
 
 
 def dispatch_event(event: dict[str, Any]) -> None:
@@ -8675,8 +9193,16 @@ def main() -> int:
     next_workflow_retry = 0.0
     next_runtime_status = 0.0
     next_usage_refresh = 0.0
+    next_cli_fallback_expiry = 0.0
+    next_desktop_sync_retry = 0.0
     while any(consumer.poll() is None for consumer in _consumers):
         now = time.time()
+        if now >= next_cli_fallback_expiry:
+            try:
+                expire_cli_fallbacks(now)
+            except Exception as exc:
+                log(f"cli fallback expiry loop failed: {type(exc).__name__}: {exc}")
+            next_cli_fallback_expiry = now + 60
         if now >= next_usage_refresh:
             threading.Thread(target=refresh_codex_usage, daemon=True).start()
             next_usage_refresh = now + 60
@@ -8695,6 +9221,12 @@ def main() -> int:
             except Exception as exc:
                 log(f"pending input loop failed: {type(exc).__name__}: {exc}")
             next_input_retry = now + 1
+        if now >= next_desktop_sync_retry:
+            try:
+                retry_desktop_result_subscriptions(now)
+            except Exception as exc:
+                log(f"desktop sync loop failed: {type(exc).__name__}: {exc}")
+            next_desktop_sync_retry = now + 1
         if now >= next_workflow_retry:
             try:
                 if workflow_notifications_enabled():

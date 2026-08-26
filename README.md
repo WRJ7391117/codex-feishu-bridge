@@ -2,11 +2,12 @@
 
 把飞书 Bot 变成 Codex Desktop 的移动入口：在飞书里按项目选择桌面版左侧栏中的 Task，发送文字、图片、文件或音频，并接收可更新的运行状态和最终结果。
 
-版本说明：当前源码和最新公开 Release 均为 `1.8.3 (build 34)`。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.9.0 (build 36)`；最新公开 Release 仍为 `1.8.3 (build 34)`。不得用旧版本或同版本不同构建覆盖。
 
 ## 能力
 
-- 飞书机器人一级菜单精简为 `TASK` 和“额度用量”；`TASK` 下提供“当前 Task”“选择 Task”“新建 Task”“归档当前 Task”四个二级入口
+- 飞书机器人一级菜单为 `TASK`、“接续桌面”和“额度用量”；`TASK` 下提供“当前 Task”“选择 Task”“新建 Task”“归档当前 Task”四个二级入口
+- “接续桌面”会定位最近使用的桌面 Task：已完成则立即推送最新结果，仍在运行则显示状态并持久跟踪，完成后自动推送；同步结果会成为该飞书用户的当前 Task
 - 按 `项目 · Task 标题` 显示所有未归档本地 Task，每页 50 条，可翻页和按标题搜索
 - 选中后持续保持当前 Task；并行 Task 返回最终结果时，当前 Task 自动跟随最后送达的结果，便于直接继续追问
 - 运行、排队、授权和结果卡片按真实关系显示“当前 Task”“运行 Task”“排队 Task”或“结果所属 Task”，避免切换后旧卡误称当前
@@ -50,6 +51,7 @@
        ├─ 读取 Codex Desktop 本地 Task 目录
        ├─ 检查“飞书用户 → 允许项目”权限
        ├─ 保存“飞书用户 → 当前 Task”状态
+       ├─ 持久跟踪“飞书用户 → 桌面运行结果”订阅
        ├─ 读取 Codex 官方实时额度并仅向所有者展示
        ├─ 将飞书附件下载到本轮受限临时目录
        ├─ 后台运行并原地更新进度卡
@@ -171,13 +173,14 @@ App 运行时优先使用随安装包提供的 `1.0.89-codex-feishu.2`，它在�
    - `im.message.receive_v1`
    - `application.bot.menu_v6`
 4. 在“回调配置”中启用卡片回调 `card.action.trigger`。只启动监听但未配置这里时，卡片选择不会产生事件。
-5. 在机器人菜单中配置两个主菜单：
+5. 在机器人菜单中配置三个主菜单：
    - 主菜单 `TASK` 下添加四个子菜单，动作均选择“推送事件”：
      - “当前 Task” → Event Key `current_task`
      - “选择 Task” → Event Key `select_task`
      - “新建 Task” → Event Key `new_task`
      - “归档当前 Task” → Event Key `archive_task`
    - 主菜单“额度用量”直接选择“推送事件” → Event Key `codex_usage`
+   - 主菜单“接续桌面”直接选择“推送事件” → Event Key `sync_desktop`
 6. 创建并发布新的飞书应用版本；发布成功后菜单可能需要约 5 分钟生效。机器人菜单仅在与 Bot 的单聊中显示。
 
 可用下面的临时监听获得用户的 `open_id`。启动后让该用户给 Bot 发一条消息，输出中的 `sender_id` 即 `ou_...`：
@@ -198,7 +201,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
    - 点击“添加用户”可继续添加白名单用户；
 3. 群 Chat ID 可留空，先使用与 Bot 的单聊；
 4. 点击“开启桥接”；
-5. 确认 App 中的五个 Event Key 与飞书后台完全一致，然后点击飞书 Bot 菜单 `TASK` →“当前 Task”。
+5. 确认 App 中的六个 Event Key 与飞书后台完全一致，然后点击飞书 Bot 菜单“接续桌面”做一次桌面结果同步测试。
 
 未授权用户也可以先私聊 Bot 发任意消息。Bot 只会登记访问申请，不会开放任何 Task；机主在 App 的“待审批访问申请”中点击“配置授权”，填写明确项目并保存后才会生效。
 
@@ -208,6 +211,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 - 点击 Bot 菜单 `TASK` →“当前 Task” → 在聊天底部打开最新状态卡；仅在尚未选择 Task 时进入选择页面
 - 点击 Bot 菜单 `TASK` →“选择 Task” → 卡片只负责先选择项目、再从完整列表中选择 `项目 · Task 标题`
+- 点击 Bot 菜单“接续桌面” → 优先接续最近使用且仍在运行的桌面 Task；没有运行中的 Task 时读取最近使用 Task 的最新完成结果。运行中的订阅跨桥接重启保留，完成后自动推送文字、图片和明确链接的结果文件
 - 点击 Bot 菜单“额度用量” → 打开独立用量卡；卡片内可继续选择“当日 Task 用量分析”或“当期 Task 用量分析”，查看有权访问项目中的 Task Token 排名、占比、单次模型调用用量、主要消耗原因及是否偏高。“当日”从本地当天 00:00 开始，“当期”与当前 Codex 主额度重置周期一致；Token 用于 Task 间比较和异常诊断，不等同于官方额度或账单的按 Task 扣减
 - 多个 Task 并行时，运行进度不会改变当前 Task；某个 Task 完成、失败或停止并返回最终内容后，当前 Task 自动跟随该结果。下一条消息会直接进入刚返回结果的 Task；随后另一个 Task 再返回时，当前 Task继续跟随最新结果
 - 在 Task 卡的“显示范围”中切换“全部 Task / 最近使用 / 我的收藏”；可收藏或取消收藏当前 Task
@@ -251,7 +255,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 ~/.codex/log/feishu-bridge.log
 ```
 
-`config.json` 保存 Profile 名、用户白名单、项目权限和本机 workflow 映射，不保存 App Secret。`state.json` 按用户分别保存当前 Task、收藏/最近记录、最近对话摘要、访问申请、搜索/分页状态、待执行输入队列，以及尚未送达飞书的最终文字、图片、文件或卡片。本地待补发图片和文件分别复制到 `~/.codex/feishu-bridge/reply-images/` 与 `reply-files/`，送达后自动删除。`workflow-state.json` 保存主动通知 outbox、单次决策与恢复状态；`workflow-decision-inbox/` 在飞书 ACK 前以逐事件 `0600` 文件暂存 workflow callback，业务副作用完成后删除。队列跨桥接重启保留；配置、状态、inbox、socket 与日志都限制为仅当前 macOS 用户可访问。
+`config.json` 保存 Profile 名、用户白名单、项目权限和本机 workflow 映射，不保存 App Secret。`state.json` 按用户分别保存当前 Task、收藏/最近记录、最近对话摘要、桌面结果订阅、访问申请、搜索/分页状态、待执行输入队列，以及尚未送达飞书的最终文字、图片、文件或卡片。本地待补发图片和文件分别复制到 `~/.codex/feishu-bridge/reply-images/` 与 `reply-files/`，送达后自动删除。`workflow-state.json` 保存主动通知 outbox、单次决策与恢复状态；`workflow-decision-inbox/` 在飞书 ACK 前以逐事件 `0600` 文件暂存 workflow callback，业务副作用完成后删除。队列和桌面结果订阅跨桥接重启保留；配置、状态、inbox、socket 与日志都限制为仅当前 macOS 用户可访问。
 
 ## 从源码构建
 
