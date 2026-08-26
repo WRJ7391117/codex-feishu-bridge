@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.9.2 (build 38)
+
+- Keeps the “接续桌面 Task” intent while the user filters projects and selects another Task.
+- Returns the same card to a confirmation state after selection, showing the newly selected project, Task, and Desktop status before any subscription is created.
+- Keeps the handoff-selection context isolated per authorized Feishu user and preserves ordinary Task-menu selection behavior.
+
 ## 1.9.1 (build 37, unreleased)
 
 - Renames the top-level Feishu menu to “接续桌面 Task” so its Codex Desktop Task handoff purpose is visible at a glance.

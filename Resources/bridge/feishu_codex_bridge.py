@@ -4419,7 +4419,10 @@ def build_desktop_sync_confirmation_card(
                     "type": "default",
                     "width": "fill",
                     "behaviors": [
-                        {"type": "callback", "value": {"action": "show_task_selector"}}
+                        {
+                            "type": "callback",
+                            "value": {"action": "show_desktop_sync_task_selector"},
+                        }
                     ],
                 },
                 {
@@ -5643,8 +5646,9 @@ def remember_card_context(
     user_id: str,
     message_id: str,
     card: dict[str, Any],
+    context_type_override: str = "",
 ) -> None:
-    context_type = card_context_type(card)
+    context_type = context_type_override or card_context_type(card)
     if not message_id.startswith("om_") or not context_type:
         return
     contexts = state.setdefault("card_contexts", {})
@@ -8585,10 +8589,12 @@ def handle_card_event(event: dict[str, Any]) -> None:
             "cancel_archive",
             "restore_task",
             "show_task_selector",
+            "show_desktop_sync_task_selector",
             "show_archived_tasks",
             "show_new_task",
         }:
             status_change = ""
+            context_type_override = ""
             with _state_lock:
                 state = load_state()
                 if not mark_processed(state, f"card:{event_id}"):
@@ -8650,6 +8656,10 @@ def handle_card_event(event: dict[str, Any]) -> None:
                 elif action == "show_task_selector":
                     save_state(state)
                     card = task_card_for_state(user_id, state)
+                elif action == "show_desktop_sync_task_selector":
+                    save_state(state)
+                    card = task_card_for_state(user_id, state)
+                    context_type_override = "desktop_sync_selection"
                 elif action == "show_archived_tasks":
                     state.setdefault("archived_task_pages", {})[user_id] = 0
                     save_state(state)
@@ -8779,7 +8789,13 @@ def handle_card_event(event: dict[str, Any]) -> None:
             if message_id:
                 with _state_lock:
                     current_state = load_state()
-                    remember_card_context(current_state, user_id, message_id, card)
+                    remember_card_context(
+                        current_state,
+                        user_id,
+                        message_id,
+                        card,
+                        context_type_override,
+                    )
             if token and update_card(token, card):
                 if status_change:
                     if action == "toggle_task_favorite":
@@ -8961,7 +8977,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         and element.get("name")
         in {"project_selector", "task_selector", "task_scope_selector"}
         for element in elements
-    ) or context_type == "tasks"
+    ) or context_type in {"tasks", "desktop_sync_selection"}
     if action_tag != "select_static":
         log(
             "card ignored reason=unsupported-action "
@@ -8992,6 +9008,11 @@ def handle_card_event(event: dict[str, Any]) -> None:
         log(f"card selector inferred name={action_name}")
     with _state_lock:
         state = load_state()
+        context_type_override = (
+            "desktop_sync_selection"
+            if context_type == "desktop_sync_selection"
+            else ""
+        )
         if chat_id and not is_authorized_chat(state, user_id, chat_id):
             if not recognized_card:
                 log("card ignored reason=unrecognized-chat-and-card")
@@ -9029,14 +9050,30 @@ def handle_card_event(event: dict[str, Any]) -> None:
             state.setdefault("last_projects", {})[user_id] = selected["project"]
             remember_recent_task(state, user_id, str(selected["id"]))
             save_state(state)
-            card = task_card_for_state(
-                user_id,
-                state,
-                selection_changed=True,
-                selected_id_override=str(selected["id"]),
-            )
+            if context_type == "desktop_sync_selection":
+                snapshot = latest_rollout_turn(
+                    rollout_path_for_task(str(selected["id"]))
+                )
+                card = build_desktop_sync_confirmation_card(
+                    selected,
+                    str(snapshot.get("status") or "none"),
+                )
+                context_type_override = "desktop_sync_confirmation"
+            else:
+                card = task_card_for_state(
+                    user_id,
+                    state,
+                    selection_changed=True,
+                    selected_id_override=str(selected["id"]),
+                )
         if message_id:
-            remember_card_context(state, user_id, message_id, card)
+            remember_card_context(
+                state,
+                user_id,
+                message_id,
+                card,
+                context_type_override,
+            )
     visible_count = (
         len([task for task in tasks if task["project"] == selected_value])
         if action_name == "project_selector"
@@ -9053,7 +9090,9 @@ def handle_card_event(event: dict[str, Any]) -> None:
             refresh_user_task_identity_cards(user_id, "当前 Task 已切换", selected)
         return
     if message_id:
-        if action_name == "project_selector":
+        if context_type == "desktop_sync_selection":
+            patch_card(message_id, card)
+        elif action_name == "project_selector":
             reply(message_id, "项目筛选已更新，请重新打开 Task 菜单。", f"project-{event_id}")
         elif action_name == "task_scope_selector":
             reply(message_id, "Task 显示范围已更新。", f"task-scope-{event_id}")

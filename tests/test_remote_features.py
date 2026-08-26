@@ -781,8 +781,138 @@ class RemoteFeatureTests(unittest.TestCase):
             buttons["接续这个 Task"]["behaviors"][0]["value"],
             {"action": "confirm_desktop_sync", "task_id": "task-a"},
         )
-        self.assertIn("选择其他 Task", buttons)
+        self.assertEqual(
+            buttons["选择其他 Task"]["behaviors"][0]["value"],
+            {"action": "show_desktop_sync_task_selector"},
+        )
         self.assertIn("取消", buttons)
+
+    def test_desktop_sync_task_selection_returns_to_confirmation(self):
+        tasks = self.tasks()
+        self.bridge.recent_tasks = lambda user_id: tasks
+        self.bridge.rollout_path_for_task = (
+            lambda task_id: Path(self.temporary.name) / f"{task_id}.missing"
+        )
+        self.bridge.patch_card = mock.Mock(return_value=True)
+        self.bridge.update_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-show-desktop-sync-selector",
+                "message_id": "om_sync",
+                "chat_id": "oc_test",
+                "operator_id": "ou_admin",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "show_desktop_sync_task_selector"}
+                ),
+            }
+        )
+
+        state = self.bridge.load_state()
+        self.assertEqual(
+            state["card_contexts"]["om_sync"],
+            {"user_id": "ou_admin", "type": "desktop_sync_selection"},
+        )
+        selector_card = self.bridge.patch_card.call_args.args[1]
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-filter-desktop-sync-project",
+                "message_id": "om_sync",
+                "chat_id": "oc_test",
+                "operator_id": "ou_admin",
+                "action_tag": "select_static",
+                "action_name": "project_selector",
+                "option": "deepori",
+                "token": "token-project",
+                "card_content": json.dumps(selector_card),
+            }
+        )
+
+        state = self.bridge.load_state()
+        self.assertEqual(
+            state["card_contexts"]["om_sync"],
+            {"user_id": "ou_admin", "type": "desktop_sync_selection"},
+        )
+        selector_card = self.bridge.update_card.call_args.args[1]
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-select-desktop-sync-task",
+                "message_id": "om_sync",
+                "chat_id": "oc_test",
+                "operator_id": "ou_admin",
+                "action_tag": "select_static",
+                "action_name": "task_selector",
+                "option": "task-b",
+                "token": "token-test",
+                "card_content": json.dumps(selector_card),
+            }
+        )
+
+        state = self.bridge.load_state()
+        self.assertEqual(state["selected"]["ou_admin"], "task-b")
+        self.assertNotIn(
+            "ou_admin",
+            state.get("desktop_result_subscriptions", {}),
+        )
+        confirmation = self.bridge.update_card.call_args.args[1]
+        self.assertEqual(confirmation["header"]["title"]["content"], "Task：Site")
+        buttons = {
+            element.get("text", {}).get("content"): element
+            for element in confirmation["body"]["elements"]
+            if element.get("tag") == "button"
+        }
+        self.assertEqual(
+            buttons["接续这个 Task"]["behaviors"][0]["value"],
+            {"action": "confirm_desktop_sync", "task_id": "task-b"},
+        )
+        self.assertEqual(
+            state["card_contexts"]["om_sync"],
+            {"user_id": "ou_admin", "type": "desktop_sync_confirmation"},
+        )
+
+    def test_desktop_sync_task_selection_context_is_isolated_per_user(self):
+        tasks = self.tasks()
+        self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
+        self.bridge.recent_tasks = lambda user_id: tasks
+        state = {
+            "selected": {"ou_admin": "task-a", "ou_miller": "task-c"},
+            "card_contexts": {
+                "om_sync_admin": {
+                    "user_id": "ou_admin",
+                    "type": "desktop_sync_selection",
+                },
+                "om_task_miller": {"user_id": "ou_miller", "type": "tasks"},
+            },
+        }
+        self.bridge.save_state(state)
+        self.bridge.update_card = mock.Mock(return_value=True)
+        self.bridge.rollout_path_for_task = (
+            lambda task_id: Path(self.temporary.name) / f"{task_id}.missing"
+        )
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-select-desktop-sync-isolated",
+                "message_id": "om_sync_admin",
+                "chat_id": "oc_test",
+                "operator_id": "ou_admin",
+                "action_tag": "select_static",
+                "action_name": "task_selector",
+                "option": "task-b",
+                "token": "token-test",
+            }
+        )
+
+        state = self.bridge.load_state()
+        self.assertEqual(state["selected"]["ou_admin"], "task-b")
+        self.assertEqual(state["selected"]["ou_miller"], "task-c")
+        self.assertEqual(
+            state["card_contexts"]["om_task_miller"],
+            {"user_id": "ou_miller", "type": "tasks"},
+        )
 
     def test_confirm_desktop_sync_subscribes_to_selected_running_task(self):
         task = self.tasks()[0]
