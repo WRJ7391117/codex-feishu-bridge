@@ -2452,6 +2452,94 @@ class RemoteFeatureTests(unittest.TestCase):
         )
         self.assertIn("confirm", buttons["使用备用 CLI…"])
 
+    def test_retry_desktop_immediately_disables_the_retry_button(self):
+        task = self.tasks()[0]
+        self.bridge.save_state(
+            {
+                "pending_cli_fallbacks": {
+                    "fallback-1": {
+                        "fallback_id": "fallback-1",
+                        "user_id": "ou_admin",
+                        "chat_id": "oc_test",
+                        "source_message_id": "om_source",
+                        "progress_message_id": "om_progress",
+                        "task": task,
+                        "content": "继续处理",
+                        "image_keys": [],
+                        "file_keys": [],
+                        "raw_content": "继续处理",
+                        "message_type": "text",
+                        "reason": "no-client-found",
+                        "created_at": time.time(),
+                    }
+                }
+            }
+        )
+        self.bridge.task_by_id = lambda task_id, user_id: task
+        self.bridge.patch_card = mock.Mock(return_value=True)
+        self.bridge.update_current_status_card = mock.Mock()
+        worker = mock.Mock()
+
+        with mock.patch.object(
+            self.bridge.threading,
+            "Thread",
+            return_value=worker,
+        ):
+            self.bridge.handle_card_event(
+                {
+                    "type": "card.action.trigger",
+                    "event_id": "evt-retry-desktop",
+                    "operator_id": "ou_admin",
+                    "chat_id": "oc_test",
+                    "message_id": "om_progress",
+                    "action_tag": "button",
+                    "action_value": json.dumps(
+                        {
+                            "action": "retry_desktop",
+                            "fallback_id": "fallback-1",
+                        }
+                    ),
+                }
+            )
+
+        run = next(iter(self.bridge._active_runs.values()))
+        self.assertEqual(run["outcome"], "desktop_retrying")
+        card = self.bridge.patch_card.call_args.args[1]
+        retry_button = next(
+            item
+            for item in card["body"]["elements"]
+            if item.get("tag") == "button"
+        )
+        self.assertEqual(retry_button["text"]["content"], "正在重试 Desktop…")
+        self.assertTrue(retry_button["disabled"])
+        self.assertNotIn("behaviors", retry_button)
+        worker.start.assert_called_once()
+        self.bridge.remove_active_run(str(run["run_id"]))
+
+    def test_retry_desktop_becomes_running_after_desktop_accepts(self):
+        run = self.bridge.new_run(
+            "ou_admin",
+            "oc_test",
+            "om_source",
+            self.tasks()[0],
+            [],
+            [],
+            "om_progress",
+        )
+        run["outcome"] = "desktop_retrying"
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge.message_run_started(run, "Codex Desktop 已接收，正在运行")
+
+        self.assertEqual(run["outcome"], "running")
+        card = self.bridge.patch_card.call_args.args[1]
+        button = next(
+            item
+            for item in card["body"]["elements"]
+            if item.get("tag") == "button"
+        )
+        self.assertEqual(button["text"]["content"], "停止运行…")
+
     def test_cli_fallback_button_starts_only_after_explicit_confirmation(self):
         task = self.tasks()[0]
         self.bridge.save_state(

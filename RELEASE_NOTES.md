@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.9.3 (build 39)
+
+- Immediately disables the “重试 Desktop” action and shows “正在重试 Desktop…” after the callback is accepted, preventing ambiguous repeated taps.
+- Changes the card to the normal running state only after Codex Desktop accepts the Task; a failed retry restores the explicit Desktop/CLI/cancel choices.
+- Retains backend event idempotency and same-Task run exclusion as independent duplicate-submission protection.
+
 ## 1.9.2 (build 38)
 
 - Keeps the “接续桌面 Task” intent while the user filters projects and selects another Task.

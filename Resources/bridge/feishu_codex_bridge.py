@@ -4492,6 +4492,7 @@ def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
     templates = {
         "running": ("blue", "运行中", "blue"),
         "approval": ("yellow", "等待授权", "yellow"),
+        "desktop_retrying": ("blue", "正在重试", "blue"),
         "desktop_unavailable": ("yellow", "等待选择", "yellow"),
         "completed": ("green", "已完成", "green"),
         "stopped": ("grey", "已停止", "neutral"),
@@ -4535,6 +4536,16 @@ def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
                         "content": "只有确认后才会停止。取消可继续等待，已完成的工作会保留。",
                     },
                 },
+            }
+        )
+    elif outcome == "desktop_retrying":
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "正在重试 Desktop…"},
+                "type": "default",
+                "width": "fill",
+                "disabled": True,
             }
         )
     elif outcome == "desktop_unavailable" and run.get("fallback_id"):
@@ -7885,7 +7896,7 @@ def message_run_started(run: dict[str, Any], status: str) -> None:
         str(run["user_id"]),
         str(run["task"]["id"]),
     )
-    set_run_progress(run, status, force=True)
+    set_run_progress(run, status, "running", force=True)
 
 
 def process_message_run(
@@ -8481,6 +8492,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
                 else "正在重新连接 Codex Desktop"
             )
             run["use_cli_fallback"] = action == "use_cli_fallback"
+            if action == "retry_desktop":
+                run["outcome"] = "desktop_retrying"
             if not claim_active_run(run):
                 reply(
                     message_id,
