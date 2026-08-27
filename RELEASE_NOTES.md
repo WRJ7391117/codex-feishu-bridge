@@ -1,5 +1,43 @@
 # Release Notes
 
+## 1.9.10 (build 46)
+
+- Renames the Desktop handoff submenu from “切换 Task 接续” to the clearer “接续其他 Task” while keeping the compatible `sync_desktop_switch` Event Key unchanged.
+- Keeps the distributable example configuration at zero project access until the Mac owner explicitly authorizes projects, and includes all seven Bot menu Event Keys.
+
+## 1.9.9 (build 45)
+
+- Splits the top-level “接续桌面 Task” menu into “接续当前 Task” and “切换 Task 接续” submenus while preserving the existing `sync_desktop` Event Key.
+- Adds `sync_desktop_switch` to open the Task selector directly in Desktop handoff mode; choosing a Task proceeds to the existing handoff confirmation card.
+- Keeps the current Task path deterministic: no valid current Task enters the same explicit selection flow instead of guessing from Desktop recency.
+
+## 1.9.8 (build 44)
+
+- Renames the user-facing “选择 Task” entry and card language to “切换 Task” while keeping the compatible `select_task` Event Key unchanged.
+- Adds “取消切换” whenever a current Task exists; canceling preserves the selected Task and message route, restores its Project filter, and makes the result explicit on the same card.
+- In the “接续桌面 Task” flow, canceling only the Task switch returns to the original current-Task confirmation instead of canceling the entire Desktop handoff.
+
+## 1.9.7 (build 43)
+
+- Rejects a Task tap from a Project list that has already been replaced, keeps the current Task unchanged, and refreshes the same card to the latest Project with a clear retry prompt.
+- Coalesces repeated taps on the same non-destructive control so an older queued Project, page, refresh, or usage intent cannot waste another card update after a newer tap arrives.
+- Updates the primary selection card first, then coalesces run, approval, queue, and current-status identity refreshes in an application-lifecycle background worker instead of blocking the user's event lane.
+- Moves Codex archive and restore calls outside the global state lock, shows an immediate processing state, restores an actionable card on failure, and records privacy-safe per-action, Feishu API, Desktop, queue, and background-refresh latency.
+
+## 1.9.6 (build 42)
+
+- Reads only the newest complete Codex turn from the end of large rollout files instead of rescanning the entire Task history whenever “接续桌面 Task” opens.
+- Reduces the measured snapshot read for a real 162.8 MB Task from about 3.9 seconds to under one millisecond and keeps incomplete trailing JSONL records retryable.
+- Caps a new Feishu menu-card send at five seconds, records its latency, and durably retries a timed-out send with the same idempotency key and card context.
+
+## 1.9.5 (build 41)
+
+- Immediately acknowledges every Feishu card action with a visible “正在处理…” toast while preserving the synchronous callback response required to avoid `108002`.
+- Serializes events per authorized user while allowing different users to proceed independently, and moves maintenance/retry work off the ingress loop.
+- Limits the first card-update attempt to three seconds, persists failures immediately, retries card patches after 2/5/15-second backoff, and keeps Feishu network failures from blocking later callbacks.
+- Records privacy-safe queue, total-event, and Feishu card-update latency without user, Chat, project, Task, event, or message identifiers.
+- Updates the original selection card directly when the callback-token update fails, avoiding a separate fallback message and an unnecessary menu reopen.
+
 ## 1.9.4 (build 40)
 
 - Automatically activates the exact target Task through Codex Desktop's supported deep link after the first definite `no-client-found`, then retries through the existing Desktop IPC path.

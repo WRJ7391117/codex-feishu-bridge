@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -230,6 +231,79 @@ class RuntimeCompatibilityTests(unittest.TestCase):
         self.assertEqual(message, "blocked")
         self.assertEqual(images, [])
         self.bridge.run_codex_via_desktop.assert_not_called()
+
+    def test_event_lane_preserves_same_user_order(self):
+        handled = []
+        completed = threading.Event()
+
+        def handle(event):
+            handled.append(event["sequence"])
+            if len(handled) == 2:
+                completed.set()
+
+        with mock.patch.object(self.bridge, "dispatch_event", side_effect=handle), mock.patch.object(
+            self.bridge,
+            "acknowledge_workflow_decision_inbox",
+        ):
+            self.bridge.submit_event({"operator_id": "ou_same", "sequence": 1})
+            self.bridge.submit_event({"operator_id": "ou_same", "sequence": 2})
+            self.assertTrue(completed.wait(1))
+
+        self.assertEqual(handled, [1, 2])
+
+    def test_latest_ui_intent_supersedes_an_older_matching_control(self):
+        first = {
+            "type": "card.action.trigger",
+            "operator_id": "ou_same",
+            "message_id": "om_card",
+            "action_tag": "select_static",
+            "action_name": "project_selector",
+        }
+        second = dict(first)
+
+        self.bridge.register_ui_intent(first)
+        self.bridge.register_ui_intent(second)
+
+        self.assertFalse(self.bridge.ui_intent_is_current(first))
+        self.assertTrue(self.bridge.ui_intent_is_current(second))
+
+    def test_project_and_task_selectors_have_independent_intents(self):
+        project = {
+            "type": "card.action.trigger",
+            "operator_id": "ou_same",
+            "message_id": "om_card",
+            "action_tag": "select_static",
+            "action_name": "project_selector",
+        }
+        task = {**project, "action_name": "task_selector"}
+
+        self.bridge.register_ui_intent(project)
+        self.bridge.register_ui_intent(task)
+
+        self.assertTrue(self.bridge.ui_intent_is_current(project))
+        self.assertTrue(self.bridge.ui_intent_is_current(task))
+
+    def test_slow_user_lane_does_not_block_another_user(self):
+        slow_started = threading.Event()
+        release_slow = threading.Event()
+        fast_completed = threading.Event()
+
+        def handle(event):
+            if event["operator_id"] == "ou_slow":
+                slow_started.set()
+                release_slow.wait(1)
+            else:
+                fast_completed.set()
+
+        with mock.patch.object(self.bridge, "dispatch_event", side_effect=handle), mock.patch.object(
+            self.bridge,
+            "acknowledge_workflow_decision_inbox",
+        ):
+            self.bridge.submit_event({"operator_id": "ou_slow"})
+            self.assertTrue(slow_started.wait(1))
+            self.bridge.submit_event({"operator_id": "ou_fast"})
+            self.assertTrue(fast_completed.wait(0.5))
+            release_slow.set()
 
 
 if __name__ == "__main__":

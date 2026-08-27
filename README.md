@@ -2,11 +2,13 @@
 
 把飞书 Bot 变成 Codex Desktop 的移动入口：在飞书里按项目选择桌面版左侧栏中的 Task，发送文字、图片、文件或音频，并接收可更新的运行状态和最终结果。
 
-版本说明：当前源码和本机构建为 `1.9.4 (build 40)`；最新公开 Release 为 `1.9.4 (build 40)`。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.9.10 (build 46)`；最新公开 Release 为 `1.9.4 (build 40)`。不得用旧版本或同版本不同构建覆盖。
+
+面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
 ## 能力
 
-- 飞书机器人一级菜单为 `TASK`、“接续桌面 Task”和“额度用量”；`TASK` 下提供“当前 Task”“选择 Task”“新建 Task”“归档当前 Task”四个二级入口
+- 飞书机器人一级菜单为 `TASK`、“接续桌面 Task”和“额度用量”；`TASK` 下提供“当前 Task”“切换 Task”“新建 Task”“归档当前 Task”四个二级入口，“接续桌面 Task”下提供“接续当前 Task”“接续其他 Task”两个二级入口
 - “接续桌面 Task”只读取该飞书用户在桥接中选择的当前 Task，并先显示项目、Task 标题和桌面状态供确认；没有有效当前 Task 时只打开选择卡，不自动猜测其他 Task
 - 按 `项目 · Task 标题` 显示所有未归档本地 Task，每页 50 条，可翻页和按标题搜索
 - 选中后持续保持当前 Task；并行 Task 返回最终结果时，当前 Task 自动跟随最后送达的结果，便于直接继续追问
@@ -20,8 +22,8 @@
 - 按 Codex 项目限制每位用户可查看和提交的 Task
 - 未授权用户可在 Bot 单聊中自助提交申请，由 Mac 机主在 App 中分配明确项目后生效
 - 可从独立卡片选择项目后新建 Task，也可在卡片中明确取消并退出新建流程
-- 可在“选择 Task”卡片中查看已归档 Task，恢复后自动设为当前 Task
-- 归档成功后可立即撤销归档、选择其他 Task 或新建 Task
+- 可在“切换 Task”卡片中查看已归档 Task，恢复后自动设为当前 Task
+- 归档成功后可立即撤销归档、切换到其他 Task 或新建 Task
 - 将飞书文字、图片、文档、代码文件和音频提交给同一个 Codex Desktop Task
 - 支持单张图片消息和富文本中的多张图片，默认每轮最多 4 张、单张 20 MB
 - 使用同一张进度卡持续更新“读取附件、运行、使用工具、整理回复、等待授权、完成”等阶段
@@ -72,9 +74,9 @@
 
 飞书消息运行期间，Codex Desktop 仍会提示该 Task“已在另一个应用中打开”，以避免两个客户端同时写入；桥接会主动加载完整历史，因此桌面版可在提示下方只读查看已有内容和实时更新。飞书运行完成后，桌面版恢复可输入状态。
 
-### 本机 workflow 通知入口
+### 可选私有扩展：Ori One workflow 通知
 
-workflow 模式默认关闭。安装后使用专用 `workflow-config` 配置，不要用通用 `jq`、命令参数或日志处理含本机标识的 `config.json`。`--enable` 只从 stdin 读取置顶专用 Codex Task UUID，自动选择已经同时存在于 legacy sender 和用户白名单中的本机用户；它不会猜测 Chat。Chat 留空时，以首张卡实际返回并写入持久 outbox 的 Chat 关联为准。
+这一扩展不属于通用桥接的产品承诺，不出现在首次连接向导中，并且默认关闭。它保留给明确需要 Ori One 自动研发通知的私有部署。安装后使用专用 `workflow-config` 配置，不要用通用 `jq`、命令参数或日志处理含本机标识的 `config.json`。`--enable` 只从 stdin 读取置顶专用 Codex Task UUID，自动选择已经同时存在于 legacy sender 和用户白名单中的本机用户；它不会猜测 Chat。Chat 留空时，以首张卡实际返回并写入持久 outbox 的 Chat 关联为准。
 
 ```bash
 support="$HOME/Library/Application Support/Codex Feishu Bridge"
@@ -136,14 +138,9 @@ Task 忙碌或 Desktop 暂不可用时，恢复消息按 `created_at` 留在严�
 
 - macOS 13 或更新版本
 - 已安装并使用 Codex Desktop / ChatGPT Desktop
-- 已安装 [lark-cli](https://github.com/larksuite/cli)，仅用于首次配置和维护 Profile
 - 一个启用了机器人能力的飞书自建应用
 
-更新 lark-cli：
-
-```bash
-lark-cli update
-```
+App 已内置桥接所需的专用 `lark-cli`；普通用户无需先安装命令行工具。
 
 ### 2. 下载 App
 
@@ -151,17 +148,17 @@ lark-cli update
 
 若 Release 标注为 ad-hoc 签名且未经过 Apple 公证，另一台 Mac 首次打开时请在 Finder 中右键 App →“打开”。不要用脚本移除系统隔离属性。构建流程已支持 Developer ID 签名与 Apple 公证，是否已签名以对应 Release 说明和 `codesign` 验证结果为准。
 
-### 3. 配置 lark-cli Profile
+### 3. 使用首次连接向导
 
-推荐为桥接建立独立 Profile：
+首次打开 App 后点击“首次连接向导”，填写自己的飞书 App ID 和 App Secret。Secret 只通过 stdin 交给内置 `lark-cli`，由它存入 macOS Keychain，不会进入进程参数、桥接 `config.json` 或日志。
+
+需要用终端维护时，才使用系统 `lark-cli`：
 
 ```bash
-lark-cli config init --name codex-notify
 lark-cli --profile codex-notify doctor
 ```
 
-App Secret 由 lark-cli / macOS Keychain 管理，不写入本仓库或桥接的 `config.json`。
-App 运行时优先使用随安装包提供的 `1.0.89-codex-feishu.2`，它在官方 `v1.0.89` 基础上修复 `card.action.trigger` 的 WebSocket 回执类型，并在 Ori One 工作流决策回执前写入本机耐久 inbox；Profile 和 Keychain 凭据仍与系统 `lark-cli` 共用。通用桥接可用 `lark_cli_path` 覆盖，但启用 workflow 时必须使用该内置版本，否则健康检查会 fail closed。
+App 运行时优先使用随安装包提供的 `1.0.89-codex-feishu.3`，它在官方 `v1.0.89` 基础上修复 `card.action.trigger` 的 WebSocket 回执类型、同步显示“正在处理…”反馈，并在 Ori One 工作流决策回执前写入本机耐久 inbox；Profile 和 Keychain 凭据仍与系统 `lark-cli` 共用。通用桥接可用 `lark_cli_path` 覆盖，但启用 workflow 时必须使用该内置版本，否则健康检查会 fail closed。
 
 ### 4. 配置飞书开发者后台
 
@@ -176,14 +173,16 @@ App 运行时优先使用随安装包提供的 `1.0.89-codex-feishu.2`，它在�
 5. 在机器人菜单中配置三个主菜单：
    - 主菜单 `TASK` 下添加四个子菜单，动作均选择“推送事件”：
      - “当前 Task” → Event Key `current_task`
-     - “选择 Task” → Event Key `select_task`
+     - “切换 Task” → Event Key `select_task`
      - “新建 Task” → Event Key `new_task`
      - “归档当前 Task” → Event Key `archive_task`
    - 主菜单“额度用量”直接选择“推送事件” → Event Key `codex_usage`
-   - 主菜单“接续桌面 Task”直接选择“推送事件” → Event Key `sync_desktop`
+   - 主菜单“接续桌面 Task”下添加两个子菜单，动作均选择“推送事件”：
+     - “接续当前 Task” → Event Key `sync_desktop`
+     - “接续其他 Task” → Event Key `sync_desktop_switch`
 6. 创建并发布新的飞书应用版本；发布成功后菜单可能需要约 5 分钟生效。机器人菜单仅在与 Bot 的单聊中显示。
 
-可用下面的临时监听获得用户的 `open_id`。启动后让该用户给 Bot 发一条消息，输出中的 `sender_id` 即 `ou_...`：
+首次连接向导可启动一次两分钟监听。让机主给 Bot 发送一条单聊消息后，App 会自动识别 `open_id`，但不会自动授予任何项目。终端备用方式如下：
 
 ```bash
 lark-cli --profile codex-notify event consume im.message.receive_v1 \
@@ -194,32 +193,43 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 打开 `Codex 飞书桥接.app`，主控制窗口会自动出现：
 
-1. 点击“配置桥接”；
-2. 在“授权用户”中填写备注名、`open_id` 和允许项目；
+1. 完成“首次连接向导”的 Profile 检查和首位用户识别；
+2. 在“授权用户”中填写备注名，并从 Codex Desktop 左侧栏读取的项目列表中明确选择允许项目；
    - `*` 表示允许访问全部项目；
    - 多个项目用逗号分隔，名称必须与 Codex Desktop 左侧栏完全一致；
    - 点击“添加用户”可继续添加白名单用户；
 3. 群 Chat ID 可留空，先使用与 Bot 的单聊；
 4. 点击“开启桥接”；
-5. 确认 App 中的六个 Event Key 与飞书后台完全一致，然后点击飞书 Bot 菜单“接续桌面 Task”做一次桌面结果同步测试。
+5. 确认 App 中的七个 Event Key 与飞书后台完全一致，然后点击飞书 Bot 菜单“接续桌面 Task”做一次桌面结果同步测试。
 
 未授权用户也可以先私聊 Bot 发任意消息。Bot 只会登记访问申请，不会开放任何 Task；机主在 App 的“待审批访问申请”中点击“配置授权”，填写明确项目并保存后才会生效。
 
 关闭主窗口不会关闭后台桥接。再次点击 Dock 中的 App，或点击菜单栏双向箭头 →“打开控制中心”，即可重新打开窗口。
 
+### 6. 卸载或恢复
+
+控制中心的“移除后台服务…”会先确认队列为空，再停止 LaunchAgent 和事件总线、移除运行组件，同时保留飞书 Profile、授权配置、Task 状态和日志。以后重新打开 App 即可恢复安装；要移除 App 本身，再把它移到废纸篓。
+
+只有确认要同时清除本机 Profile、配置、状态和日志时，才运行完整清除；命令会要求在 stdin 中再次输入 `PURGE`：
+
+```bash
+"/Applications/Codex 飞书桥接.app/Contents/Resources/bridge/uninstall.sh" --purge
+```
+
 ## 飞书里的日常操作
 
 - 点击 Bot 菜单 `TASK` →“当前 Task” → 在聊天底部打开最新状态卡；仅在尚未选择 Task 时进入选择页面
-- 点击 Bot 菜单 `TASK` →“选择 Task” → 卡片只负责先选择项目、再从完整列表中选择 `项目 · Task 标题`
-- 点击 Bot 菜单“接续桌面 Task” → 卡片显示本人的桥接当前 Task、所属项目和桌面状态；确认“接续这个 Task”后，已完成结果立即推送，运行中的结果跨桥接重启持续跟踪并在完成后推送。若当前 Task 不准确，先点“选择其他 Task”；没有有效当前 Task 时桥接只打开选择卡，不会自动改选其他 Task
+- 点击 Bot 菜单 `TASK` →“切换 Task” → 卡片只负责先选择项目、再从完整列表中切换到 `项目 · Task 标题`；取消切换时保持原 Task
+- 点击 Bot 菜单“接续桌面 Task”→“接续当前 Task” → 卡片显示本人的桥接当前 Task、所属项目和桌面状态；确认“接续这个 Task”后，已完成结果立即推送，运行中的结果跨桥接重启持续跟踪并在完成后推送
+- 点击 Bot 菜单“接续桌面 Task”→“接续其他 Task” → 先切换 Task，再进入该 Task 的接续确认卡；没有有效当前 Task 时“接续当前 Task”也会进入同一选择流程，不会自动猜测其他 Task
 - 点击 Bot 菜单“额度用量” → 打开独立用量卡；卡片内可继续选择“当日 Task 用量分析”或“当期 Task 用量分析”，查看有权访问项目中的 Task Token 排名、占比、单次模型调用用量、主要消耗原因及是否偏高。“当日”从本地当天 00:00 开始，“当期”与当前 Codex 主额度重置周期一致；Token 用于 Task 间比较和异常诊断，不等同于官方额度或账单的按 Task 扣减
 - 多个 Task 并行时，运行进度不会改变当前 Task；某个 Task 完成、失败或停止并返回最终内容后，当前 Task 自动跟随该结果。下一条消息会直接进入刚返回结果的 Task；随后另一个 Task 再返回时，当前 Task继续跟随最新结果
 - 在 Task 卡的“显示范围”中切换“全部 Task / 最近使用 / 我的收藏”；可收藏或取消收藏当前 Task
 - 项目 Task 超过 50 条时点击“上一页/下一页”；发送“搜索 关键词”可按标题筛选，卡片中可一键清除搜索
 - 点击 Bot 菜单 `TASK` →“新建 Task” → 在独立卡片中选择项目并确认 → 发送 Task 标题 → Bot 创建并自动选择该 Task；点击“取消新建”可随时退出
 - 点击 Bot 菜单 `TASK` →“归档当前 Task” → 独立卡片显示当前 Task → 可取消或二次确认归档
-- 归档成功卡片可“撤销归档”“选择其他 Task”或“新建 Task”
-- 点击 Bot 菜单 `TASK` →“选择 Task” →“查看已归档 Task”→ 选择并确认恢复；恢复后自动成为当前 Task
+- 归档成功卡片可“撤销归档”“切换到其他 Task”或“新建 Task”
+- 点击 Bot 菜单 `TASK` →“切换 Task” →“查看已归档 Task”→ 选择并确认恢复；恢复后自动成为当前 Task
 - 选中一次后直接发送文字 → 始终继续当前 Task
 - 直接发送一张图片 → 图片进入当前 Task；没有附带文字时会使用中性的图片提示
 - 富文本消息可同时包含文字和多张图片
@@ -229,7 +239,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 - 收到授权卡片时，核对请求说明后点击“允许一次”或“拒绝”
 - Codex 返回图片 → Bot 先回复文字，再把图片回复在同一条消息下
 - Codex 返回本机 PDF、Office、文本或代码文件链接 → Bot 把文件作为附件回复在同一条消息下
-- 再次点击“选择 Task” → 切换到另一个 Task
+- 再次点击“切换 Task” → 切换到另一个 Task，或点击“取消切换”保留当前 Task
 - 发送“当前” → 查看当前 Task
 - 发送“对话” → 在消息中重新打开 Task 卡片
 - 发送“帮助” → 查看备用文字命令

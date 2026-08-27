@@ -319,6 +319,28 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertNotIn("归档当前 Task…", button_labels)
         self.assertIn("查看已归档 Task", button_labels)
         self.assertIn("刷新 Task 列表", button_labels)
+        self.assertIn("取消切换", button_labels)
+
+        cancel = next(
+            item
+            for item in card["body"]["elements"]
+            if item.get("text", {}).get("content") == "取消切换"
+        )
+        self.assertEqual(
+            cancel["behaviors"][0]["value"],
+            {"action": "cancel_task_switch", "task_id": "task-a"},
+        )
+
+    def test_task_card_without_current_task_has_no_cancel_switch_button(self):
+        card = self.bridge.build_task_card(self.tasks(), None, "deepori")
+
+        self.assertEqual(card["header"]["title"]["content"], "切换 Codex Task")
+        self.assertFalse(
+            any(
+                item.get("text", {}).get("content") == "取消切换"
+                for item in card["body"]["elements"]
+            )
+        )
 
     def test_task_card_separates_current_project_and_title(self):
         card = self.bridge.build_task_card(self.tasks(), "task-a", "deepori")
@@ -702,7 +724,7 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.bridge.send_task_card.assert_called_once()
 
-    def test_task_menu_event_keys_have_six_distinct_defaults(self):
+    def test_task_menu_event_keys_have_seven_distinct_defaults(self):
         event_keys = (
             self.bridge.CURRENT_TASK_MENU_EVENT_KEY,
             self.bridge.TASK_MENU_EVENT_KEY,
@@ -710,6 +732,7 @@ class RemoteFeatureTests(unittest.TestCase):
             self.bridge.ARCHIVE_TASK_MENU_EVENT_KEY,
             self.bridge.USAGE_MENU_EVENT_KEY,
             self.bridge.DESKTOP_SYNC_MENU_EVENT_KEY,
+            self.bridge.DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY,
         )
 
         self.assertEqual(
@@ -721,9 +744,10 @@ class RemoteFeatureTests(unittest.TestCase):
                 "archive_task",
                 "codex_usage",
                 "sync_desktop",
+                "sync_desktop_switch",
             ),
         )
-        self.assertEqual(len(set(event_keys)), 6)
+        self.assertEqual(len(set(event_keys)), 7)
 
     def test_latest_rollout_turn_reads_completed_desktop_result(self):
         rollout = Path(self.temporary.name) / "rollout.jsonl"
@@ -742,6 +766,62 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(snapshot["turn_id"], "turn-1")
         self.assertEqual(snapshot["message"], "桌面结果")
         self.assertEqual(snapshot["cursor_offset"], rollout.stat().st_size)
+
+    def test_latest_rollout_turn_stops_before_large_old_history(self):
+        rollout = Path(self.temporary.name) / "large-rollout.jsonl"
+        old = {
+            "type": "event_msg",
+            "payload": {"type": "old_history", "blob": "x" * (2 * 1024 * 1024)},
+        }
+        current = [
+            {
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-latest"},
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-latest",
+                    "last_agent_message": "最新结果",
+                },
+            },
+        ]
+        rollout.write_text(
+            json.dumps(old) + "\n"
+            + "".join(json.dumps(record) + "\n" for record in current),
+            encoding="utf-8",
+        )
+        original_loads = self.bridge.json.loads
+
+        def guarded_loads(value):
+            if b'"old_history"' in value:
+                raise AssertionError("old history should not be parsed")
+            return original_loads(value)
+
+        with mock.patch.object(self.bridge.json, "loads", side_effect=guarded_loads):
+            snapshot = self.bridge.latest_rollout_turn(rollout)
+
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["message"], "最新结果")
+
+    def test_latest_rollout_turn_ignores_incomplete_trailing_record(self):
+        rollout = Path(self.temporary.name) / "incomplete-rollout.jsonl"
+        complete = (
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "turn-running"},
+                }
+            )
+            + "\n"
+        )
+        rollout.write_text(complete + '{"type":"event_msg"', encoding="utf-8")
+
+        snapshot = self.bridge.latest_rollout_turn(rollout)
+
+        self.assertEqual(snapshot["status"], "running")
+        self.assertEqual(snapshot["cursor_offset"], len(complete.encode("utf-8")))
 
     def test_desktop_sync_menu_requires_confirmation_for_selected_current_task(self):
         task = self.tasks()[0]
@@ -766,8 +846,19 @@ class RemoteFeatureTests(unittest.TestCase):
             self.bridge.load_state().get("desktop_result_subscriptions", {}),
         )
         card = self.bridge.send_card.call_args.args[1]
-        self.assertEqual(card["header"]["title"]["content"], "Task：Home")
-        self.assertEqual(card["header"]["subtitle"]["content"], "项目：deepori")
+        self.assertEqual(
+            card["header"]["title"]["content"],
+            "从 Codex Desktop 回到飞书",
+        )
+        self.assertEqual(card["header"]["subtitle"]["content"], "deepori · Home")
+        self.assertIn(
+            "这是你在桥接中选择的当前 Task",
+            card["body"]["elements"][0]["content"],
+        )
+        self.assertIn(
+            "查看桌面端的最新结果，并在飞书继续沟通",
+            card["body"]["elements"][0]["content"],
+        )
         self.assertEqual(
             [tag["text"]["content"] for tag in card["header"]["text_tag_list"]],
             ["当前 Task", "运行中"],
@@ -778,14 +869,33 @@ class RemoteFeatureTests(unittest.TestCase):
             if element.get("tag") == "button"
         }
         self.assertEqual(
-            buttons["接续这个 Task"]["behaviors"][0]["value"],
+            buttons["接续当前 Task"]["behaviors"][0]["value"],
             {"action": "confirm_desktop_sync", "task_id": "task-a"},
         )
         self.assertEqual(
-            buttons["选择其他 Task"]["behaviors"][0]["value"],
+            buttons["接续其他 Task"]["behaviors"][0]["value"],
             {"action": "show_desktop_sync_task_selector"},
         )
-        self.assertIn("取消", buttons)
+        self.assertIn("暂不接续", buttons)
+
+    def test_desktop_sync_switch_menu_opens_selector_in_sync_context(self):
+        self.bridge.recent_tasks = lambda user_id: self.tasks()
+
+        self.bridge.handle_menu_event(
+            {
+                "event_id": "evt-desktop-sync-switch",
+                "event_key": "sync_desktop_switch",
+                "operator_id": "ou_admin",
+            }
+        )
+
+        card = self.bridge.send_card.call_args.args[1]
+        self.assertEqual(card["header"]["title"]["content"], "切换 Codex Task")
+        state = self.bridge.load_state()
+        self.assertEqual(
+            state["card_contexts"]["om_current_status"]["type"],
+            "desktop_sync_selection",
+        )
 
     def test_desktop_sync_task_selection_returns_to_confirmation(self):
         tasks = self.tasks()
@@ -810,10 +920,8 @@ class RemoteFeatureTests(unittest.TestCase):
         )
 
         state = self.bridge.load_state()
-        self.assertEqual(
-            state["card_contexts"]["om_sync"],
-            {"user_id": "ou_admin", "type": "desktop_sync_selection"},
-        )
+        self.assertEqual(state["card_contexts"]["om_sync"]["user_id"], "ou_admin")
+        self.assertEqual(state["card_contexts"]["om_sync"]["type"], "desktop_sync_selection")
         selector_card = self.bridge.patch_card.call_args.args[1]
 
         self.bridge.handle_card_event(
@@ -831,10 +939,8 @@ class RemoteFeatureTests(unittest.TestCase):
         )
 
         state = self.bridge.load_state()
-        self.assertEqual(
-            state["card_contexts"]["om_sync"],
-            {"user_id": "ou_admin", "type": "desktop_sync_selection"},
-        )
+        self.assertEqual(state["card_contexts"]["om_sync"]["user_id"], "ou_admin")
+        self.assertEqual(state["card_contexts"]["om_sync"]["type"], "desktop_sync_selection")
         selector_card = self.bridge.update_card.call_args.args[1]
 
         self.bridge.handle_card_event(
@@ -858,20 +964,22 @@ class RemoteFeatureTests(unittest.TestCase):
             state.get("desktop_result_subscriptions", {}),
         )
         confirmation = self.bridge.update_card.call_args.args[1]
-        self.assertEqual(confirmation["header"]["title"]["content"], "Task：Site")
+        self.assertEqual(
+            confirmation["header"]["title"]["content"],
+            "从 Codex Desktop 回到飞书",
+        )
+        self.assertEqual(confirmation["header"]["subtitle"]["content"], "deepori · Site")
         buttons = {
             element.get("text", {}).get("content"): element
             for element in confirmation["body"]["elements"]
             if element.get("tag") == "button"
         }
         self.assertEqual(
-            buttons["接续这个 Task"]["behaviors"][0]["value"],
+            buttons["接续当前 Task"]["behaviors"][0]["value"],
             {"action": "confirm_desktop_sync", "task_id": "task-b"},
         )
-        self.assertEqual(
-            state["card_contexts"]["om_sync"],
-            {"user_id": "ou_admin", "type": "desktop_sync_confirmation"},
-        )
+        self.assertEqual(state["card_contexts"]["om_sync"]["user_id"], "ou_admin")
+        self.assertEqual(state["card_contexts"]["om_sync"]["type"], "desktop_sync_confirmation")
 
     def test_desktop_sync_task_selection_context_is_isolated_per_user(self):
         tasks = self.tasks()
@@ -909,10 +1017,8 @@ class RemoteFeatureTests(unittest.TestCase):
         state = self.bridge.load_state()
         self.assertEqual(state["selected"]["ou_admin"], "task-b")
         self.assertEqual(state["selected"]["ou_miller"], "task-c")
-        self.assertEqual(
-            state["card_contexts"]["om_task_miller"],
-            {"user_id": "ou_miller", "type": "tasks"},
-        )
+        self.assertEqual(state["card_contexts"]["om_task_miller"]["user_id"], "ou_miller")
+        self.assertEqual(state["card_contexts"]["om_task_miller"]["type"], "tasks")
 
     def test_confirm_desktop_sync_subscribes_to_selected_running_task(self):
         task = self.tasks()[0]
@@ -943,6 +1049,8 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(subscription["turn_id"], "turn-running")
         card = self.bridge.patch_card.call_args.args[1]
         self.assertEqual(card["header"]["text_tag_list"][1]["text"]["content"], "运行中")
+        self.assertEqual(card["header"]["title"]["content"], "等待桌面端完成")
+        self.assertIn("完成后结果会自动推送到这里", card["body"]["elements"][0]["content"])
 
     def test_confirm_desktop_sync_rejects_stale_task_after_current_task_changes(self):
         current = self.tasks()[1]
@@ -964,7 +1072,10 @@ class RemoteFeatureTests(unittest.TestCase):
         )
 
         card = self.bridge.patch_card.call_args.args[1]
-        self.assertEqual(card["header"]["title"]["content"], "Task：Site")
+        self.assertEqual(
+            card["header"]["title"]["content"],
+            "从 Codex Desktop 回到飞书",
+        )
         self.assertIn("当前 Task 已变化", card["body"]["elements"][0]["content"])
         self.assertNotIn(
             "ou_admin",
@@ -982,7 +1093,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.patch_card = mock.Mock(return_value=True)
         self.bridge.reply_or_queue = mock.Mock(return_value=True)
         self.bridge.update_current_status_card = mock.Mock(return_value=True)
-        self.bridge.refresh_user_task_identity_cards = mock.Mock()
+        self.bridge.schedule_user_task_identity_refresh = mock.Mock()
         self.bridge.record_task_exchange = mock.Mock()
         self.bridge.follow_result_task = mock.Mock(return_value=True)
         state = self.bridge.load_state()
@@ -1023,7 +1134,6 @@ class RemoteFeatureTests(unittest.TestCase):
         task = self.tasks()[0]
         self.bridge.recent_tasks = lambda user_id: [task]
         self.bridge.selected_task = lambda user_id, state: None
-        self.bridge.send_task_card = mock.Mock(return_value=True)
 
         self.bridge.handle_menu_event(
             {
@@ -1033,12 +1143,17 @@ class RemoteFeatureTests(unittest.TestCase):
             }
         )
 
-        self.bridge.send_task_card.assert_called_once()
-        self.bridge.send_card.assert_not_called()
-        self.assertNotIn("ou_admin", self.bridge.load_state().get("selected", {}))
+        card = self.bridge.send_card.call_args.args[1]
+        self.assertEqual(card["header"]["title"]["content"], "切换 Codex Task")
+        state = self.bridge.load_state()
+        self.assertEqual(
+            state["card_contexts"]["om_current_status"]["type"],
+            "desktop_sync_selection",
+        )
+        self.assertNotIn("ou_admin", state.get("selected", {}))
         self.assertNotIn(
             "ou_admin",
-            self.bridge.load_state().get("desktop_result_subscriptions", {}),
+            state.get("desktop_result_subscriptions", {}),
         )
 
     def test_desktop_sync_confirmation_uses_each_users_independent_current_task(self):
@@ -1063,9 +1178,15 @@ class RemoteFeatureTests(unittest.TestCase):
 
         sent = [call.args for call in self.bridge.send_card.call_args_list]
         self.assertEqual(sent[0][0], "ou_admin")
-        self.assertEqual(sent[0][1]["header"]["title"]["content"], "Task：Home")
+        self.assertEqual(
+            sent[0][1]["header"]["subtitle"]["content"],
+            "deepori · Home",
+        )
         self.assertEqual(sent[1][0], "ou_miller")
-        self.assertEqual(sent[1][1]["header"]["title"]["content"], "Task：Site")
+        self.assertEqual(
+            sent[1][1]["header"]["subtitle"]["content"],
+            "deepori · Site",
+        )
 
     def test_confirm_desktop_sync_immediately_pushes_selected_completed_result(self):
         task = self.tasks()[0]
@@ -1083,7 +1204,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.patch_card = mock.Mock(return_value=True)
         self.bridge.reply_or_queue = mock.Mock(return_value=True)
         self.bridge.update_current_status_card = mock.Mock(return_value=True)
-        self.bridge.refresh_user_task_identity_cards = mock.Mock()
+        self.bridge.schedule_user_task_identity_refresh = mock.Mock()
         self.bridge.record_task_exchange = mock.Mock()
         self.bridge.follow_result_task = mock.Mock(return_value=False)
 
@@ -1156,6 +1277,7 @@ class RemoteFeatureTests(unittest.TestCase):
 
         card = self.bridge.patch_card.call_args.args[1]
         self.assertEqual(card["header"]["text_tag_list"][0]["text"]["content"], "已取消")
+        self.assertEqual(card["header"]["title"]["content"], "已取消从桌面接续")
         self.assertIn("当前 Task 保持不变", card["body"]["elements"][0]["content"])
         self.assertNotIn(
             "ou_admin",
@@ -1580,6 +1702,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.archive_codex_task = mock.Mock()
         self.bridge.reply = mock.Mock(return_value=True)
         self.bridge.update_card = mock.Mock(return_value=True)
+        self.bridge.patch_card = mock.Mock(return_value=True)
 
         self.bridge.handle_card_event(
             {
@@ -1600,7 +1723,7 @@ class RemoteFeatureTests(unittest.TestCase):
             "ou_admin",
             self.bridge.load_state().get("selected", {}),
         )
-        completed = self.bridge.update_card.call_args.args[1]
+        completed = self.bridge.patch_card.call_args.args[1]
         self.assertEqual(
             [tag["text"]["content"] for tag in completed["header"]["text_tag_list"]],
             ["已归档"],
@@ -1611,8 +1734,45 @@ class RemoteFeatureTests(unittest.TestCase):
                 for item in completed["body"]["elements"]
                 if item.get("tag") == "button"
             ],
-            ["撤销归档", "选择其他 Task", "新建 Task"],
+            ["撤销归档", "切换到其他 Task", "新建 Task"],
         )
+
+    def test_slow_archive_does_not_hold_global_state_lock(self):
+        task = self.tasks()[0]
+        self.bridge.save_state({"selected": {"ou_admin": "task-a"}})
+        self.bridge.selected_task = lambda user_id, state: task
+        self.bridge.active_run_for_task = lambda task_id: None
+        self.bridge.reply = mock.Mock(return_value=True)
+        self.bridge.update_card = mock.Mock(return_value=True)
+        self.bridge.patch_card = mock.Mock(return_value=True)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_archive(*args):
+            entered.set()
+            release.wait(1)
+
+        self.bridge.archive_codex_task = slow_archive
+        event = {
+            "event_id": "evt-slow-archive",
+            "operator_id": "ou_admin",
+            "chat_id": "oc_test",
+            "message_id": "om_archive_card",
+            "token": "token-test",
+            "action_tag": "button",
+            "action_value": json.dumps(
+                {"action": "archive_task", "task_id": "task-a"}
+            ),
+        }
+        worker = threading.Thread(target=self.bridge.handle_card_event, args=(event,))
+        worker.start()
+        self.assertTrue(entered.wait(0.5))
+        self.assertTrue(self.bridge._state_lock.acquire(timeout=0.2))
+        self.bridge._state_lock.release()
+        release.set()
+        worker.join(1)
+
+        self.assertFalse(worker.is_alive())
 
     def test_restore_callback_restores_and_selects_archived_task(self):
         task = self.tasks()[0]
@@ -1621,6 +1781,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.restore_codex_task = mock.Mock()
         self.bridge.reply = mock.Mock(return_value=True)
         self.bridge.update_card = mock.Mock(return_value=True)
+        self.bridge.patch_card = mock.Mock(return_value=True)
 
         self.bridge.handle_card_event(
             {
@@ -1640,7 +1801,7 @@ class RemoteFeatureTests(unittest.TestCase):
         state = self.bridge.load_state()
         self.assertEqual(state["selected"]["ou_admin"], "task-a")
         self.assertEqual(state["last_projects"]["ou_admin"], "deepori")
-        restored = self.bridge.update_card.call_args.args[1]
+        restored = self.bridge.patch_card.call_args.args[1]
         self.assertEqual(
             [tag["text"]["content"] for tag in restored["header"]["text_tag_list"]],
             ["当前 Task", "已恢复"],
@@ -1930,6 +2091,152 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(updated["header"]["subtitle"]["content"], "项目：deepori")
         self.assertIn("当前 Task 已切换", updated["body"]["elements"][0]["content"])
 
+    def test_cancel_task_switch_keeps_current_task_and_restores_its_project(self):
+        tasks = self.tasks()
+        task = tasks[0]
+        self.bridge.recent_tasks = lambda user_id: tasks
+        self.bridge.task_by_id = lambda task_id, user_id: next(
+            (candidate for candidate in tasks if candidate["id"] == task_id),
+            None,
+        )
+        self.bridge.update_card = mock.Mock(return_value=True)
+        state = {
+            "selected": {"ou_admin": task["id"]},
+            "last_projects": {"ou_admin": "thesis"},
+            "task_queries": {"ou_admin": "paper"},
+        }
+        self.bridge.remember_card_context(
+            state,
+            "ou_admin",
+            "om_switch",
+            self.bridge.build_task_card(tasks, task["id"], "thesis"),
+        )
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-cancel-switch",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "message_id": "om_switch",
+                "token": "token-test",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "cancel_task_switch", "task_id": task["id"]}
+                ),
+            }
+        )
+
+        saved = self.bridge.load_state()
+        self.assertEqual(saved["selected"]["ou_admin"], task["id"])
+        self.assertEqual(saved["last_projects"]["ou_admin"], task["project"])
+        self.assertNotIn("ou_admin", saved.get("task_queries", {}))
+        self.assertNotIn("om_switch", saved.get("card_contexts", {}))
+        card = self.bridge.update_card.call_args.args[1]
+        self.assertIn("已取消切换", card["body"]["elements"][0]["content"])
+        self.assertEqual(card["header"]["title"]["content"], "Task：Home")
+
+    def test_cancel_desktop_task_switch_returns_to_sync_confirmation(self):
+        tasks = self.tasks()
+        task = tasks[0]
+        self.bridge.recent_tasks = lambda user_id: tasks
+        self.bridge.task_by_id = lambda task_id, user_id: next(
+            (candidate for candidate in tasks if candidate["id"] == task_id),
+            None,
+        )
+        self.bridge.rollout_path_for_task = lambda task_id: None
+        self.bridge.update_card = mock.Mock(return_value=True)
+        state = {"selected": {"ou_admin": task["id"]}}
+        self.bridge.remember_card_context(
+            state,
+            "ou_admin",
+            "om_sync_switch",
+            self.bridge.build_task_card(tasks, task["id"], task["project"]),
+            "desktop_sync_selection",
+        )
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-cancel-sync-switch",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "message_id": "om_sync_switch",
+                "token": "token-test",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "cancel_task_switch", "task_id": task["id"]}
+                ),
+            }
+        )
+
+        card = self.bridge.update_card.call_args.args[1]
+        buttons = {
+            element.get("text", {}).get("content"): element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "button"
+        }
+        self.assertIn("接续当前 Task", buttons)
+        self.assertEqual(
+            self.bridge.load_state()["card_contexts"]["om_sync_switch"]["type"],
+            "desktop_sync_confirmation",
+        )
+
+    def test_old_task_list_cannot_override_a_new_project_selection(self):
+        tasks = self.tasks()
+        old_card = self.bridge.build_task_card(tasks, "task-a", "deepori")
+        new_card = self.bridge.build_task_card(tasks, "task-c", "thesis")
+        self.bridge.recent_tasks = lambda user_id: tasks
+        self.bridge.task_by_id = lambda task_id, user_id: next(
+            (task for task in tasks if task["id"] == task_id),
+            None,
+        )
+        self.bridge.update_card = mock.Mock(return_value=True)
+        state = {
+            "selected": {"ou_admin": "task-c"},
+            "last_projects": {"ou_admin": "thesis"},
+        }
+        self.bridge.remember_card_context(
+            state,
+            "ou_admin",
+            "om_task_card",
+            new_card,
+        )
+
+        self.bridge.handle_card_event(
+            {
+                "event_id": "evt-old-project-task",
+                "operator_id": "ou_admin",
+                "chat_id": "oc_test",
+                "message_id": "om_task_card",
+                "action_tag": "select_static",
+                "action_name": "task_selector",
+                "option": "task-b",
+                "token": "token-test",
+                "card_content": json.dumps(old_card),
+            }
+        )
+
+        saved = self.bridge.load_state()
+        self.assertEqual(saved["selected"]["ou_admin"], "task-c")
+        self.assertEqual(saved["last_projects"]["ou_admin"], "thesis")
+        updated = self.bridge.update_card.call_args.args[1]
+        self.assertIn("项目已经切换", updated["body"]["elements"][0]["content"])
+        selector = next(
+            element
+            for element in updated["body"]["elements"]
+            if element.get("name") == "task_selector"
+        )
+        self.assertEqual([option["value"] for option in selector["options"]], ["task-c"])
+
+    def test_identity_refresh_scheduler_coalesces_latest_state_per_user(self):
+        first, second = self.tasks()[:2]
+
+        self.bridge.schedule_user_task_identity_refresh("ou_admin", "第一次", first)
+        self.bridge.schedule_user_task_identity_refresh("ou_admin", "第二次", second)
+
+        pending = self.bridge._identity_refresh_pending["ou_admin"]
+        self.assertEqual(pending[0], "第二次")
+        self.assertEqual(pending[1], second)
+
     def test_task_scope_selector_switches_to_recent_use(self):
         tasks = self.tasks()
         original = self.bridge.build_task_card(tasks, "task-a", "deepori")
@@ -1979,7 +2286,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.recent_tasks = lambda user_id: self.tasks()
         self.bridge.selected_task = lambda user_id, state: task
         self.bridge.update_card = mock.Mock(return_value=True)
-        self.bridge.refresh_user_task_identity_cards = mock.Mock()
+        self.bridge.schedule_user_task_identity_refresh = mock.Mock()
 
         self.bridge.handle_card_event(
             {
@@ -2124,7 +2431,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.run_codex = lambda *args, **kwargs: (True, "A 的最终结果", [])
         self.bridge.restore_pending_task_name = lambda *args: False
         self.bridge.set_run_progress = mock.Mock()
-        self.bridge.refresh_user_task_identity_cards = mock.Mock()
+        self.bridge.schedule_user_task_identity_refresh = mock.Mock()
         self.bridge.update_current_status_card = lambda *args, **kwargs: True
         self.bridge.start_next_queued_input = lambda *args: None
         self.bridge.remove_active_run = lambda *args: None
@@ -2140,7 +2447,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(observed["selected"], task_a["id"])
         self.assertTrue(observed["content"].startswith("🟢 当前 Task\n"))
         self.assertIn("Task：Home", observed["content"])
-        self.bridge.refresh_user_task_identity_cards.assert_called_once_with(
+        self.bridge.schedule_user_task_identity_refresh.assert_called_once_with(
             "ou_admin",
             "当前 Task 已跟随最新结果",
             task_a,
@@ -2328,7 +2635,7 @@ class RemoteFeatureTests(unittest.TestCase):
             ["当前 Task", "等待选择"],
         )
 
-    def test_progress_card_patch_retries_a_transient_failure(self):
+    def test_progress_card_patch_moves_transient_failure_to_background(self):
         failure = subprocess.CompletedProcess(
             ["lark-cli"],
             4,
@@ -2346,15 +2653,30 @@ class RemoteFeatureTests(unittest.TestCase):
         with mock.patch.object(
             self.bridge.subprocess,
             "run",
-            side_effect=(failure, success),
-        ) as run, mock.patch.object(self.bridge.time, "sleep"):
+            return_value=failure,
+        ) as first_run:
             patched = self.bridge.patch_card(
                 "om_progress",
                 self.bridge.build_task_card(self.tasks(), "task-a", "deepori"),
             )
 
-        self.assertTrue(patched)
-        self.assertEqual(run.call_count, 2)
+        self.assertFalse(patched)
+        first_run.assert_called_once()
+        pending = self.bridge.load_state()["pending_replies"]
+        self.assertEqual(len(pending), 1)
+        with mock.patch.object(
+            self.bridge.subprocess,
+            "run",
+            return_value=success,
+        ) as background_run:
+            self.assertTrue(
+                self.bridge.retry_pending_replies(
+                    now=float(pending[0]["next_attempt_at"]),
+                )
+            )
+
+        background_run.assert_called_once()
+        self.assertEqual(self.bridge.load_state()["pending_replies"], [])
 
     def test_stop_button_uses_confirmed_desktop_interrupt_protocol(self):
         run = {

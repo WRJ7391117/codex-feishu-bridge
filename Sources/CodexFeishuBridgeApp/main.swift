@@ -86,6 +86,10 @@ private final class BridgeController: @unchecked Sendable {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/log/feishu-bridge.log")
     }
+    var desktopStateURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/.codex-global-state.json")
+    }
 
     private var bundledBridgeDirectory: URL? {
         Bundle.main.resourceURL?.appendingPathComponent("bridge", isDirectory: true)
@@ -103,6 +107,7 @@ private final class BridgeController: @unchecked Sendable {
             "workflow_config.py": "workflow-config",
             "control.sh": "control.sh",
             "diagnose.sh": "diagnose.sh",
+            "uninstall.sh": "uninstall.sh",
             "lark-cli": "lark-cli",
         ]
         return runtimeFiles.allSatisfy { bundledName, installedName in
@@ -132,6 +137,97 @@ private final class BridgeController: @unchecked Sendable {
         run(supportDirectory.appendingPathComponent("diagnose.sh").path, [])
     }
 
+    func uninstallKeepingData() -> CommandResult {
+        guard let script = bundledBridgeDirectory?.appendingPathComponent("uninstall.sh") else {
+            return CommandResult(status: 1, output: "卸载资源不存在")
+        }
+        return run(script.path, ["--keep-data"])
+    }
+
+    func configureLarkProfile(
+        profile: String,
+        appID: String,
+        appSecret: String
+    ) -> CommandResult {
+        guard let cli = bundledBridgeDirectory?.appendingPathComponent("lark-cli") else {
+            return CommandResult(status: 1, output: "App 内置 lark-cli 不存在")
+        }
+        return run(
+            cli.path,
+            [
+                "config", "init",
+                "--name", profile,
+                "--app-id", appID,
+                "--app-secret-stdin",
+                "--brand", "feishu",
+                "--lang", "zh_cn",
+            ],
+            standardInput: appSecret + "\n",
+            redacting: appSecret
+        )
+    }
+
+    func checkLarkProfile(_ profile: String) -> CommandResult {
+        guard let cli = bundledBridgeDirectory?.appendingPathComponent("lark-cli") else {
+            return CommandResult(status: 1, output: "App 内置 lark-cli 不存在")
+        }
+        return run(cli.path, ["--profile", profile, "doctor"])
+    }
+
+    func discoverFeishuUser(_ profile: String) -> CommandResult {
+        guard let cli = bundledBridgeDirectory?.appendingPathComponent("lark-cli") else {
+            return CommandResult(status: 1, output: "App 内置 lark-cli 不存在")
+        }
+        let result = run(
+            cli.path,
+            [
+                "--profile", profile,
+                "event", "consume", "im.message.receive_v1",
+                "--as", "bot",
+                "--max-events", "1",
+                "--timeout", "2m",
+            ]
+        )
+        guard result.status == 0 else {
+            return CommandResult(
+                status: result.status,
+                output: result.output.isEmpty ? "飞书消息监听启动失败。" : result.output
+            )
+        }
+        for line in result.output.split(whereSeparator: \.isNewline) {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data),
+                  let sender = findOpenID(in: object) else {
+                continue
+            }
+            return CommandResult(status: 0, output: sender)
+        }
+        return CommandResult(
+            status: 1,
+            output: "两分钟内没有收到 Bot 单聊消息。请确认应用已发布并订阅 im.message.receive_v1 后重试。"
+        )
+    }
+
+    private func findOpenID(in value: Any) -> String? {
+        if let object = value as? [String: Any] {
+            if let sender = object["sender_id"] as? String, sender.hasPrefix("ou_") {
+                return sender
+            }
+            for nested in object.values {
+                if let sender = findOpenID(in: nested) {
+                    return sender
+                }
+            }
+        } else if let values = value as? [Any] {
+            for nested in values {
+                if let sender = findOpenID(in: nested) {
+                    return sender
+                }
+            }
+        }
+        return nil
+    }
+
     func isRunning() -> Bool {
         control("status").output.trimmingCharacters(in: .whitespacesAndNewlines) == "on"
     }
@@ -142,6 +238,24 @@ private final class BridgeController: @unchecked Sendable {
             return [:]
         }
         return object
+    }
+
+    func codexProjectNames() -> [String] {
+        guard let data = try? Data(contentsOf: desktopStateURL),
+              let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let projects = state["local-projects"] as? [String: Any] else {
+            return []
+        }
+        return Array(
+            Set(
+                projects.values.compactMap { value in
+                    guard let project = value as? [String: Any] else { return nil }
+                    let name = String(describing: project["name"] ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    return name.isEmpty ? nil : name
+                }
+            )
+        ).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     func writeConfig(_ config: [String: Any]) throws {
@@ -271,7 +385,10 @@ private final class BridgeController: @unchecked Sendable {
         }
         let architectures = run(
             "/usr/bin/lipo",
-            ["-verify_arch", "arm64", "x86_64", app.appendingPathComponent("Contents/MacOS/CodexFeishuBridge").path]
+            [
+                app.appendingPathComponent("Contents/MacOS/CodexFeishuBridge").path,
+                "-verify_arch", "arm64", "x86_64",
+            ]
         )
         guard architectures.status == 0 else {
             throw BridgeUpdateError.message("更新包不是完整的 Universal App。")
@@ -346,22 +463,43 @@ private final class BridgeController: @unchecked Sendable {
     }
 
     private func run(_ executable: String, _ arguments: [String]) -> CommandResult {
+        run(executable, arguments, standardInput: nil, redacting: nil)
+    }
+
+    private func run(
+        _ executable: String,
+        _ arguments: [String],
+        standardInput: String?,
+        redacting secret: String?
+    ) -> CommandResult {
         guard FileManager.default.isExecutableFile(atPath: executable) else {
             return CommandResult(status: 1, output: "找不到可执行文件：\(executable)")
         }
         let process = Process()
         let pipe = Pipe()
+        let inputPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.standardOutput = pipe
         process.standardError = pipe
+        if standardInput != nil {
+            process.standardInput = inputPipe
+        }
         do {
             try process.run()
+            if let standardInput {
+                inputPipe.fileHandleForWriting.write(Data(standardInput.utf8))
+                try? inputPipe.fileHandleForWriting.close()
+            }
             process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            var output = String(data: data, encoding: .utf8) ?? ""
+            if let secret, !secret.isEmpty {
+                output = output.replacingOccurrences(of: secret, with: "[REDACTED]")
+            }
             return CommandResult(
                 status: process.terminationStatus,
-                output: String(data: data, encoding: .utf8) ?? ""
+                output: output
             )
         } catch {
             return CommandResult(status: 1, output: error.localizedDescription)
@@ -378,6 +516,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var authorizedUserCount = 0
     @Published var health = BridgeHealthSnapshot.empty
     @Published var pendingAccessRequests: [AccessRequestDraft] = []
+    @Published var showConnectionSetup = false
     @Published var showConfiguration = false
     @Published var showDiagnosis = false
     @Published var diagnosisPassed = false
@@ -398,7 +537,18 @@ private final class BridgeViewModel: ObservableObject {
     @Published var draftArchiveTaskEventKey = "archive_task"
     @Published var draftUsageEventKey = "codex_usage"
     @Published var draftDesktopSyncEventKey = "sync_desktop"
+    @Published var draftDesktopSyncSwitchEventKey = "sync_desktop_switch"
     @Published var draftMaxConcurrentRuns = 2
+    @Published var setupProfile = "codex-notify"
+    @Published var setupAppID = ""
+    @Published var setupAppSecret = ""
+    @Published var setupResult = ""
+    @Published var setupPassed = false
+    @Published var isConfiguringProfile = false
+    @Published var isDiscoveringUser = false
+    @Published var discoveredOpenID = ""
+    @Published var userDiscoveryResult = ""
+    @Published var availableProjects: [String] = []
 
     init(bridge: BridgeController) {
         self.bridge = bridge
@@ -533,8 +683,147 @@ private final class BridgeViewModel: ObservableObject {
         refresh()
     }
 
+    func prepareConnectionSetup() {
+        let configuredProfile = String(
+            describing: bridge.readConfig()["lark_profile"] ?? "codex-notify"
+        )
+        setupProfile = configuredProfile
+        setupAppID = ""
+        setupAppSecret = ""
+        setupResult = ""
+        setupPassed = false
+        discoveredOpenID = ""
+        userDiscoveryResult = ""
+        showConnectionSetup = true
+    }
+
+    func configureProfileAndCheck() {
+        guard !isConfiguringProfile else { return }
+        let profile = setupProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+        let appID = setupAppID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let appSecret = setupAppSecret
+        guard !profile.isEmpty else {
+            presentError(title: "无法保存连接", message: "Profile 名称不能为空。")
+            return
+        }
+        guard appID.hasPrefix("cli_") else {
+            presentError(title: "无法保存连接", message: "App ID 应以 cli_ 开头。")
+            return
+        }
+        guard !appSecret.isEmpty else {
+            presentError(title: "无法保存连接", message: "App Secret 不能为空。")
+            return
+        }
+        isConfiguringProfile = true
+        setupResult = "正在写入 macOS Keychain 并检查 Bot 连接…"
+        setupPassed = false
+        let controller = bridge
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let configured = controller.configureLarkProfile(
+                profile: profile,
+                appID: appID,
+                appSecret: appSecret
+            )
+            let checked = configured.status == 0
+                ? controller.checkLarkProfile(profile)
+                : configured
+            Task { @MainActor in
+                guard let self else { return }
+                self.setupAppSecret = ""
+                self.isConfiguringProfile = false
+                self.setupPassed = configured.status == 0 && checked.status == 0
+                self.setupResult = self.setupPassed
+                    ? "连接信息已安全保存，Bot 身份与飞书网络检查通过。"
+                    : (checked.output.isEmpty ? "连接检查失败，请核对 App ID、App Secret 和飞书应用状态。" : checked.output)
+                if self.setupPassed {
+                    var config = controller.readConfig()
+                    config["lark_profile"] = profile
+                    do {
+                        try controller.writeConfig(config)
+                        self.profileName = profile
+                    } catch {
+                        self.setupPassed = false
+                        self.setupResult = "Profile 已创建，但桥接配置未保存：\(error.localizedDescription)"
+                    }
+                }
+            }
+        }
+    }
+
+    func recheckProfile() {
+        guard !isConfiguringProfile else { return }
+        let profile = setupProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !profile.isEmpty else {
+            presentError(title: "无法检查连接", message: "Profile 名称不能为空。")
+            return
+        }
+        isConfiguringProfile = true
+        setupResult = "正在检查 Bot 身份与飞书网络…"
+        let controller = bridge
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let checked = controller.checkLarkProfile(profile)
+            Task { @MainActor in
+                guard let self else { return }
+                self.isConfiguringProfile = false
+                self.setupPassed = checked.status == 0
+                self.setupResult = checked.status == 0
+                    ? "Bot 身份与飞书网络检查通过。"
+                    : (checked.output.isEmpty ? "连接检查失败。" : checked.output)
+            }
+        }
+    }
+
+    func openDeveloperConsole() {
+        if let url = URL(string: "https://open.feishu.cn/app") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    func discoverFirstUser() {
+        guard !isDiscoveringUser else { return }
+        let profile = setupProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard setupPassed, !profile.isEmpty else {
+            presentError(title: "暂不能识别用户", message: "请先保存并通过飞书连接检查。")
+            return
+        }
+        isDiscoveringUser = true
+        discoveredOpenID = ""
+        userDiscoveryResult = "监听已启动。请在两分钟内用机主飞书账号给这个 Bot 发送一条单聊消息。"
+        let controller = bridge
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = controller.discoverFeishuUser(profile)
+            Task { @MainActor in
+                guard let self else { return }
+                self.isDiscoveringUser = false
+                if result.status == 0, result.output.hasPrefix("ou_") {
+                    self.discoveredOpenID = result.output
+                    self.userDiscoveryResult = "已识别首位用户。继续后仍需明确选择可访问项目。"
+                } else {
+                    self.userDiscoveryResult = result.output.isEmpty
+                        ? "未识别到飞书用户，请检查事件订阅后重试。"
+                        : result.output
+                }
+            }
+        }
+    }
+
+    func continueToUserAuthorization() {
+        showConnectionSetup = false
+        prepareConfiguration()
+        if discoveredOpenID.hasPrefix("ou_") {
+            draftUsers = [
+                AuthorizedUserDraft(
+                    name: "机主",
+                    openID: discoveredOpenID,
+                    projects: ""
+                )
+            ]
+        }
+    }
+
     func prepareConfiguration() {
         let config = bridge.readConfig()
+        availableProjects = bridge.codexProjectNames()
         pendingAccessRequests = bridge.pendingAccessRequests()
         draftProfile = String(describing: config["lark_profile"] ?? "codex-notify")
         draftUsers = configuredUsers(from: config)
@@ -558,6 +847,9 @@ private final class BridgeViewModel: ObservableObject {
         draftDesktopSyncEventKey = String(
             describing: config["desktop_sync_menu_event_key"] ?? "sync_desktop"
         )
+        draftDesktopSyncSwitchEventKey = String(
+            describing: config["desktop_sync_switch_menu_event_key"] ?? "sync_desktop_switch"
+        )
         draftMaxConcurrentRuns = min(
             8,
             max(1, (config["max_concurrent_runs"] as? NSNumber)?.intValue ?? 2)
@@ -573,6 +865,7 @@ private final class BridgeViewModel: ObservableObject {
         let archiveTaskEventKey = draftArchiveTaskEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let usageEventKey = draftUsageEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let desktopSyncEventKey = draftDesktopSyncEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let desktopSyncSwitchEventKey = draftDesktopSyncSwitchEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !profile.isEmpty else {
             presentError(title: "配置未保存", message: "lark-cli Profile 不能为空。")
             return
@@ -619,7 +912,8 @@ private final class BridgeViewModel: ObservableObject {
             newTaskEventKey: newTaskEventKey,
             archiveTaskEventKey: archiveTaskEventKey,
             usageEventKey: usageEventKey,
-            desktopSyncEventKey: desktopSyncEventKey
+            desktopSyncEventKey: desktopSyncEventKey,
+            desktopSyncSwitchEventKey: desktopSyncSwitchEventKey
         )
     }
 
@@ -631,7 +925,8 @@ private final class BridgeViewModel: ObservableObject {
         newTaskEventKey: String,
         archiveTaskEventKey: String,
         usageEventKey: String,
-        desktopSyncEventKey: String
+        desktopSyncEventKey: String,
+        desktopSyncSwitchEventKey: String
     ) {
         let menuEventKeys = [
             currentTaskEventKey,
@@ -640,13 +935,14 @@ private final class BridgeViewModel: ObservableObject {
             archiveTaskEventKey,
             usageEventKey,
             desktopSyncEventKey,
+            desktopSyncSwitchEventKey,
         ]
         guard menuEventKeys.allSatisfy({ !$0.isEmpty }) else {
-            presentError(title: "配置未保存", message: "六个机器人菜单 Event Key 都不能为空。")
+            presentError(title: "配置未保存", message: "七个机器人菜单 Event Key 都不能为空。")
             return
         }
         guard Set(menuEventKeys).count == menuEventKeys.count else {
-            presentError(title: "配置未保存", message: "六个机器人菜单 Event Key 不能重复。")
+            presentError(title: "配置未保存", message: "七个机器人菜单 Event Key 不能重复。")
             return
         }
 
@@ -670,6 +966,7 @@ private final class BridgeViewModel: ObservableObject {
         config["archive_task_menu_event_key"] = archiveTaskEventKey
         config["usage_menu_event_key"] = usageEventKey
         config["desktop_sync_menu_event_key"] = desktopSyncEventKey
+        config["desktop_sync_switch_menu_event_key"] = desktopSyncSwitchEventKey
         config["max_concurrent_runs"] = min(8, max(1, draftMaxConcurrentRuns))
         config["max_prompt_chars"] = config["max_prompt_chars"] ?? 12000
         config["max_reply_chars"] = config["max_reply_chars"] ?? 3000
@@ -717,6 +1014,34 @@ private final class BridgeViewModel: ObservableObject {
             alertMessage = "原有配置和当前 Task 状态均已保留。"
         } else {
             presentError(title: "更新失败", message: result.output)
+        }
+        refresh()
+    }
+
+    func prepareUninstall() {
+        health = bridge.healthSnapshot()
+        guard health.pendingInputs == 0,
+              health.pendingDeliveries == 0,
+              health.pendingTaskCreations == 0 else {
+            presentError(
+                title: "暂不能卸载",
+                message: "仍有排队消息、待补发结果或新建 Task 请求。全部处理完成后再卸载。"
+            )
+            return
+        }
+        let confirmation = NSAlert()
+        confirmation.messageText = "移除后台桥接服务？"
+        confirmation.informativeText = "后台服务和运行组件会被移除；飞书 Profile、授权配置、Task 状态和日志会保留，便于以后恢复。App 本身仍需由你移到废纸篓。"
+        confirmation.alertStyle = .warning
+        confirmation.addButton(withTitle: "移除服务并保留数据")
+        confirmation.addButton(withTitle: "取消")
+        guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+        let result = bridge.uninstallKeepingData()
+        if result.status == 0 {
+            alertTitle = "后台服务已移除"
+            alertMessage = "本机配置和 Task 状态已保留。现在可以退出 App，并按需把 App 移到废纸篓。"
+        } else {
+            presentError(title: "卸载失败", message: result.output)
         }
         refresh()
     }
@@ -824,6 +1149,9 @@ private struct MainView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $model.showConfiguration) {
             ConfigurationView(model: model)
+        }
+        .sheet(isPresented: $model.showConnectionSetup) {
+            ConnectionSetupView(model: model)
         }
         .sheet(isPresented: $model.showDiagnosis) {
             DiagnosisView(model: model)
@@ -1012,6 +1340,9 @@ private struct MainView: View {
     private var actionsCard: some View {
         GroupBox("管理") {
             VStack(spacing: 10) {
+                actionButton("首次连接向导", icon: "link.badge.plus") {
+                    model.prepareConnectionSetup()
+                }
                 actionButton("配置桥接", icon: "gearshape") { model.prepareConfiguration() }
                 actionButton("运行诊断", icon: "stethoscope") { model.runDiagnosis() }
                 actionButton("安装/更新后台组件", icon: "arrow.triangle.2.circlepath") {
@@ -1036,6 +1367,11 @@ private struct MainView: View {
                     Button("数据目录") { model.openSupportDirectory() }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                Divider()
+                Button("移除后台服务…", role: .destructive) {
+                    model.prepareUninstall()
+                }
+                .buttonStyle(.plain)
             }
             .padding(.top, 6)
         }
@@ -1070,6 +1406,212 @@ private struct MainView: View {
         }
         .buttonStyle(.plain)
         .padding(.vertical, 5)
+    }
+}
+
+private struct ConnectionSetupView: View {
+    @ObservedObject var model: BridgeViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    tenantStep
+                    credentialStep
+                    consoleStep
+                    authorizationStep
+                }
+                .padding(22)
+            }
+            Divider()
+            footer
+        }
+        .frame(width: 740, height: 650)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("连接你自己的飞书")
+                .font(.title2.weight(.semibold))
+            Text("桥接在这台 Mac 本机运行；Codex 内容不会经过 Roger 或 DeepOri 的服务器。")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+    }
+
+    private var tenantStep: some View {
+        setupStep(number: 1, title: "准备自建应用") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("在自己的飞书租户中创建或选择一个启用了机器人能力的自建应用。首版不使用共享机器人，每位 Mac 机主掌握自己的应用和权限。")
+                    .foregroundStyle(.secondary)
+                Button("打开开发者后台", systemImage: "safari") {
+                    model.openDeveloperConsole()
+                }
+            }
+        }
+    }
+
+    private var credentialStep: some View {
+        setupStep(number: 2, title: "安全保存连接凭据") {
+            VStack(alignment: .leading, spacing: 10) {
+                setupField(
+                    "Profile 名称",
+                    placeholder: "codex-notify",
+                    text: $model.setupProfile
+                )
+                setupField(
+                    "App ID",
+                    placeholder: "cli_...",
+                    text: $model.setupAppID
+                )
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("App Secret")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    SecureField("只发送给本机 lark-cli", text: $model.setupAppSecret)
+                        .textFieldStyle(.roundedBorder)
+                }
+                Text("App Secret 只通过 stdin 交给内置 lark-cli，并由 lark-cli 存入 macOS Keychain；桥接配置和日志不会保存它。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Button(model.isConfiguringProfile ? "正在保存并检查…" : "保存并检查连接") {
+                        model.configureProfileAndCheck()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isConfiguringProfile)
+                    Button("重新检查") { model.recheckProfile() }
+                        .disabled(model.isConfiguringProfile)
+                    if !model.setupResult.isEmpty {
+                        Label(
+                            model.setupResult,
+                            systemImage: model.setupPassed
+                                ? "checkmark.circle.fill"
+                                : "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(model.setupPassed ? .green : .orange)
+                        .lineLimit(3)
+                    }
+                }
+            }
+        }
+    }
+
+    private var consoleStep: some View {
+        setupStep(number: 3, title: "完成飞书后台设置") {
+            VStack(alignment: .leading, spacing: 8) {
+                checklist("机器人权限：接收单聊消息、读取消息及消息资源、发送和更新消息、上传图片与文件（含 im:resource）")
+                checklist("长连接事件：im.message.receive_v1、application.bot.menu_v6")
+                checklist("卡片回调：card.action.trigger")
+                checklist("菜单 Event Key：current_task、select_task、new_task、archive_task、codex_usage、sync_desktop、sync_desktop_switch")
+                checklist("创建并发布应用版本；发布后菜单可能需要约 5 分钟生效")
+                Text("飞书要求应用管理员在开发者后台确认权限和发布版本；本机 App 不会替你扩大租户权限。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var authorizationStep: some View {
+        setupStep(number: 4, title: "授权使用者和项目") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("点击开始识别后，用机主飞书账号给 Bot 发送一条单聊消息。App 只读取该事件中的 open_id，不会把消息内容写入配置。")
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Button(model.isDiscoveringUser ? "等待飞书消息…" : "开始识别首位用户") {
+                        model.discoverFirstUser()
+                    }
+                    .disabled(!model.setupPassed || model.isDiscoveringUser)
+                    if !model.userDiscoveryResult.isEmpty {
+                        Label(
+                            model.userDiscoveryResult,
+                            systemImage: model.discoveredOpenID.isEmpty
+                                ? "hourglass"
+                                : "checkmark.circle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(
+                            model.discoveredOpenID.isEmpty ? Color.secondary : Color.green
+                        )
+                        .lineLimit(3)
+                    }
+                }
+                Text("识别成功后仍需由 Mac 机主明确指定该用户可访问的 Codex 项目；不会默认开放全部项目。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("继续配置授权用户", systemImage: "person.badge.key") {
+                    model.continueToUserAuthorization()
+                }
+                .disabled(
+                    !model.setupPassed
+                        || (!model.hasConfiguredUsers && model.discoveredOpenID.isEmpty)
+                )
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Text("可以随时关闭向导；已写入 Keychain 的 Profile 会保留。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("关闭") { model.showConnectionSetup = false }
+                .keyboardShortcut(.cancelAction)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
+    }
+
+    private func setupStep<Content: View>(
+        number: Int,
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        GroupBox {
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+        } label: {
+            HStack(spacing: 8) {
+                Text("\(number)")
+                    .font(.caption.weight(.bold))
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Color.accentColor.opacity(0.15)))
+                Text(title)
+            }
+        }
+    }
+
+    private func checklist(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "checkmark.circle")
+                .foregroundStyle(.secondary)
+                .padding(.top, 1)
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func setupField(
+        _ title: String,
+        placeholder: String,
+        text: Binding<String>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+        }
     }
 }
 
@@ -1152,7 +1694,7 @@ private struct ConfigurationView: View {
                         monospaced: true
                     )
                     configurationField(
-                        "选择 Task",
+                        "切换 Task",
                         placeholder: "select_task",
                         text: $model.draftEventKey,
                         monospaced: true
@@ -1176,9 +1718,15 @@ private struct ConfigurationView: View {
                         monospaced: true
                     )
                     configurationField(
-                        "接续桌面 Task",
+                        "接续当前 Task",
                         placeholder: "sync_desktop",
                         text: $model.draftDesktopSyncEventKey,
+                        monospaced: true
+                    )
+                    configurationField(
+                        "接续其他 Task",
+                        placeholder: "sync_desktop_switch",
+                        text: $model.draftDesktopSyncSwitchEventKey,
                         monospaced: true
                     )
                 }
@@ -1262,6 +1810,24 @@ private struct ConfigurationView: View {
                             placeholder: "英文逗号分隔；* 表示全部项目",
                             text: $user.projects
                         )
+                        if !model.availableProjects.isEmpty {
+                            Menu("从 Codex 左侧栏选择") {
+                                ForEach(model.availableProjects, id: \.self) { project in
+                                    Button {
+                                        toggleProject(project, projects: $user.projects)
+                                    } label: {
+                                        if selectedProjects(user.projects).contains(project) {
+                                            Label(project, systemImage: "checkmark")
+                                        } else {
+                                            Text(project)
+                                        }
+                                    }
+                                }
+                            }
+                            Text("已读取这台 Mac 的 Codex 项目；可多选。全部项目仍需手动输入 *，避免误授权。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .padding(14)
                     .background(Color(nsColor: .controlBackgroundColor))
@@ -1312,6 +1878,29 @@ private struct ConfigurationView: View {
                 .textFieldStyle(.roundedBorder)
                 .font(monospaced ? .system(.body, design: .monospaced) : .body)
         }
+    }
+
+    private func selectedProjects(_ value: String) -> Set<String> {
+        Set(
+            value
+                .split(whereSeparator: { $0 == "," || $0 == "，" })
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    private func toggleProject(_ project: String, projects: Binding<String>) {
+        var selected = selectedProjects(projects.wrappedValue)
+        if selected.contains("*") {
+            selected = [project]
+        } else if selected.contains(project) {
+            selected.remove(project)
+        } else {
+            selected.insert(project)
+        }
+        projects.wrappedValue = selected
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .joined(separator: ", ")
     }
 }
 
@@ -1377,7 +1966,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if !model.hasConfiguredUsers {
             DispatchQueue.main.async { [weak self] in
-                self?.model.prepareConfiguration()
+                self?.model.prepareConnectionSetup()
             }
         }
     }

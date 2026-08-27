@@ -5,7 +5,7 @@
     {
       "open_id": "",
       "name": "管理员",
-      "allowed_projects": ["*"]
+      "allowed_projects": []
     }
   ],
   "allowed_chat_ids": [],
@@ -16,6 +16,7 @@
   "archive_task_menu_event_key": "archive_task",
   "usage_menu_event_key": "codex_usage",
   "desktop_sync_menu_event_key": "sync_desktop",
+  "desktop_sync_switch_menu_event_key": "sync_desktop_switch",
   "max_prompt_chars": 12000,
   "max_reply_chars": 3000,
   "max_result_images": 8,

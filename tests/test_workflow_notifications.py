@@ -727,6 +727,7 @@ class InstallerSafetyTests(unittest.TestCase):
             "workflow_config.py",
             "control.sh",
             "diagnose.sh",
+            "uninstall.sh",
             "config.example.json",
             "install.sh",
         ):
@@ -803,6 +804,7 @@ class InstallerSafetyTests(unittest.TestCase):
             "workflow_config.py",
             "control.sh",
             "diagnose.sh",
+            "uninstall.sh",
             "config.example.json",
             "lark-cli",
             "config.json",
@@ -1263,7 +1265,7 @@ class WorkflowBridgeTests(unittest.TestCase):
             "patch_workflow_completed_cards",
         ) as patch, mock.patch.object(
             self.bridge,
-            "refresh_user_task_identity_cards",
+            "schedule_user_task_identity_refresh",
         ) as refresh:
             self.assertTrue(self.bridge.handle_workflow_card_action(event, action))
 
@@ -2078,7 +2080,7 @@ class DiagnosticScriptTests(unittest.TestCase):
         lark_cli.write_text(
             "#!/bin/sh\n"
             "case \"$*\" in\n"
-            "  *--version*) printf '%s\\n' '1.0.89-codex-feishu.2' ;;\n"
+            "  *--version*) printf '%s\\n' '1.0.89-codex-feishu.3' ;;\n"
             f"  *doctor*) printf '%s\\n' '{json.dumps(doctor_payload)}' ;;\n"
             "  *'event status'*) printf '%s\\n' "
             "'{\"apps\":[{\"active_consumers\":3}]}' ;;\n"
@@ -2110,12 +2112,12 @@ class DiagnosticScriptTests(unittest.TestCase):
                 {
                     "name": "cli_version",
                     "status": "pass",
-                    "message": "1.0.89-codex-feishu.2",
+                    "message": "1.0.89-codex-feishu.3",
                 },
                 {
                     "name": "cli_update",
                     "status": "warn",
-                    "message": "1.0.89-codex-feishu.2 → 1.0.89 available",
+                    "message": "1.0.89-codex-feishu.3 → 1.0.89 available",
                 },
                 {
                     "name": "user_identity",
@@ -2137,12 +2139,12 @@ class DiagnosticScriptTests(unittest.TestCase):
                 {
                     "name": "cli_version",
                     "status": "pass",
-                    "message": "1.0.89-codex-feishu.2",
+                    "message": "1.0.89-codex-feishu.3",
                 },
                 {
                     "name": "cli_update",
                     "status": "warn",
-                    "message": "1.0.89-codex-feishu.2 → 1.0.90 available",
+                    "message": "1.0.89-codex-feishu.3 → 1.0.90 available",
                 },
             ],
             "ok": True,
@@ -2158,12 +2160,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.9.4")
-        self.assertEqual(info["CFBundleVersion"], "40")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.9.10")
+        self.assertEqual(info["CFBundleVersion"], "46")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.9.4 (build 40)", readme)
-        self.assertIn("1.9.4 (build 40", release_notes)
+        self.assertIn("1.9.10 (build 46)", readme)
+        self.assertIn("1.9.10 (build 46", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):
@@ -2173,6 +2175,16 @@ class AppUpdaterSafetyTests(unittest.TestCase):
             'lipo "${staged_app}/Contents/MacOS/CodexFeishuBridge" '
             "-verify_arch arm64 x86_64",
             helper,
+        )
+        source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(
+            encoding="utf-8"
+        )
+        architecture_check = source.split("let architectures = run", 1)[1].split(
+            "guard architectures.status", 1
+        )[0]
+        self.assertLess(
+            architecture_check.index('app.appendingPathComponent("Contents/MacOS/CodexFeishuBridge").path'),
+            architecture_check.index('"-verify_arch"'),
         )
 
     def test_helper_refuses_destination_outside_applications(self):
@@ -2211,10 +2223,15 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         self.assertIn('"允许项目"', configuration)
         self.assertIn('"当前 Task"', configuration)
         self.assertIn('"额度用量"', configuration)
-        self.assertIn('"接续桌面 Task"', configuration)
+        self.assertIn('"接续当前 Task"', configuration)
+        self.assertIn('"接续其他 Task"', configuration)
+        self.assertIn("七个机器人菜单 Event Key 都不能为空", source)
+        self.assertIn("七个机器人菜单 Event Key 不能重复", source)
+        self.assertIn(
+            'config["desktop_sync_switch_menu_event_key"] = desktopSyncSwitchEventKey',
+            source,
+        )
         self.assertIn('config["current_task_menu_event_key"] = currentTaskEventKey', source)
-        self.assertIn("六个机器人菜单 Event Key 都不能为空", source)
-        self.assertIn("六个机器人菜单 Event Key 不能重复", source)
         self.assertIn('config["desktop_sync_menu_event_key"] = desktopSyncEventKey', source)
         self.assertIn('Text("保存后，正在运行的桥接会自动重启并保留当前 Task。")', configuration)
 

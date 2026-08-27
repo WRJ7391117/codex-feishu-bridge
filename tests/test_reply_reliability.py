@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -219,6 +220,36 @@ class ReplyReliabilityTests(unittest.TestCase):
         self.assertEqual(item["reason"], "飞书 API 请求超时")
         self.assertEqual(item["next_attempt_at"], 145)
 
+    def test_slow_pending_delivery_does_not_hold_global_state_lock(self):
+        self.bridge.queue_pending_reply(
+            "om_test",
+            "最终结果",
+            "final",
+            "飞书 API 网络连接失败",
+            now=100,
+        )
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_reply(*args):
+            entered.set()
+            release.wait(1)
+            return False
+
+        with mock.patch.object(self.bridge, "reply", side_effect=slow_reply):
+            worker = threading.Thread(
+                target=self.bridge.retry_pending_replies,
+                kwargs={"now": 115},
+            )
+            worker.start()
+            self.assertTrue(entered.wait(0.5))
+            self.assertTrue(self.bridge._state_lock.acquire(timeout=0.2))
+            self.bridge._state_lock.release()
+            release.set()
+            worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+
     def test_failed_card_patch_is_persisted(self):
         with mock.patch.object(
             self.bridge.subprocess,
@@ -256,7 +287,7 @@ class ReplyReliabilityTests(unittest.TestCase):
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["card"], {"version": "latest"})
         self.assertEqual(pending[0]["created_at"], 100)
-        self.assertEqual(pending[0]["next_attempt_at"], 115)
+        self.assertEqual(pending[0]["next_attempt_at"], 102)
 
     def test_due_card_patch_is_delivered_and_removed(self):
         self.bridge.queue_pending_card_patch(
@@ -298,7 +329,49 @@ class ReplyReliabilityTests(unittest.TestCase):
         text_reply.assert_not_called()
         item = self.bridge.load_state()["pending_replies"][0]
         self.assertEqual(item["attempts"], 1)
-        self.assertEqual(item["next_attempt_at"], 145)
+        self.assertEqual(item["next_attempt_at"], 120)
+
+    def test_failed_menu_card_is_retried_with_same_context(self):
+        card = {
+            "schema": "2.0",
+            "header": {"title": {"content": "选择 Task"}},
+            "body": {
+                "elements": [
+                    {"tag": "select_static", "name": "task_selector"},
+                ]
+            },
+        }
+        with mock.patch.object(
+            self.bridge,
+            "send_card",
+            return_value=(False, None, None),
+        ):
+            self.assertFalse(
+                self.bridge.send_menu_card(
+                    "ou_admin",
+                    {},
+                    card,
+                    "select-task-event",
+                )
+            )
+
+        pending = self.bridge.load_state()["pending_replies"]
+        self.assertEqual(pending[0]["operation"], "menu_card")
+        with mock.patch.object(
+            self.bridge,
+            "send_card",
+            return_value=(True, "oc_private", "om_task_card"),
+        ) as send:
+            self.assertTrue(
+                self.bridge.retry_pending_replies(
+                    now=float(pending[0]["next_attempt_at"]),
+                )
+            )
+
+        send.assert_called_once_with("ou_admin", card, "select-task-event")
+        state = self.bridge.load_state()
+        self.assertEqual(state["pending_replies"], [])
+        self.assertEqual(state["card_contexts"]["om_task_card"]["type"], "tasks")
 
     def test_due_queue_card_sets_progress_message_id(self):
         entry = {

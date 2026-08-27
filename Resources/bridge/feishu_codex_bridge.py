@@ -256,9 +256,15 @@ USAGE_MENU_EVENT_KEY = str(
 DESKTOP_SYNC_MENU_EVENT_KEY = str(
     CONFIG.get("desktop_sync_menu_event_key") or "sync_desktop"
 )
+DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY = str(
+    CONFIG.get("desktop_sync_switch_menu_event_key") or "sync_desktop_switch"
+)
 REPLY_RETRY_DELAYS = (1.0, 2.0)
-CARD_PATCH_RETRY_DELAYS = (1.0, 2.0)
+CARD_PATCH_RETRY_DELAYS: tuple[float, ...] = ()
+CARD_PATCH_TIMEOUT_SECONDS = 3
+CARD_SEND_TIMEOUT_SECONDS = 5
 PENDING_REPLY_DELAYS = (15, 30, 60, 120, 300, 600)
+PENDING_CARD_PATCH_DELAYS = (2, 5, 15, 30, 60, 120)
 MAX_PENDING_REPLIES = 50
 MAX_PENDING_IMAGE_BYTES = max(
     1,
@@ -297,6 +303,14 @@ _reply_failure_context = threading.local()
 
 _consumers: list[subprocess.Popen[str]] = []
 _state_lock = threading.RLock()
+_event_lanes_lock = threading.Lock()
+_event_lanes: dict[str, queue.Queue[dict[str, Any]]] = {}
+_shutdown_event = threading.Event()
+_ui_intent_lock = threading.Lock()
+_ui_intent_sequences: dict[str, int] = {}
+_identity_refresh_condition = threading.Condition()
+_identity_refresh_pending: dict[str, tuple[str, dict[str, str] | None, float]] = {}
+_queued_card_refresh_pending: dict[str, float] = {}
 _active_runs_lock = threading.RLock()
 _active_runs: dict[str, dict[str, Any]] = {}
 _result_delivery_locks_lock = threading.Lock()
@@ -785,6 +799,40 @@ def rollout_path_for_task(thread_id: str) -> Path | None:
     return Path(str(row[0])) if row and row[0] else None
 
 
+def complete_jsonl_size(handle: Any, file_size: int) -> int:
+    if file_size <= 0:
+        return 0
+    handle.seek(file_size - 1)
+    if handle.read(1) == b"\n":
+        return file_size
+    position = file_size
+    while position > 0:
+        read_size = min(64 * 1024, position)
+        position -= read_size
+        handle.seek(position)
+        newline = handle.read(read_size).rfind(b"\n")
+        if newline >= 0:
+            return position + newline + 1
+    return 0
+
+
+def reverse_jsonl_lines(handle: Any, end_offset: int) -> Any:
+    position = end_offset
+    buffer = b""
+    while position > 0:
+        read_size = min(64 * 1024, position)
+        position -= read_size
+        handle.seek(position)
+        buffer = handle.read(read_size) + buffer
+        lines = buffer.split(b"\n")
+        buffer = lines[0]
+        for line in reversed(lines[1:]):
+            if line:
+                yield line
+    if buffer:
+        yield buffer
+
+
 def latest_rollout_turn(path: Path | None) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "status": "none",
@@ -796,17 +844,12 @@ def latest_rollout_turn(path: Path | None) -> dict[str, Any]:
     if path is None or not path.is_file():
         return snapshot
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            while True:
-                line_start = handle.tell()
-                line = handle.readline()
-                if not line:
-                    snapshot["cursor_offset"] = line_start
-                    break
-                if not line.endswith("\n"):
-                    snapshot["cursor_offset"] = line_start
-                    break
-                snapshot["cursor_offset"] = handle.tell()
+        with path.open("rb") as handle:
+            complete_size = complete_jsonl_size(handle, path.stat().st_size)
+            snapshot["cursor_offset"] = complete_size
+            terminals: dict[str, tuple[str, str]] = {}
+            reverse_images: list[str] = []
+            for line in reverse_jsonl_lines(handle, complete_size):
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError:
@@ -815,34 +858,37 @@ def latest_rollout_turn(path: Path | None) -> dict[str, Any]:
                 if not isinstance(payload, dict):
                     continue
                 event_type = str(payload.get("type") or "")
-                if event_type == "task_started":
-                    snapshot = {
-                        "status": "running",
-                        "turn_id": str(payload.get("turn_id") or ""),
-                        "message": "",
-                        "images": [],
-                        "cursor_offset": handle.tell(),
-                    }
-                    continue
-                if snapshot["status"] != "running":
-                    continue
-                if event_type == "image_generation_end":
+                turn_id = str(payload.get("turn_id") or "")
+                if event_type == "task_complete" and turn_id:
+                    terminals.setdefault(
+                        turn_id,
+                        (
+                            "completed",
+                            str(payload.get("last_agent_message") or "").strip(),
+                        ),
+                    )
+                elif event_type in {"task_failed", "turn_aborted"} and turn_id:
+                    terminals.setdefault(
+                        turn_id,
+                        ("failed", "Codex Desktop 没有完成这一轮运行。"),
+                    )
+                elif event_type == "image_generation_end":
                     image = normalized_image_reference(
                         str(payload.get("saved_path") or "")
                     )
-                    if image is not None and image not in snapshot["images"]:
-                        snapshot["images"].append(image)
-                    continue
-                if str(payload.get("turn_id") or "") != snapshot["turn_id"]:
-                    continue
-                if event_type == "task_complete":
-                    snapshot["status"] = "completed"
-                    snapshot["message"] = str(
-                        payload.get("last_agent_message") or ""
-                    ).strip()
-                elif event_type in {"task_failed", "turn_aborted"}:
-                    snapshot["status"] = "failed"
-                    snapshot["message"] = "Codex Desktop 没有完成这一轮运行。"
+                    if image is not None and image not in reverse_images:
+                        reverse_images.append(image)
+                elif event_type == "task_started":
+                    status, message = terminals.get(turn_id, ("running", ""))
+                    snapshot.update(
+                        {
+                            "status": status,
+                            "turn_id": turn_id,
+                            "message": message,
+                            "images": list(reversed(reverse_images)),
+                        }
+                    )
+                    return snapshot
     except OSError:
         return {
             "status": "none",
@@ -1891,7 +1937,7 @@ def complete_task_creation(
         f"{current_task_changed_text(task, '已新建')}\n现在发送的下一条消息会进入这个 Task。",
         "new-task-created",
     )
-    refresh_user_task_identity_cards(user_id, "当前 Task 已新建", task)
+    schedule_user_task_identity_refresh(user_id, "当前 Task 已新建", task)
 
 
 def restore_pending_task_name(user_id: str, task_id: str) -> bool:
@@ -1979,6 +2025,11 @@ def pending_reply_delay(attempts: int) -> int:
     return PENDING_REPLY_DELAYS[index]
 
 
+def pending_card_patch_delay(attempts: int) -> int:
+    index = min(max(attempts, 0), len(PENDING_CARD_PATCH_DELAYS) - 1)
+    return PENDING_CARD_PATCH_DELAYS[index]
+
+
 def queue_pending_reply(
     message_id: str,
     text: str,
@@ -2048,7 +2099,7 @@ def queue_pending_card_patch(
             "next_attempt_at": (
                 float(existing.get("next_attempt_at") or timestamp)
                 if existing
-                else timestamp + pending_reply_delay(0)
+                else timestamp + pending_card_patch_delay(0)
             ),
         }
         pending = [item for item in pending if item is not existing]
@@ -2056,6 +2107,44 @@ def queue_pending_card_patch(
         state["pending_replies"] = trim_pending_replies(pending)
         save_state(state)
     log(f"card patch queued reason={entry['reason']}")
+
+
+def queue_pending_menu_card(
+    user_id: str,
+    card: dict[str, Any],
+    kind: str,
+    reason: str,
+    now: float | None = None,
+) -> None:
+    with _state_lock:
+        state = load_state()
+        pending = state.setdefault("pending_replies", [])
+        if not isinstance(pending, list):
+            pending = []
+        timestamp = time.time() if now is None else now
+        entry = {
+            "operation": "menu_card",
+            "user_id": user_id,
+            "card": card,
+            "kind": kind,
+            "reason": reason or "飞书 API 调用失败",
+            "attempts": 0,
+            "created_at": timestamp,
+            "next_attempt_at": timestamp + pending_card_patch_delay(0),
+        }
+        pending = [
+            item
+            for item in pending
+            if not (
+                isinstance(item, dict)
+                and item.get("operation") == "menu_card"
+                and item.get("kind") == kind
+            )
+        ]
+        pending.append(entry)
+        state["pending_replies"] = trim_pending_replies(pending)
+        save_state(state)
+    log("menu card queued reason=" + entry["reason"])
 
 
 def clear_pending_card_patch(message_id: str) -> None:
@@ -2364,10 +2453,166 @@ def reply_or_queue(message_id: str, text: str, kind: str) -> bool:
     return delivered
 
 
+def pending_retry_identity(item: dict[str, Any]) -> tuple[str, ...]:
+    operation = str(item.get("operation") or "text_reply")
+    if operation == "queue_card":
+        return (operation, str(item.get("queue_id") or ""))
+    if operation in {"image_reply", "file_reply"}:
+        return (
+            operation,
+            str(item.get("message_id") or ""),
+            str(item.get("index") or ""),
+        )
+    return (
+        operation,
+        str(item.get("message_id") or ""),
+        str(item.get("kind") or "final"),
+    )
+
+
 def retry_pending_replies(now: float | None = None) -> bool:
     global _last_reply_failure_reason
 
     timestamp = time.time() if now is None else now
+    menu_card_item: dict[str, Any] | None = None
+    with _state_lock:
+        state = load_state()
+        pending = state.get("pending_replies")
+        if isinstance(pending, list):
+            for index, item in enumerate(pending):
+                if not isinstance(item, dict) or item.get("operation") != "menu_card":
+                    continue
+                try:
+                    next_attempt_at = float(item.get("next_attempt_at") or 0)
+                except (TypeError, ValueError):
+                    next_attempt_at = 0
+                if next_attempt_at > timestamp:
+                    continue
+                if (
+                    not str(item.get("user_id") or "")
+                    or not str(item.get("kind") or "")
+                    or not isinstance(item.get("card"), dict)
+                ):
+                    pending.pop(index)
+                    state["pending_replies"] = pending
+                    save_state(state)
+                    return True
+                menu_card_item = dict(item)
+                break
+    if menu_card_item is not None:
+        user_id = str(menu_card_item["user_id"])
+        kind = str(menu_card_item["kind"])
+        card = menu_card_item["card"]
+        delivered, chat_id, message_id = send_card(user_id, card, kind)
+        with _state_lock:
+            state = load_state()
+            pending = state.get("pending_replies")
+            if not isinstance(pending, list):
+                return True
+            current = next(
+                (
+                    item
+                    for item in pending
+                    if isinstance(item, dict)
+                    and item.get("operation") == "menu_card"
+                    and item.get("kind") == kind
+                ),
+                None,
+            )
+            if current is None:
+                return True
+            if delivered:
+                pending.remove(current)
+                state["pending_replies"] = pending
+                if chat_id:
+                    authorize_chat(state, user_id, chat_id)
+                if message_id:
+                    remember_card_context(state, user_id, message_id, card)
+                save_state(state)
+                log("pending menu card delivered")
+                return True
+            try:
+                attempts = int(current.get("attempts") or 0) + 1
+            except (TypeError, ValueError):
+                attempts = 1
+            current["attempts"] = attempts
+            current["next_attempt_at"] = timestamp + pending_card_patch_delay(attempts)
+            state["pending_replies"] = pending
+            save_state(state)
+            log(
+                "pending menu card retry failed "
+                f"attempts={attempts} reason={current.get('reason') or '飞书 API 调用失败'}"
+            )
+            return True
+    card_patch_item: dict[str, Any] | None = None
+    with _state_lock:
+        state = load_state()
+        pending = state.get("pending_replies")
+        if isinstance(pending, list):
+            for index, item in enumerate(pending):
+                if not isinstance(item, dict) or item.get("operation") != "card_patch":
+                    continue
+                try:
+                    next_attempt_at = float(item.get("next_attempt_at") or 0)
+                except (TypeError, ValueError):
+                    next_attempt_at = 0
+                if next_attempt_at > timestamp:
+                    continue
+                message_id = str(item.get("message_id") or "")
+                card = item.get("card")
+                if not message_id or not isinstance(card, dict):
+                    pending.pop(index)
+                    state["pending_replies"] = pending
+                    save_state(state)
+                    return True
+                card_patch_item = dict(item)
+                break
+    if card_patch_item is not None:
+        message_id = str(card_patch_item["message_id"])
+        card = card_patch_item["card"]
+        delivered = patch_card(message_id, card, persist=False)
+        with _state_lock:
+            state = load_state()
+            pending = state.get("pending_replies")
+            if not isinstance(pending, list):
+                return True
+            current = next(
+                (
+                    item
+                    for item in pending
+                    if isinstance(item, dict)
+                    and item.get("operation") == "card_patch"
+                    and item.get("message_id") == message_id
+                ),
+                None,
+            )
+            if current is None:
+                return True
+            if delivered and current.get("card") == card:
+                pending.remove(current)
+                state["pending_replies"] = pending
+                save_state(state)
+                log("pending card patch delivered")
+                return True
+            if delivered:
+                current["next_attempt_at"] = timestamp
+                state["pending_replies"] = pending
+                save_state(state)
+                return True
+            try:
+                attempts = int(current.get("attempts") or 0) + 1
+            except (TypeError, ValueError):
+                attempts = 1
+            current["attempts"] = attempts
+            current["next_attempt_at"] = timestamp + pending_card_patch_delay(attempts)
+            state["pending_replies"] = pending
+            save_state(state)
+            log(
+                "pending card patch retry failed "
+                f"attempts={attempts} reason={current.get('reason') or '飞书 API 调用失败'}"
+            )
+            return True
+    retry_item: dict[str, Any] | None = None
     with _state_lock:
         state = load_state()
         pending = state.get("pending_replies")
@@ -2383,21 +2628,11 @@ def retry_pending_replies(now: float | None = None) -> bool:
             if next_attempt_at > timestamp:
                 continue
             operation = str(item.get("operation") or "text_reply")
+            if operation in {"menu_card", "card_patch"}:
+                continue
             message_id = str(item.get("message_id") or "")
-            if operation == "card_patch":
-                card = item.get("card")
-                if not message_id or not isinstance(card, dict):
-                    pending.pop(index)
-                    state["pending_replies"] = pending
-                    save_state(state)
-                    return True
-                if patch_card(message_id, card, persist=False):
-                    pending.pop(index)
-                    state["pending_replies"] = pending
-                    save_state(state)
-                    log("pending card patch delivered")
-                    return True
-            elif operation == "queue_card":
+            prepared = dict(item)
+            if operation == "queue_card":
                 queue_id = str(item.get("queue_id") or "")
                 queued_entry = next(
                     (
@@ -2415,52 +2650,20 @@ def retry_pending_replies(now: float | None = None) -> bool:
                     return True
                 task_id = str(queued_entry.get("task", {}).get("id") or "")
                 position = queued_position(pending_inputs(state), task_id, queue_id)
-                try:
-                    delivered, progress_message_id = reply_card_message(
-                        message_id,
-                        build_queued_card(queued_entry, position),
-                        f"queue-{queue_id}",
-                    )
-                except (OSError, subprocess.TimeoutExpired):
-                    delivered, progress_message_id = False, None
-                if delivered and progress_message_id:
-                    queued_entry["progress_message_id"] = progress_message_id
-                    queued_entry["ready"] = True
-                    pending.pop(index)
-                    state["pending_replies"] = pending
-                    save_state(state)
-                    log("pending queue card delivered")
-                    return True
+                prepared["prepared_card"] = build_queued_card(dict(queued_entry), position)
             elif operation == "image_reply":
                 image = str(item.get("image") or "")
                 try:
                     image_index = int(item.get("index") or 0)
                 except (TypeError, ValueError):
                     image_index = 0
-                if (
-                    not message_id
-                    or not image
-                    or image_index <= 0
-                    or (
-                        item.get("remote") is not True
-                        and not Path(image).is_file()
-                    )
+                if not message_id or not image or image_index <= 0 or (
+                    item.get("remote") is not True and not Path(image).is_file()
                 ):
                     remove_pending_resource_file(item)
                     pending.pop(index)
                     state["pending_replies"] = pending
                     save_state(state)
-                    return True
-                if reply_image(message_id, image, image_index):
-                    reason = str(item.get("reason") or "飞书 API 调用失败")
-                    remove_pending_resource_file(item)
-                    pending.pop(index)
-                    state["pending_replies"] = pending
-                    save_state(state)
-                    log(
-                        f"pending image delivered index={image_index} "
-                        f"previous_reason={reason}"
-                    )
                     return True
             elif operation == "file_reply":
                 file_path = str(item.get("file") or "")
@@ -2468,74 +2671,126 @@ def retry_pending_replies(now: float | None = None) -> bool:
                     file_index = int(item.get("index") or 0)
                 except (TypeError, ValueError):
                     file_index = 0
-                if (
-                    not message_id
-                    or not file_path
-                    or file_index <= 0
-                    or not Path(file_path).is_file()
-                ):
+                if not message_id or not file_path or file_index <= 0 or not Path(file_path).is_file():
                     remove_pending_resource_file(item)
                     pending.pop(index)
                     state["pending_replies"] = pending
                     save_state(state)
                     return True
-                if reply_file(message_id, file_path, file_index):
-                    reason = str(item.get("reason") or "飞书 API 调用失败")
-                    remove_pending_resource_file(item)
+            elif operation == "text_reply":
+                text = str(item.get("text") or "")
+                kind = str(item.get("kind") or "final")
+                if not message_id or not text or kind not in {"final", "workflow-choice"}:
                     pending.pop(index)
                     state["pending_replies"] = pending
                     save_state(state)
-                    log(
-                        f"pending file delivered index={file_index} "
-                        f"previous_reason={reason}"
-                    )
                     return True
-            elif operation != "text_reply":
+            else:
                 pending.pop(index)
                 state["pending_replies"] = pending
                 save_state(state)
                 return True
+            retry_item = prepared
+            break
+    if retry_item is None:
+        return False
 
-            text = str(item.get("text") or "")
-            kind = str(item.get("kind") or "final")
-            if operation == "text_reply" and (
-                not message_id
-                or not text
-                or kind not in {"final", "workflow-choice"}
-            ):
-                pending.pop(index)
-                state["pending_replies"] = pending
-                save_state(state)
-                return True
-            if operation == "text_reply" and reply(message_id, text, kind):
-                reason = str(item.get("reason") or "飞书 API 调用失败")
-                pending.pop(index)
-                state["pending_replies"] = pending
-                save_state(state)
-                log(f"pending reply delivered kind={kind} previous_reason={reason}")
-                if kind == "final":
-                    reply(
-                        message_id,
-                        f"上一条结果曾因{reason}未能及时送达，连接恢复后已自动补发。",
-                        f"{kind}-recovered",
-                    )
-                return True
-            try:
-                attempts = int(item.get("attempts") or 0) + 1
-            except (TypeError, ValueError):
-                attempts = 1
-            item["attempts"] = attempts
-            if operation in {"text_reply", "image_reply", "file_reply"}:
-                item["reason"] = _last_reply_failure_reason or item.get("reason")
-            item["next_attempt_at"] = timestamp + pending_reply_delay(attempts)
+    operation = str(retry_item.get("operation") or "text_reply")
+    message_id = str(retry_item.get("message_id") or "")
+    progress_message_id: str | None = None
+    try:
+        if operation == "queue_card":
+            delivered, progress_message_id = reply_card_message(
+                message_id,
+                retry_item["prepared_card"],
+                f"queue-{retry_item.get('queue_id') or ''}",
+            )
+            delivered = bool(delivered and progress_message_id)
+        elif operation == "image_reply":
+            delivered = reply_image(
+                message_id,
+                str(retry_item.get("image") or ""),
+                int(retry_item.get("index") or 0),
+            )
+        elif operation == "file_reply":
+            delivered = reply_file(
+                message_id,
+                str(retry_item.get("file") or ""),
+                int(retry_item.get("index") or 0),
+            )
+        else:
+            delivered = reply(
+                message_id,
+                str(retry_item.get("text") or ""),
+                str(retry_item.get("kind") or "final"),
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        delivered = False
+
+    retry_identity = pending_retry_identity(retry_item)
+    reason = str(retry_item.get("reason") or "飞书 API 调用失败")
+    kind = str(retry_item.get("kind") or "final")
+    with _state_lock:
+        state = load_state()
+        pending = state.get("pending_replies")
+        if not isinstance(pending, list):
+            return True
+        current = next(
+            (
+                item
+                for item in pending
+                if isinstance(item, dict)
+                and pending_retry_identity(item) == retry_identity
+            ),
+            None,
+        )
+        if current is None:
+            return True
+        if delivered:
+            if operation == "queue_card":
+                queue_id = str(retry_item.get("queue_id") or "")
+                queued_entry = next(
+                    (
+                        entry
+                        for entry in pending_inputs(state)
+                        if isinstance(entry, dict)
+                        and str(entry.get("queue_id") or "") == queue_id
+                    ),
+                    None,
+                )
+                if queued_entry is not None:
+                    queued_entry["progress_message_id"] = progress_message_id
+                    queued_entry["ready"] = True
+            if operation in {"image_reply", "file_reply"}:
+                remove_pending_resource_file(current)
+            pending.remove(current)
             state["pending_replies"] = pending
             save_state(state)
-            log(
-                f"pending reply retry failed kind={kind} attempts={attempts} "
-                f"reason={item['reason']}"
+        else:
+            try:
+                attempts = int(current.get("attempts") or 0) + 1
+            except (TypeError, ValueError):
+                attempts = 1
+            current["attempts"] = attempts
+            if operation in {"text_reply", "image_reply", "file_reply"}:
+                current["reason"] = _last_reply_failure_reason or current.get("reason")
+            current["next_attempt_at"] = timestamp + pending_reply_delay(attempts)
+            state["pending_replies"] = pending
+            save_state(state)
+    if delivered:
+        log(f"pending {operation} delivered previous_reason={reason}")
+        if operation == "text_reply" and kind == "final":
+            reply(
+                message_id,
+                f"上一条结果曾因{reason}未能及时送达，连接恢复后已自动补发。",
+                f"{kind}-recovered",
             )
-            return True
-    return False
+    else:
+        log(
+            f"pending reply retry failed kind={kind} "
+            f"reason={_last_reply_failure_reason or reason}"
+        )
+    return True
 
 
 def input_image_keys(content: str) -> list[str]:
@@ -3199,28 +3454,36 @@ def patch_card(
     attempts = len(CARD_PATCH_RETRY_DELAYS) + 1
     failure_reason = "飞书 API 调用失败"
     for attempt in range(1, attempts + 1):
+        started = time.monotonic()
         try:
             result = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=CARD_PATCH_TIMEOUT_SECONDS,
                 env=lark_environment(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
+            duration_ms = round((time.monotonic() - started) * 1000)
             failure_reason = lark_reply_failure_reason(error=exc)
             log(
                 f"card patch failed attempt={attempt} "
-                f"reason={failure_reason}"
+                f"duration_ms={duration_ms} reason={failure_reason}"
             )
         else:
+            duration_ms = round((time.monotonic() - started) * 1000)
             if lark_succeeded(result):
+                log(
+                    "latency feishu_api operation=card_patch "
+                    f"duration_ms={duration_ms} success=true"
+                )
                 if persist:
                     clear_pending_card_patch(message_id)
                 return True
             failure_reason = lark_reply_failure_reason(result)
             log(
                 f"card patch failed attempt={attempt} "
+                f"duration_ms={duration_ms} "
                 f"{lark_reply_failure_metadata(result)} "
                 f"reason={failure_reason}"
             )
@@ -3276,16 +3539,32 @@ def send_card(
         "--idempotency-key",
         idempotency_key(kind, "task-card"),
     ]
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env=lark_environment(),
-    )
-    if not lark_succeeded(result):
-        log(f"card send failed kind={kind} code={result.returncode}")
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=CARD_SEND_TIMEOUT_SECONDS,
+            env=lark_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        duration_ms = round((time.monotonic() - started) * 1000)
+        log(
+            "card send failed "
+            f"duration_ms={duration_ms} reason={lark_reply_failure_reason(error=exc)}"
+        )
         return False, None, None
+    duration_ms = round((time.monotonic() - started) * 1000)
+    if not lark_succeeded(result):
+        log(
+            f"card send failed code={result.returncode} duration_ms={duration_ms}"
+        )
+        return False, None, None
+    log(
+        "latency feishu_api operation=card_send "
+        f"duration_ms={duration_ms} success=true"
+    )
     return True, sent_chat_id(result.stdout), sent_message_id(result.stdout)
 
 
@@ -3307,16 +3586,32 @@ def update_card(token: str, card: dict[str, Any]) -> bool:
         "--data",
         payload,
     ]
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env=lark_environment(),
-    )
-    if not lark_succeeded(result):
-        log(f"card update failed code={result.returncode}")
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=CARD_PATCH_TIMEOUT_SECONDS,
+            env=lark_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        duration_ms = round((time.monotonic() - started) * 1000)
+        log(
+            "card update failed "
+            f"duration_ms={duration_ms} reason={lark_reply_failure_reason(error=exc)}"
+        )
         return False
+    duration_ms = round((time.monotonic() - started) * 1000)
+    if not lark_succeeded(result):
+        log(
+            f"card update failed code={result.returncode} duration_ms={duration_ms}"
+        )
+        return False
+    log(
+        "latency feishu_api operation=card_update "
+        f"duration_ms={duration_ms} success=true"
+    )
     return True
 
 
@@ -3925,7 +4220,7 @@ def handle_workflow_card_action(
                 remember_recent_task(state, user_id, target_task_id)
                 save_state(state)
             patch_workflow_completed_cards(record, "已切换到目标 Task")
-            refresh_user_task_identity_cards(
+            schedule_user_task_identity_refresh(
                 user_id,
                 "当前 Task 已切换",
                 target_task,
@@ -4303,29 +4598,40 @@ def build_desktop_sync_card(
     tag_text = "运行中" if running else "已找到结果" if completed else "暂无结果"
     tag_color = "blue" if running else "green" if completed else "neutral"
     if running:
-        message = "Codex Desktop 正在运行。桥接会持续跟踪，完成后自动把结果推送到这里。"
+        title = "等待桌面端完成"
+        message = (
+            "已接续 Codex Desktop 中的当前 Task。\n\n"
+            "Codex 正在运行，完成后结果会自动推送到这里。你不需要重复点击。"
+        )
     elif completed:
-        message = "已读取 Codex Desktop 中这个 Task 的最新完成结果，正在推送。"
+        title = "桌面结果已接到飞书"
+        message = (
+            "已读取 Codex Desktop 中当前 Task 的最新结果，并推送到飞书。\n\n"
+            "后续消息会继续进入这个 Task。"
+        )
     else:
-        message = "这个 Task 暂时没有可同步的完成结果。"
+        title = "已接续，暂无新结果"
+        message = (
+            "已检查 Codex Desktop 中的当前 Task，暂时没有可推送的新结果。\n\n"
+            "当前 Task 保持不变，你可以直接在飞书继续发送消息。"
+        )
     return {
         "schema": "2.0",
         "config": {
             "update_multi": True,
             "width_mode": "default",
             "enable_forward": False,
-            "summary": {"content": f"接续桌面 Task · {task['title']} · {tag_text}"},
+            "summary": {"content": f"从 Codex Desktop 回到飞书 · {task['title']} · {tag_text}"},
         },
         "header": {
-            "title": {"tag": "plain_text", "content": task_title_text(task)},
-            "subtitle": {"tag": "plain_text", "content": task_project_text(task)},
+            "title": {"tag": "plain_text", "content": title},
+            "subtitle": {
+                "tag": "plain_text",
+                "content": f"{task['project']} · {task['title']}",
+            },
             "template": template,
             "text_tag_list": [
-                {
-                    "tag": "text_tag",
-                    "text": {"tag": "plain_text", "content": "接续桌面 Task"},
-                    "color": "blue",
-                },
+                current_task_tag(),
                 {
                     "tag": "text_tag",
                     "text": {"tag": "plain_text", "content": tag_text},
@@ -4363,13 +4669,14 @@ def build_desktop_sync_confirmation_card(
     message = (
         "⚠️ **当前 Task 已变化，请重新核对后再接续。**"
         if current_changed
-        else "**准备接续桥接中选择的当前 Task。**"
+        else "**这是你在桥接中选择的当前 Task。**"
     )
     message += (
+        "\n\n接续后，可以查看桌面端的最新结果，并在飞书继续沟通。"
         f"\n\n项目：**{card_markdown_escape(task['project'])}**"
         f"\nTask：**{card_markdown_escape(task['title'])}**"
-        f"\n状态：**{status_text}**"
-        "\n\n如果不是你要接续的 Task，请先选择其他 Task。"
+        f"\n桌面状态：**{status_text}**"
+        "\n\n如果不是你要接续的 Task，请先选择「接续其他 Task」。"
     )
     return {
         "schema": "2.0",
@@ -4377,11 +4684,17 @@ def build_desktop_sync_confirmation_card(
             "update_multi": True,
             "width_mode": "default",
             "enable_forward": False,
-            "summary": {"content": f"确认接续桌面 Task · {task['title']}"},
+            "summary": {"content": f"从 Codex Desktop 回到飞书 · {task['title']}"},
         },
         "header": {
-            "title": {"tag": "plain_text", "content": task_title_text(task)},
-            "subtitle": {"tag": "plain_text", "content": task_project_text(task)},
+            "title": {
+                "tag": "plain_text",
+                "content": "从 Codex Desktop 回到飞书",
+            },
+            "subtitle": {
+                "tag": "plain_text",
+                "content": f"{task['project']} · {task['title']}",
+            },
             "template": "blue",
             "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
             "text_tag_list": [
@@ -4401,7 +4714,7 @@ def build_desktop_sync_confirmation_card(
                 {"tag": "markdown", "content": message},
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "接续这个 Task"},
+                    "text": {"tag": "plain_text", "content": "接续当前 Task"},
                     "type": "primary_filled",
                     "width": "fill",
                     "behaviors": [
@@ -4416,7 +4729,7 @@ def build_desktop_sync_confirmation_card(
                 },
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "选择其他 Task"},
+                    "text": {"tag": "plain_text", "content": "接续其他 Task"},
                     "type": "default",
                     "width": "fill",
                     "behaviors": [
@@ -4428,7 +4741,7 @@ def build_desktop_sync_confirmation_card(
                 },
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "取消"},
+                    "text": {"tag": "plain_text", "content": "暂不接续"},
                     "type": "default",
                     "width": "fill",
                     "behaviors": [
@@ -4453,16 +4766,20 @@ def build_desktop_sync_canceled_card(task: dict[str, str] | None) -> dict[str, A
             "update_multi": True,
             "width_mode": "default",
             "enable_forward": False,
-            "summary": {"content": "已取消接续桌面 Task"},
+            "summary": {"content": "已取消从桌面接续"},
         },
         "header": {
             "title": {
                 "tag": "plain_text",
-                "content": task_title_text(task) if task else "接续桌面 Task",
+                "content": "已取消从桌面接续",
             },
             "subtitle": {
                 "tag": "plain_text",
-                "content": task_project_text(task) if task else "没有有效的当前 Task",
+                "content": (
+                    f"{task['project']} · {task['title']}"
+                    if task
+                    else "没有有效的当前 Task"
+                ),
             },
             "template": "grey",
             "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
@@ -4480,7 +4797,7 @@ def build_desktop_sync_canceled_card(task: dict[str, str] | None) -> dict[str, A
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": "已取消，本次没有接续或订阅任何桌面 Task。当前 Task 保持不变。",
+                    "content": "本次没有接续或订阅 Codex Desktop。当前 Task 保持不变。",
                 }
             ],
         },
@@ -4853,9 +5170,11 @@ def help_text() -> str:
     return (
         "可用命令：\n"
         "机器人菜单 TASK →“当前 Task” —— 查看当前状态卡\n"
-        "机器人菜单 TASK →“选择 Task” —— 选择当前 Task 或恢复已归档 Task\n"
+        "机器人菜单 TASK →“切换 Task” —— 切换当前 Task 或恢复已归档 Task\n"
         "机器人菜单“新建 Task” —— 选择项目并新建 Task\n"
         "机器人菜单 TASK →“归档当前 Task” —— 可取消或二次确认归档当前 Task\n"
+        "机器人菜单 接续桌面 Task →“接续当前 Task” —— 接续桥接中的当前 Task\n"
+        "机器人菜单 接续桌面 Task →“接续其他 Task” —— 先切换 Task 再接续\n"
         "对话 —— 用文字打开 Task 选择卡片（备用）\n"
         "选择 N —— 文字选择 task（备用）\n"
         "搜索 关键词 —— 按标题搜索当前项目的 Task\n"
@@ -4916,7 +5235,7 @@ def build_task_card(
     active_page = min(max(page, 0), page_count - 1)
     start = active_page * TASKS_PER_PAGE
     visible_tasks = project_tasks[start : start + TASKS_PER_PAGE]
-    card_title = "恢复已归档 Task" if archived else "选择 Codex task"
+    card_title = "恢复已归档 Task" if archived else "切换 Codex Task"
     header: dict[str, Any] = {
         "title": {
             "tag": "plain_text",
@@ -4935,7 +5254,7 @@ def build_task_card(
                 if selected
                 else "选择后确认恢复该 Task"
                 if archived
-                else "选择后，后续文字会发送到该 Task"
+                else "切换后，后续文字会发送到该 Task"
             ),
         },
         "template": "yellow" if archived and selected else "green" if selected else "blue",
@@ -4973,7 +5292,7 @@ def build_task_card(
                     else (
                         "✅ **当前 Task 已切换**\n后续消息会持续发送到这个 Task。"
                         if selection_changed
-                        else "**选择 Codex Task**\n先选项目，再选 Task；当前选择会持续保留。"
+                        else "**切换 Codex Task**\n先选项目，再选 Task；当前 Task 会持续保留，直到你选择新的 Task。"
                     )
                 )
                 + (f"\n当前搜索：`{card_markdown_escape(search_query[:80])}`" if query else "")
@@ -5005,7 +5324,7 @@ def build_task_card(
         "name": "archived_task_selector" if archived else "task_selector",
         "placeholder": {
             "tag": "plain_text",
-            "content": "选择一个已归档 Task" if archived else "选择一个 Task",
+            "content": "选择一个已归档 Task" if archived else "切换到一个 Task",
         },
         "options": [
             {
@@ -5136,6 +5455,23 @@ def build_task_card(
         elements.append(
             {
                 "tag": "button",
+                "text": {"tag": "plain_text", "content": "取消切换"},
+                "type": "default",
+                "width": "fill",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": {
+                            "action": "cancel_task_switch",
+                            "task_id": str(selected["id"]),
+                        },
+                    }
+                ],
+            }
+        )
+        elements.append(
+            {
+                "tag": "button",
                 "text": {
                     "tag": "plain_text",
                     "content": (
@@ -5220,6 +5556,48 @@ def build_task_card(
             "padding": "12px 12px 20px 12px",
             "vertical_spacing": "12px",
             "elements": elements,
+        },
+    }
+
+
+def build_task_switch_canceled_card(task: dict[str, str]) -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {
+            "update_multi": True,
+            "width_mode": "default",
+            "enable_forward": False,
+            "summary": {"content": f"已取消切换 · {task['title']}"},
+        },
+        "header": {
+            "title": {"tag": "plain_text", "content": task_title_text(task)},
+            "subtitle": {"tag": "plain_text", "content": task_project_text(task)},
+            "template": "green",
+            "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
+            "text_tag_list": [current_task_tag()],
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        "✅ **已取消切换**\n\n"
+                        "当前 Task 保持不变，后续消息仍会发送到这里。"
+                    ),
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "重新切换 Task"},
+                    "type": "default",
+                    "width": "fill",
+                    "behaviors": [
+                        {"type": "callback", "value": {"action": "show_task_selector"}}
+                    ],
+                },
+            ],
         },
     }
 
@@ -5351,9 +5729,13 @@ def build_archive_task_card(
     archived: bool = False,
     canceled: bool = False,
     restored: bool = False,
+    processing: str = "",
 ) -> dict[str, Any]:
     if task is None:
-        status = "尚未选择 Task。请先点击机器人菜单中的“选择 Task”。"
+        status = "尚未选择 Task。请先点击机器人菜单中的“切换 Task”。"
+    elif processing:
+        verb = "恢复" if processing == "restore" else "归档"
+        status = f"正在{verb}：**{card_markdown_escape(option_text(task))}**\n\n请稍候，完成后会自动更新。"
     elif archived:
         status = f"已归档：**{card_markdown_escape(option_text(task))}**\n\n可在下方立即撤销归档。"
     elif canceled:
@@ -5377,7 +5759,7 @@ def build_archive_task_card(
             "归档后会从未归档列表移除，可在飞书或 Codex Desktop 中恢复。"
         )
     elements: list[dict[str, Any]] = [{"tag": "markdown", "content": status}]
-    if task is not None and not busy and not archived and not canceled:
+    if task is not None and not busy and not archived and not canceled and not processing:
         elements.extend(
             [
                 {
@@ -5442,7 +5824,7 @@ def build_archive_task_card(
                 },
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "选择其他 Task"},
+                    "text": {"tag": "plain_text", "content": "切换到其他 Task"},
                     "type": "default",
                     "width": "fill",
                     "behaviors": [
@@ -5465,7 +5847,7 @@ def build_archive_task_card(
             [
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "选择其他 Task"},
+                    "text": {"tag": "plain_text", "content": "切换到其他 Task"},
                     "type": "default",
                     "width": "fill",
                     "behaviors": [
@@ -5486,14 +5868,16 @@ def build_archive_task_card(
     header_tags: list[dict[str, Any]] = []
     if task is not None and not archived:
         header_tags.append(current_task_tag())
-    if archived or canceled or restored or busy:
+    if archived or canceled or restored or busy or processing:
         header_tags.append(
             {
                 "tag": "text_tag",
                 "text": {
                     "tag": "plain_text",
                     "content": (
-                        "已恢复"
+                        "处理中"
+                        if processing
+                        else "已恢复"
                         if restored
                         else "已归档"
                         if archived
@@ -5503,7 +5887,9 @@ def build_archive_task_card(
                     ),
                 },
                 "color": (
-                    "green"
+                    "blue"
+                    if processing
+                    else "green"
                     if restored
                     else "neutral"
                     if archived or canceled
@@ -5529,7 +5915,9 @@ def build_archive_task_card(
                 "content": task_project_text(task) if task else "没有当前 Task",
             },
             "template": (
-                "green"
+                "blue"
+                if processing
+                else "green"
                 if restored
                 else "grey"
                 if archived or canceled
@@ -5653,6 +6041,48 @@ def card_context_type(card: dict[str, Any]) -> str:
     return "archive_task" if title == "归档 Codex Task" else ""
 
 
+def card_selector_context(card: dict[str, Any]) -> dict[str, Any]:
+    selectors: list[dict[str, Any]] = []
+    for element in card.get("body", {}).get("elements", []):
+        if not isinstance(element, dict) or element.get("tag") != "select_static":
+            continue
+        selectors.append(
+            {
+                "name": str(element.get("name") or ""),
+                "initial_option": str(element.get("initial_option") or ""),
+                "options": [
+                    str(option.get("value") or "")
+                    for option in element.get("options", [])
+                    if isinstance(option, dict)
+                ],
+            }
+        )
+    return {"selectors": selectors}
+
+
+def card_active_project(card: dict[str, Any] | None, archived: bool = False) -> str:
+    if not isinstance(card, dict):
+        return ""
+    expected_name = "archived_project_selector" if archived else "project_selector"
+    for selector in card_selector_context(card)["selectors"]:
+        if selector["name"] == expected_name:
+            return str(selector["initial_option"] or "")
+    return ""
+
+
+def task_card_with_notice(card: dict[str, Any], notice: str) -> dict[str, Any]:
+    elements = card.get("body", {}).get("elements", [])
+    if isinstance(elements, list):
+        elements.insert(
+            0,
+            {
+                "tag": "markdown",
+                "content": f"⚠️ **{card_markdown_escape(notice)}**",
+            },
+        )
+    return card
+
+
 def remember_card_context(
     state: dict[str, Any],
     user_id: str,
@@ -5666,10 +6096,19 @@ def remember_card_context(
     contexts = state.setdefault("card_contexts", {})
     if not isinstance(contexts, dict):
         contexts = {}
+    previous = contexts.get(message_id)
+    revision = (
+        int(previous.get("revision") or 0) + 1
+        if isinstance(previous, dict)
+        else 1
+    )
     contexts.pop(message_id, None)
     contexts[message_id] = {
         "user_id": user_id,
         "type": context_type,
+        "revision": revision,
+        "project": card_active_project(card, context_type == "archived_tasks"),
+        "selector_context": card_selector_context(card),
     }
     state["card_contexts"] = dict(list(contexts.items())[-100:])
     save_state(state)
@@ -5686,23 +6125,50 @@ def card_context_for_event(
     return str(context.get("type") or "")
 
 
+def card_context_details(
+    state: dict[str, Any],
+    user_id: str,
+    message_id: str,
+) -> dict[str, Any]:
+    context = state.get("card_contexts", {}).get(message_id)
+    if not isinstance(context, dict) or context.get("user_id") != user_id:
+        return {}
+    return dict(context)
+
+
 def send_menu_card(
     user_id: str,
     state: dict[str, Any],
     card: dict[str, Any],
     kind: str,
+    context_type_override: str = "",
 ) -> bool:
-    with _state_lock:
-        success, chat_id, message_id = send_card(
+    success, chat_id, message_id = send_card(
+        user_id,
+        card,
+        kind,
+    )
+    if not success:
+        queue_pending_menu_card(
             user_id,
             card,
             kind,
+            "飞书卡片发送超时或网络失败",
         )
-        if success and chat_id:
+        return False
+    with _state_lock:
+        state = load_state()
+        if chat_id:
             authorize_chat(state, user_id, chat_id)
-        if success and message_id:
-            remember_card_context(state, user_id, message_id, card)
-        return success
+        if message_id:
+            remember_card_context(
+                state,
+                user_id,
+                message_id,
+                card,
+                context_type_override,
+            )
+    return True
 
 
 def desktop_result_subscriptions(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -5717,10 +6183,22 @@ def desktop_sync_current_snapshot(
     user_id: str,
     state: dict[str, Any],
 ) -> tuple[dict[str, str] | None, dict[str, Any]]:
+    started = time.monotonic()
     task = selected_task(user_id, state)
+    task_lookup_ms = round((time.monotonic() - started) * 1000)
     if task is None:
+        log(
+            "latency desktop_sync_snapshot "
+            f"task_lookup_ms={task_lookup_ms} rollout_scan_ms=0"
+        )
         return None, {"status": "none"}
+    rollout_started = time.monotonic()
     snapshot = latest_rollout_turn(rollout_path_for_task(str(task["id"])))
+    rollout_scan_ms = round((time.monotonic() - rollout_started) * 1000)
+    log(
+        "latency desktop_sync_snapshot "
+        f"task_lookup_ms={task_lookup_ms} rollout_scan_ms={rollout_scan_ms}"
+    )
     return task, snapshot
 
 
@@ -5754,7 +6232,7 @@ def deliver_desktop_sync_result(
                 "final",
             )
         if followed:
-            refresh_user_task_identity_cards(
+            schedule_user_task_identity_refresh(
                 user_id,
                 "当前 Task 已跟随桌面结果",
                 task,
@@ -5792,8 +6270,7 @@ def deliver_desktop_sync_result(
 def start_desktop_sync(user_id: str, state: dict[str, Any], event_id: str) -> None:
     task, snapshot = desktop_sync_current_snapshot(user_id, state)
     if task is None:
-        send_task_card(user_id, state, event_id)
-        log("menu handled key=sync_desktop result=task-selector")
+        start_desktop_sync_switch(user_id, state, event_id)
         return
     send_menu_card(
         user_id,
@@ -5805,6 +6282,21 @@ def start_desktop_sync(user_id: str, state: dict[str, Any], event_id: str) -> No
         f"desktop-sync-confirm-{event_id}",
     )
     log("menu handled key=sync_desktop result=confirmation-card")
+
+
+def start_desktop_sync_switch(
+    user_id: str,
+    state: dict[str, Any],
+    event_id: str,
+) -> None:
+    send_menu_card(
+        user_id,
+        state,
+        task_card_for_state(user_id, state),
+        f"desktop-sync-switch-{event_id}",
+        "desktop_sync_selection",
+    )
+    log("menu handled key=sync_desktop_switch result=task-selector")
 
 
 def confirm_desktop_sync(
@@ -5882,7 +6374,7 @@ def retry_desktop_result_subscriptions(now: float | None = None) -> bool:
     ):
         snapshot = {
             "status": "missing",
-            "message": "桌面 Task 接续已失效，请重新点击“接续桌面 Task”。",
+            "message": "本次桌面接续已失效，请重新点击“接续当前 Task”。",
         }
     else:
         snapshot = advance_rollout_turn(
@@ -5906,7 +6398,7 @@ def retry_desktop_result_subscriptions(now: float | None = None) -> bool:
     elif message_id:
         reply_or_queue(
             message_id,
-            "桌面 Task 接续已失效：该 Task 已归档、删除或不再属于你的授权项目。请重新点击“接续桌面 Task”。",
+            "本次桌面接续已失效：该 Task 已归档、删除或不再属于你的授权项目。请重新点击“接续当前 Task”。",
             "final",
         )
     with _state_lock:
@@ -6386,6 +6878,57 @@ def refresh_user_task_identity_cards(
     update_current_status_card(user_id, change, task=task, ensure=True)
 
 
+def schedule_user_task_identity_refresh(
+    user_id: str,
+    change: str = "",
+    task: dict[str, str] | None = None,
+) -> None:
+    with _identity_refresh_condition:
+        _identity_refresh_pending[user_id] = (
+            change,
+            dict(task) if task is not None else None,
+            time.monotonic(),
+        )
+        _identity_refresh_condition.notify()
+
+
+def schedule_queued_card_refresh(task_id: str) -> None:
+    with _identity_refresh_condition:
+        _queued_card_refresh_pending[task_id] = time.monotonic()
+        _identity_refresh_condition.notify()
+
+
+def identity_refresh_loop() -> None:
+    while not _shutdown_event.is_set():
+        with _identity_refresh_condition:
+            if not _identity_refresh_pending and not _queued_card_refresh_pending:
+                _identity_refresh_condition.wait(timeout=0.5)
+            if _shutdown_event.is_set():
+                return
+            if not _identity_refresh_pending and not _queued_card_refresh_pending:
+                continue
+            if _identity_refresh_pending:
+                user_id, (change, task, queued_at) = _identity_refresh_pending.popitem()
+                operation = "identity_refresh"
+            else:
+                task_id, queued_at = _queued_card_refresh_pending.popitem()
+                operation = "queued_card_refresh"
+        started = time.monotonic()
+        try:
+            if operation == "identity_refresh":
+                refresh_user_task_identity_cards(user_id, change, task)
+            else:
+                refresh_queued_cards(task_id)
+        except Exception as exc:
+            log(f"background refresh failed operation={operation} error={type(exc).__name__}")
+        else:
+            log(
+                f"latency background operation={operation} "
+                f"queue_ms={round((started - queued_at) * 1000)} "
+                f"duration_ms={round((time.monotonic() - started) * 1000)}"
+            )
+
+
 def task_card_for_state(
     user_id: str,
     state: dict[str, Any],
@@ -6491,7 +7034,7 @@ def select_task(user_id: str, choice: str, state: dict[str, Any]) -> str:
 def current_task(user_id: str, state: dict[str, Any]) -> str:
     task = selected_task(user_id, state)
     if not task:
-        return "尚未选择 Codex task。请点击机器人菜单中的“选择 Task”。"
+        return "尚未选择 Codex task。请点击机器人菜单中的“切换 Task”。"
     return current_task_text(task)
 
 
@@ -8158,7 +8701,7 @@ def process_message_run(
                 "desktop-unavailable" if waiting_for_choice else "final",
             )
         if followed_result:
-            refresh_user_task_identity_cards(
+            schedule_user_task_identity_refresh(
                 user_id,
                 "当前 Task 已跟随最新结果",
                 task,
@@ -8335,7 +8878,7 @@ def handle_message_event(event: dict[str, Any]) -> None:
             "select",
         )
         if selection_reply.startswith("✅"):
-            refresh_user_task_identity_cards(user_id, "当前 Task 已切换")
+            schedule_user_task_identity_refresh(user_id, "当前 Task 已切换")
         return
     if len(content) > MAX_PROMPT_CHARS:
         reply(message_id, f"消息超过 {MAX_PROMPT_CHARS} 字，请缩短后重试。", "too-long")
@@ -8361,7 +8904,7 @@ def handle_message_event(event: dict[str, Any]) -> None:
     if not task:
         reply(
             message_id,
-            "尚未选择 Codex task。请点击机器人菜单中的“选择 Task”。",
+            "尚未选择 Codex task。请点击机器人菜单中的“切换 Task”。",
             "no-selection",
         )
         return
@@ -8605,8 +9148,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     build_queued_card(entry, 0, canceled=True),
                 )
             task_id = str(entry["task"]["id"])
-            refresh_queued_cards(task_id)
-            update_current_status_card(user_id)
+            schedule_queued_card_refresh(task_id)
+            schedule_user_task_identity_refresh(user_id)
             log("queued input canceled")
             return
         if action == "refresh_current_status":
@@ -8660,6 +9203,208 @@ def handle_card_event(event: dict[str, Any]) -> None:
                 daemon=True,
             ).start()
             return
+        if action == "cancel_task_switch":
+            with _state_lock:
+                state = load_state()
+                if not mark_processed(state, f"card:{event_id}"):
+                    return
+                task = selected_task(user_id, state)
+                context_type = card_context_for_event(state, user_id, message_id)
+                requested_task_id = str(payload.get("task_id") or "")
+                current_changed = bool(
+                    task is not None
+                    and requested_task_id
+                    and requested_task_id != str(task["id"])
+                )
+                if task is not None:
+                    state.setdefault("last_projects", {})[user_id] = task["project"]
+                    state.setdefault("task_pages", {})[user_id] = 0
+                    state.setdefault("task_queries", {}).pop(user_id, None)
+                    save_state(state)
+            if task is None:
+                card = task_card_with_notice(
+                    task_card_for_state(user_id, state),
+                    "当前没有可保留的 Task，请先选择一个 Task",
+                )
+                context_type_override = ""
+            elif context_type == "desktop_sync_selection":
+                snapshot = latest_rollout_turn(
+                    rollout_path_for_task(str(task["id"]))
+                )
+                card = build_desktop_sync_confirmation_card(
+                    task,
+                    str(snapshot.get("status") or "none"),
+                    current_changed=current_changed,
+                )
+                context_type_override = "desktop_sync_confirmation"
+            else:
+                card = build_task_switch_canceled_card(task)
+                if current_changed:
+                    card = task_card_with_notice(
+                        card,
+                        "当前 Task 已变化；本次没有执行新的切换",
+                    )
+                context_type_override = ""
+            if message_id:
+                with _state_lock:
+                    state = load_state()
+                    if context_type_override:
+                        remember_card_context(
+                            state,
+                            user_id,
+                            message_id,
+                            card,
+                            context_type_override,
+                        )
+                    else:
+                        contexts = state.get("card_contexts", {})
+                        if isinstance(contexts, dict):
+                            contexts.pop(message_id, None)
+                            save_state(state)
+            token = str(event.get("token") or "")
+            if token and update_card(token, card):
+                log("card handled action=cancel_task_switch")
+                return
+            if message_id:
+                patch_card(message_id, card)
+            log("card handled action=cancel_task_switch")
+            return
+        if action == "new_task":
+            with _state_lock:
+                state = load_state()
+                if not mark_processed(state, f"card:{event_id}"):
+                    return
+                requested_project = str(payload.get("project") or "")
+                projects = set(available_project_names(user_id))
+                latest_project = str(
+                    state.setdefault("last_projects", {}).get(user_id) or ""
+                )
+                project = latest_project if latest_project in projects else requested_project
+                if project not in projects:
+                    return
+                state.setdefault("pending_task_creations", {})[user_id] = project
+                save_state(state)
+            reply(
+                message_id,
+                f"准备在项目“{project}”中新建 Task。请发送 Task 标题；发送“取消新建”可退出。",
+                f"new-task-ready-{event_id}",
+            )
+            return
+        if action in {"archive_task", "restore_task"}:
+            with _state_lock:
+                state = load_state()
+                if not mark_processed(state, f"card:{event_id}"):
+                    return
+                current_task = selected_task(user_id, state)
+            requested_task_id = str(payload.get("task_id") or "")
+            if action == "restore_task":
+                task = next(
+                    (
+                        candidate
+                        for candidate in archived_tasks(user_id)
+                        if str(candidate["id"]) == requested_task_id
+                    ),
+                    None,
+                )
+                if task is None:
+                    reply(
+                        message_id,
+                        "该 Task 已经恢复、删除或当前用户已无权访问。",
+                        f"restore-stale-{event_id}",
+                    )
+                    return
+            else:
+                task = current_task
+                if task is None:
+                    reply(
+                        message_id,
+                        "尚未选择 Task，请先点击机器人菜单中的“切换 Task”。",
+                        f"archive-no-task-{event_id}",
+                    )
+                    return
+                if requested_task_id and requested_task_id != str(task["id"]):
+                    reply(
+                        message_id,
+                        "当前 Task 已经变化，请重新点击 TASK →“归档当前 Task”。",
+                        f"archive-stale-{event_id}",
+                    )
+                    return
+                if active_run_for_task(str(task["id"])) is not None:
+                    reply(
+                        message_id,
+                        "当前 Task 正在运行，完成或停止后才能归档。",
+                        f"archive-busy-{event_id}",
+                    )
+                    return
+            processing_card = build_archive_task_card(
+                task,
+                processing="restore" if action == "restore_task" else "archive",
+            )
+            token = str(event.get("token") or "")
+            if not (token and update_card(token, processing_card)) and message_id:
+                patch_card(message_id, processing_card)
+            started = time.monotonic()
+            try:
+                if action == "restore_task":
+                    restore_codex_task(user_id, task)
+                else:
+                    archive_codex_task(user_id, task)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                log(f"task mutation failed action={action} error={type(exc).__name__}")
+                if message_id:
+                    patch_card(
+                        message_id,
+                        task_card_with_notice(
+                            build_archive_task_card(
+                                task,
+                                archived=action == "restore_task",
+                            ),
+                            "操作失败，当前状态没有改变，请稍后重试",
+                        ),
+                    )
+                reply(
+                    message_id,
+                    (
+                        "没有成功恢复 Task，请在 Codex Desktop 中重试。"
+                        if action == "restore_task"
+                        else "没有成功归档 Task，请在 Codex Desktop 中重试。"
+                    ),
+                    f"{action}-error-{event_id}",
+                )
+                return
+            log(
+                f"latency desktop operation={action} "
+                f"duration_ms={round((time.monotonic() - started) * 1000)} success=true"
+            )
+            with _state_lock:
+                state = load_state()
+                if action == "restore_task":
+                    state.setdefault("selected", {})[user_id] = task["id"]
+                    state.setdefault("last_projects", {})[user_id] = task["project"]
+                    remember_recent_task(state, user_id, str(task["id"]))
+                    state.setdefault("task_pages", {})[user_id] = 0
+                    final_card = build_archive_task_card(task, restored=True)
+                else:
+                    if str(state.setdefault("selected", {}).get(user_id) or "") == str(task["id"]):
+                        state["selected"].pop(user_id, None)
+                    final_card = build_archive_task_card(task, archived=True)
+                save_state(state)
+            if message_id:
+                patch_card(message_id, final_card)
+            elif token:
+                update_card(token, final_card)
+            reply(
+                message_id,
+                (
+                    current_task_changed_text(task, "已恢复")
+                    if action == "restore_task"
+                    else f"已归档：{option_text(task)}"
+                ),
+                f"{action}-done-{event_id}",
+            )
+            if action == "restore_task":
+                schedule_user_task_identity_refresh(user_id, "当前 Task 已恢复", task)
+            return
         if action in {
             "task_page",
             "archived_task_page",
@@ -8667,11 +9412,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
             "refresh_archived_tasks",
             "toggle_task_favorite",
             "clear_task_search",
-            "new_task",
             "cancel_new_task",
-            "archive_task",
             "cancel_archive",
-            "restore_task",
             "show_task_selector",
             "show_desktop_sync_task_selector",
             "show_archived_tasks",
@@ -8679,6 +9421,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         }:
             status_change = ""
             context_type_override = ""
+            favorite_stale = False
             with _state_lock:
                 state = load_state()
                 if not mark_processed(state, f"card:{event_id}"):
@@ -8687,31 +9430,27 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     task = selected_task(user_id, state)
                     requested_task_id = str(payload.get("task_id") or "")
                     if task is None or requested_task_id != str(task["id"]):
-                        reply(
-                            message_id,
-                            "当前 Task 已变化，请刷新卡片后再操作收藏。",
-                            f"favorite-stale-{event_id}",
-                        )
-                        return
-                    favorites = state.setdefault("favorite_task_ids", {}).get(user_id, [])
-                    if not isinstance(favorites, list):
-                        favorites = []
-                    task_id = str(task["id"])
-                    if task_id in favorites:
-                        favorites = [value for value in favorites if str(value) != task_id]
-                        status_change = "已取消收藏当前 Task"
+                        favorite_stale = True
                     else:
-                        favorites = [task_id] + [
-                            str(value) for value in favorites if str(value) != task_id
-                        ]
-                        status_change = "已收藏当前 Task"
-                    state.setdefault("favorite_task_ids", {})[user_id] = favorites
-                    save_state(state)
-                    card = (
-                        current_status_card_for_user(user_id, task, status_change)
-                        if payload.get("return_to") == "status"
-                        else task_card_for_state(user_id, state)
-                    )
+                        favorites = state.setdefault("favorite_task_ids", {}).get(user_id, [])
+                        if not isinstance(favorites, list):
+                            favorites = []
+                        task_id = str(task["id"])
+                        if task_id in favorites:
+                            favorites = [value for value in favorites if str(value) != task_id]
+                            status_change = "已取消收藏当前 Task"
+                        else:
+                            favorites = [task_id] + [
+                                str(value) for value in favorites if str(value) != task_id
+                            ]
+                            status_change = "已收藏当前 Task"
+                        state.setdefault("favorite_task_ids", {})[user_id] = favorites
+                        save_state(state)
+                        card = (
+                            current_status_card_for_user(user_id, task, status_change)
+                            if payload.get("return_to") == "status"
+                            else task_card_for_state(user_id, state)
+                        )
                 elif action == "refresh_task_list":
                     card = task_card_for_state(user_id, state)
                 elif action == "refresh_archived_tasks":
@@ -8760,116 +9499,19 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     save_state(state)
                     card = build_new_task_card([], canceled=True)
                     log("new task creation canceled")
-                elif action == "new_task":
-                    requested_project = str(payload.get("project") or "")
-                    projects = set(available_project_names(user_id))
-                    latest_project = str(
-                        state.setdefault("last_projects", {}).get(user_id) or ""
-                    )
-                    project = (
-                        latest_project
-                        if latest_project in projects
-                        else requested_project
-                    )
-                    if project not in projects:
-                        return
-                    state.setdefault("pending_task_creations", {})[user_id] = project
-                    save_state(state)
-                    reply(
-                        message_id,
-                        f"准备在项目“{project}”中新建 Task。请发送 Task 标题；发送“取消新建”可退出。",
-                        f"new-task-ready-{event_id}",
-                    )
-                    return
                 elif action == "cancel_archive":
                     task = selected_task(user_id, state)
                     save_state(state)
                     card = build_archive_task_card(task, canceled=True)
                     log("task archive canceled")
-                elif action == "restore_task":
-                    requested_task_id = str(payload.get("task_id") or "")
-                    task = next(
-                        (
-                            candidate
-                            for candidate in archived_tasks(user_id)
-                            if str(candidate["id"]) == requested_task_id
-                        ),
-                        None,
-                    )
-                    if task is None:
-                        reply(
-                            message_id,
-                            "该 Task 已经恢复、删除或当前用户已无权访问。",
-                            f"restore-stale-{event_id}",
-                        )
-                        return
-                    try:
-                        restore_codex_task(user_id, task)
-                    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-                        log(f"task restore failed error={type(exc).__name__}")
-                        reply(
-                            message_id,
-                            "没有成功恢复 Task，请在 Codex Desktop 中重试。",
-                            f"restore-error-{event_id}",
-                        )
-                        return
-                    state = load_state()
-                    state.setdefault("selected", {})[user_id] = task["id"]
-                    state.setdefault("last_projects", {})[user_id] = task["project"]
-                    remember_recent_task(state, user_id, str(task["id"]))
-                    state.setdefault("task_pages", {})[user_id] = 0
-                    save_state(state)
-                    card = build_archive_task_card(task, restored=True)
-                    status_change = "当前 Task 已恢复"
-                    reply(
-                        message_id,
-                        current_task_changed_text(task, "已恢复"),
-                        f"restored-{event_id}",
-                    )
-                else:
-                    task = selected_task(user_id, state)
-                    if task is None:
-                        reply(
-                            message_id,
-                            "尚未选择 Task，请先点击机器人菜单中的“选择 Task”。",
-                            f"archive-no-task-{event_id}",
-                        )
-                        return
-                    requested_task_id = str(payload.get("task_id") or "")
-                    if requested_task_id and requested_task_id != str(task["id"]):
-                        reply(
-                            message_id,
-                            "当前 Task 已经变化，请重新点击 TASK →“归档当前 Task”。",
-                            f"archive-stale-{event_id}",
-                        )
-                        return
-                    if active_run_for_task(str(task["id"])) is not None:
-                        reply(
-                            message_id,
-                            "当前 Task 正在运行，完成或停止后才能归档。",
-                            f"archive-busy-{event_id}",
-                        )
-                        return
-                    try:
-                        archive_codex_task(user_id, task)
-                    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-                        log(f"task archive failed error={type(exc).__name__}")
-                        reply(
-                            message_id,
-                            "没有成功归档 Task，请在 Codex Desktop 中重试。",
-                            f"archive-error-{event_id}",
-                        )
-                        return
-                    state = load_state()
-                    state.setdefault("selected", {}).pop(user_id, None)
-                    save_state(state)
-                    card = build_archive_task_card(task, archived=True)
-                    reply(
-                        message_id,
-                        f"已归档：{option_text(task)}",
-                        f"archived-{event_id}",
-                    )
             token = str(event.get("token") or "")
+            if favorite_stale:
+                reply(
+                    message_id,
+                    "当前 Task 已变化，请刷新卡片后再操作收藏。",
+                    f"favorite-stale-{event_id}",
+                )
+                return
             if message_id:
                 with _state_lock:
                     current_state = load_state()
@@ -8880,30 +9522,17 @@ def handle_card_event(event: dict[str, Any]) -> None:
                         card,
                         context_type_override,
                     )
+            if not ui_intent_is_current(event):
+                log(f"card intent skipped action={action} reason=superseded")
+                return
             if token and update_card(token, card):
                 if status_change:
-                    if action == "toggle_task_favorite":
-                        update_current_status_card(
-                            user_id,
-                            status_change,
-                            task=task,
-                            ensure=True,
-                        )
-                    else:
-                        refresh_user_task_identity_cards(user_id, status_change, task)
+                    schedule_user_task_identity_refresh(user_id, status_change, task)
                 return
             if message_id:
                 patch_card(message_id, card)
             if status_change:
-                if action == "toggle_task_favorite":
-                    update_current_status_card(
-                        user_id,
-                        status_change,
-                        task=task,
-                        ensure=True,
-                    )
-                else:
-                    refresh_user_task_identity_cards(user_id, status_change, task)
+                schedule_user_task_identity_refresh(user_id, status_change, task)
             return
         run = active_run(str(payload.get("run_id") or ""))
         if (
@@ -8943,7 +9572,9 @@ def handle_card_event(event: dict[str, Any]) -> None:
     except json.JSONDecodeError:
         original_card = None
     with _state_lock:
-        context_type = card_context_for_event(load_state(), user_id, message_id)
+        context_state = load_state()
+        context_details = card_context_details(context_state, user_id, message_id)
+        context_type = str(context_details.get("type") or "")
     elements = (
         original_card.get("body", {}).get("elements", [])
         if isinstance(original_card, dict)
@@ -8977,6 +9608,9 @@ def handle_card_event(event: dict[str, Any]) -> None:
             card = build_new_task_card(projects, selected_value)
             if message_id:
                 remember_card_context(state, user_id, message_id, card)
+        if not ui_intent_is_current(event):
+            log("card intent skipped action=new_task_project_selector reason=superseded")
+            return
         token = str(event.get("token") or "")
         if token and update_card(token, card):
             return
@@ -9006,6 +9640,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
             else:
                 log("card ignored reason=unknown-archived-selector")
                 return
+        stale_archived_selection = False
         with _state_lock:
             state = load_state()
             if chat_id and not is_authorized_chat(state, user_id, chat_id):
@@ -9029,24 +9664,31 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     None,
                 )
                 if selected is None:
-                    if message_id:
-                        reply(
-                            message_id,
-                            "该 Task 已经恢复或删除，请重新选择。",
-                            f"archived-stale-{event_id}",
-                        )
-                    return
-                state.setdefault("archived_last_projects", {})[user_id] = selected[
-                    "project"
-                ]
-                save_state(state)
-                card = archived_task_card_for_state(
-                    user_id,
-                    state,
-                    selected["id"],
-                )
+                    stale_archived_selection = True
+                else:
+                    state.setdefault("archived_last_projects", {})[user_id] = selected[
+                        "project"
+                    ]
+                    save_state(state)
+                    card = archived_task_card_for_state(
+                        user_id,
+                        state,
+                        selected["id"],
+                    )
             if message_id:
-                remember_card_context(state, user_id, message_id, card)
+                if not stale_archived_selection:
+                    remember_card_context(state, user_id, message_id, card)
+        if stale_archived_selection:
+            if message_id:
+                reply(
+                    message_id,
+                    "该 Task 已经恢复或删除，请重新选择。",
+                    f"archived-stale-{event_id}",
+                )
+            return
+        if not ui_intent_is_current(event):
+            log(f"card intent skipped action={action_name} reason=superseded")
+            return
         token = str(event.get("token") or "")
         if token and update_card(token, card):
             return
@@ -9090,6 +9732,8 @@ def handle_card_event(event: dict[str, Any]) -> None:
             )
             return
         log(f"card selector inferred name={action_name}")
+    stale_selection = False
+    missing_task_selection = False
     with _state_lock:
         state = load_state()
         context_type_override = (
@@ -9127,37 +9771,61 @@ def handle_card_event(event: dict[str, Any]) -> None:
         else:
             selected = next((task for task in tasks if task["id"] == selected_value), None)
             if selected is None:
-                if message_id:
-                    reply(message_id, "该 Task 已归档或删除，请重新选择。", f"stale-{event_id}")
-                return
-            state.setdefault("selected", {})[user_id] = selected["id"]
-            state.setdefault("last_projects", {})[user_id] = selected["project"]
-            remember_recent_task(state, user_id, str(selected["id"]))
-            save_state(state)
-            if context_type == "desktop_sync_selection":
-                snapshot = latest_rollout_turn(
-                    rollout_path_for_task(str(selected["id"]))
-                )
-                card = build_desktop_sync_confirmation_card(
-                    selected,
-                    str(snapshot.get("status") or "none"),
-                )
-                context_type_override = "desktop_sync_confirmation"
+                missing_task_selection = True
             else:
-                card = task_card_for_state(
-                    user_id,
-                    state,
-                    selection_changed=True,
-                    selected_id_override=str(selected["id"]),
+                latest_project = str(
+                    state.setdefault("last_projects", {}).get(user_id) or ""
                 )
+                source_project = (
+                    card_active_project(original_card)
+                    or str(context_details.get("project") or "")
+                )
+                if (
+                    latest_project
+                    and (
+                        str(selected["project"]) != latest_project
+                        or (source_project and source_project != latest_project)
+                    )
+                ):
+                    card = task_card_with_notice(
+                        task_card_for_state(user_id, state),
+                        "项目已经切换，Task 列表已刷新，请在新列表中重新选择",
+                    )
+                    stale_selection = True
+                else:
+                    state.setdefault("selected", {})[user_id] = selected["id"]
+                    state.setdefault("last_projects", {})[user_id] = selected["project"]
+                    remember_recent_task(state, user_id, str(selected["id"]))
+                    save_state(state)
+                    if context_type == "desktop_sync_selection":
+                        snapshot = latest_rollout_turn(
+                            rollout_path_for_task(str(selected["id"]))
+                        )
+                        card = build_desktop_sync_confirmation_card(
+                            selected,
+                            str(snapshot.get("status") or "none"),
+                        )
+                        context_type_override = "desktop_sync_confirmation"
+                    else:
+                        card = task_card_for_state(
+                            user_id,
+                            state,
+                            selection_changed=True,
+                            selected_id_override=str(selected["id"]),
+                        )
         if message_id:
-            remember_card_context(
-                state,
-                user_id,
-                message_id,
-                card,
-                context_type_override,
-            )
+            if not missing_task_selection:
+                remember_card_context(
+                    state,
+                    user_id,
+                    message_id,
+                    card,
+                    context_type_override,
+                )
+    if missing_task_selection:
+        if message_id:
+            reply(message_id, "该 Task 已归档或删除，请重新选择。", f"stale-{event_id}")
+        return
     visible_count = (
         len([task for task in tasks if task["project"] == selected_value])
         if action_name == "project_selector"
@@ -9165,29 +9833,22 @@ def handle_card_event(event: dict[str, Any]) -> None:
     )
     log(
         f"card selection saved name={action_name} "
-        f"visible_tasks={visible_count} update_token={bool(event.get('token'))}"
+        f"visible_tasks={visible_count} stale={str(stale_selection).lower()} "
+        f"update_token={bool(event.get('token'))}"
     )
+    if not ui_intent_is_current(event):
+        log(f"card intent skipped action={action_name} reason=superseded")
+        return
     token = str(event.get("token") or "")
     if token and update_card(token, card):
         log(f"card selection updated name={action_name}")
-        if action_name == "task_selector":
-            refresh_user_task_identity_cards(user_id, "当前 Task 已切换", selected)
+        if action_name == "task_selector" and not stale_selection:
+            schedule_user_task_identity_refresh(user_id, "当前 Task 已切换", selected)
         return
     if message_id:
-        if context_type == "desktop_sync_selection":
-            patch_card(message_id, card)
-        elif action_name == "project_selector":
-            reply(message_id, "项目筛选已更新，请重新打开 Task 菜单。", f"project-{event_id}")
-        elif action_name == "task_scope_selector":
-            reply(message_id, "Task 显示范围已更新。", f"task-scope-{event_id}")
-        else:
-            reply(
-                message_id,
-                current_task_changed_text(selected),
-                f"selected-{event_id}",
-            )
-    if action_name == "task_selector":
-        refresh_user_task_identity_cards(user_id, "当前 Task 已切换", selected)
+        patch_card(message_id, card)
+    if action_name == "task_selector" and not stale_selection:
+        schedule_user_task_identity_refresh(user_id, "当前 Task 已切换", selected)
 
 
 def handle_menu_event(event: dict[str, Any]) -> None:
@@ -9200,14 +9861,16 @@ def handle_menu_event(event: dict[str, Any]) -> None:
         ARCHIVE_TASK_MENU_EVENT_KEY,
         USAGE_MENU_EVENT_KEY,
         DESKTOP_SYNC_MENU_EVENT_KEY,
+        DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY,
     } or not authorized_user(user_id):
         return
     event_id = str(event.get("event_id") or "")
     if not event_id:
         return
-    state = load_state()
-    if not mark_processed(state, f"menu:{event_id}"):
-        return
+    with _state_lock:
+        state = load_state()
+        if not mark_processed(state, f"menu:{event_id}"):
+            return
     if event_key == CURRENT_TASK_MENU_EVENT_KEY:
         task = selected_task(user_id, state)
         if task is None:
@@ -9251,6 +9914,9 @@ def handle_menu_event(event: dict[str, Any]) -> None:
     if event_key == DESKTOP_SYNC_MENU_EVENT_KEY:
         start_desktop_sync(user_id, state, event_id)
         return
+    if event_key == DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY:
+        start_desktop_sync_switch(user_id, state, event_id)
+        return
     task = selected_task(user_id, state)
     busy = bool(task and active_run_for_task(str(task["id"])) is not None)
     send_menu_card(
@@ -9273,6 +9939,147 @@ def dispatch_event(event: dict[str, Any]) -> None:
         handle_menu_event(event)
     else:
         handle_message_event(event)
+
+
+def event_lane_key(event: dict[str, Any]) -> str:
+    return str(
+        event.get("operator_id")
+        or event.get("sender_id")
+        or event.get("chat_id")
+        or event.get("type")
+        or "unknown"
+    )
+
+
+def event_latency_label(event: dict[str, Any]) -> str:
+    event_type = str(event.get("type") or "unknown")
+    if event_type == "card.action.trigger":
+        return str(
+            event.get("action_name")
+            or action_payload(event).get("action")
+            or event.get("action_tag")
+            or "unknown"
+        )
+    if event_type == "application.bot.menu_v6":
+        return str(event.get("event_key") or "unknown")
+    return str(event.get("message_type") or "message")
+
+
+def ui_intent_key(event: dict[str, Any]) -> str:
+    if event.get("type") != "card.action.trigger":
+        return ""
+    user_id = str(event.get("operator_id") or "")
+    message_id = str(event.get("message_id") or "")
+    action_tag = str(event.get("action_tag") or "")
+    action_name = str(event.get("action_name") or "")
+    if action_tag == "select_static" and action_name in {
+        "project_selector",
+        "task_selector",
+        "task_scope_selector",
+        "new_task_project_selector",
+        "archived_project_selector",
+        "archived_task_selector",
+    }:
+        return f"{user_id}:{message_id}:{action_name}"
+    if action_tag != "button":
+        return ""
+    action = str(action_payload(event).get("action") or "")
+    if action in {
+        "task_page",
+        "archived_task_page",
+        "refresh_task_list",
+        "refresh_archived_tasks",
+        "clear_task_search",
+        "show_task_selector",
+        "show_desktop_sync_task_selector",
+        "show_archived_tasks",
+        "show_new_task",
+        "refresh_current_status",
+        "refresh_codex_usage",
+        "show_codex_usage",
+        "show_daily_task_usage_analysis",
+        "show_period_task_usage_analysis",
+    }:
+        return f"{user_id}:{message_id}:{action}"
+    return ""
+
+
+def register_ui_intent(event: dict[str, Any]) -> None:
+    key = ui_intent_key(event)
+    if not key:
+        return
+    with _ui_intent_lock:
+        sequence = _ui_intent_sequences.get(key, 0) + 1
+        _ui_intent_sequences[key] = sequence
+    event["_ui_intent_key"] = key
+    event["_ui_intent_sequence"] = sequence
+
+
+def ui_intent_is_current(event: dict[str, Any]) -> bool:
+    key = str(event.get("_ui_intent_key") or "")
+    if not key:
+        return True
+    sequence = int(event.get("_ui_intent_sequence") or 0)
+    with _ui_intent_lock:
+        return _ui_intent_sequences.get(key) == sequence
+
+
+def drain_event_lane(
+    lane_key: str,
+    lane: queue.Queue[dict[str, Any]],
+) -> None:
+    while True:
+        try:
+            event = lane.get_nowait()
+        except queue.Empty:
+            with _event_lanes_lock:
+                if lane.empty() and _event_lanes.get(lane_key) is lane:
+                    _event_lanes.pop(lane_key, None)
+                    return
+            continue
+        event_type = str(event.get("type") or "unknown")
+        event_action = event_latency_label(event)
+        received_at = float(event.get("_bridge_received_monotonic") or time.monotonic())
+        started = time.monotonic()
+        queue_ms = round((started - received_at) * 1000)
+        succeeded = False
+        try:
+            if ui_intent_is_current(event):
+                dispatch_event(event)
+            else:
+                log("card intent skipped reason=superseded")
+            acknowledge_workflow_decision_inbox(event)
+            succeeded = True
+        except Exception as exc:
+            log(f"event failed: {type(exc).__name__}: {exc}")
+        finally:
+            total_ms = round((time.monotonic() - received_at) * 1000)
+            log(
+                f"latency event type={event_type} action={event_action} "
+                f"queue_ms={queue_ms} "
+                f"total_ms={total_ms} success={str(succeeded).lower()}"
+            )
+            lane.task_done()
+
+
+def submit_event(event: dict[str, Any]) -> None:
+    event.setdefault("_bridge_received_monotonic", time.monotonic())
+    register_ui_intent(event)
+    lane_key = event_lane_key(event)
+    with _event_lanes_lock:
+        lane = _event_lanes.get(lane_key)
+        should_start = lane is None
+        if lane is None:
+            lane = queue.Queue()
+            _event_lanes[lane_key] = lane
+        lane.put(event)
+    if should_start:
+        threading.Thread(
+            target=drain_event_lane,
+            args=(lane_key, lane),
+            daemon=True,
+            name="codex-feishu-event-lane",
+        ).start()
 
 
 def tag_workflow_decision_inbox_event(event: dict[str, Any]) -> None:
@@ -9307,6 +10114,7 @@ def enqueue_events(stream: Any, events: queue.Queue[dict[str, Any]]) -> None:
             event = json.loads(line)
             if not isinstance(event, dict):
                 raise json.JSONDecodeError("event must be an object", line, 0)
+            event["_bridge_received_monotonic"] = time.monotonic()
             tag_workflow_decision_inbox_event(event)
             events.put(event)
         except json.JSONDecodeError as exc:
@@ -9314,6 +10122,9 @@ def enqueue_events(stream: Any, events: queue.Queue[dict[str, Any]]) -> None:
 
 
 def stop(_signum: int, _frame: Any) -> None:
+    _shutdown_event.set()
+    with _identity_refresh_condition:
+        _identity_refresh_condition.notify_all()
     stop_workflow_socket_server()
     for consumer in _consumers:
         if consumer.poll() is None:
@@ -9411,6 +10222,58 @@ def self_test() -> int:
     return 0
 
 
+def maintenance_loop(events: queue.Queue[dict[str, Any]]) -> None:
+    next_pending_retry = 0.0
+    next_input_retry = 0.0
+    next_workflow_retry = 0.0
+    next_runtime_status = 0.0
+    next_usage_refresh = 0.0
+    next_cli_fallback_expiry = 0.0
+    next_desktop_sync_retry = 0.0
+    while not _shutdown_event.is_set():
+        now = time.time()
+        if now >= next_cli_fallback_expiry:
+            try:
+                expire_cli_fallbacks(now)
+            except Exception as exc:
+                log(f"cli fallback expiry loop failed: {type(exc).__name__}: {exc}")
+            next_cli_fallback_expiry = now + 60
+        if now >= next_usage_refresh:
+            threading.Thread(target=refresh_codex_usage, daemon=True).start()
+            next_usage_refresh = now + 60
+        if now >= next_runtime_status:
+            write_runtime_status()
+            next_runtime_status = now + 5
+        if now >= next_pending_retry:
+            try:
+                retry_pending_replies(now)
+            except Exception as exc:
+                log(f"pending reply loop failed: {type(exc).__name__}: {exc}")
+            next_pending_retry = now + 1
+        if now >= next_input_retry:
+            try:
+                start_pending_inputs(now)
+            except Exception as exc:
+                log(f"pending input loop failed: {type(exc).__name__}: {exc}")
+            next_input_retry = now + 1
+        if now >= next_desktop_sync_retry:
+            try:
+                retry_desktop_result_subscriptions(now)
+            except Exception as exc:
+                log(f"desktop sync loop failed: {type(exc).__name__}: {exc}")
+            next_desktop_sync_retry = now + 1
+        if now >= next_workflow_retry:
+            try:
+                if workflow_notifications_enabled():
+                    enqueue_workflow_decision_inbox(events)
+                retry_workflow_notifications(now)
+                retry_workflow_recoveries(now)
+            except Exception as exc:
+                log(f"workflow loop failed: {type(exc).__name__}: {exc}")
+            next_workflow_retry = now + 1
+        _shutdown_event.wait(0.2)
+
+
 def main() -> int:
     if sys.argv[1:] == ["--diagnose-json"]:
         report = diagnostic_report()
@@ -9483,64 +10346,25 @@ def main() -> int:
         ).start()
 
     write_runtime_status()
-
-    next_pending_retry = 0.0
-    next_input_retry = 0.0
-    next_workflow_retry = 0.0
-    next_runtime_status = 0.0
-    next_usage_refresh = 0.0
-    next_cli_fallback_expiry = 0.0
-    next_desktop_sync_retry = 0.0
+    _shutdown_event.clear()
+    threading.Thread(
+        target=identity_refresh_loop,
+        daemon=True,
+        name="codex-feishu-identity-refresh",
+    ).start()
+    threading.Thread(
+        target=maintenance_loop,
+        args=(events,),
+        daemon=True,
+        name="codex-feishu-maintenance",
+    ).start()
     while any(consumer.poll() is None for consumer in _consumers):
-        now = time.time()
-        if now >= next_cli_fallback_expiry:
-            try:
-                expire_cli_fallbacks(now)
-            except Exception as exc:
-                log(f"cli fallback expiry loop failed: {type(exc).__name__}: {exc}")
-            next_cli_fallback_expiry = now + 60
-        if now >= next_usage_refresh:
-            threading.Thread(target=refresh_codex_usage, daemon=True).start()
-            next_usage_refresh = now + 60
-        if now >= next_runtime_status:
-            write_runtime_status()
-            next_runtime_status = now + 5
-        if now >= next_pending_retry:
-            try:
-                retry_pending_replies(now)
-            except Exception as exc:
-                log(f"pending reply loop failed: {type(exc).__name__}: {exc}")
-            next_pending_retry = now + 1
-        if now >= next_input_retry:
-            try:
-                start_pending_inputs(now)
-            except Exception as exc:
-                log(f"pending input loop failed: {type(exc).__name__}: {exc}")
-            next_input_retry = now + 1
-        if now >= next_desktop_sync_retry:
-            try:
-                retry_desktop_result_subscriptions(now)
-            except Exception as exc:
-                log(f"desktop sync loop failed: {type(exc).__name__}: {exc}")
-            next_desktop_sync_retry = now + 1
-        if now >= next_workflow_retry:
-            try:
-                if workflow_notifications_enabled():
-                    enqueue_workflow_decision_inbox(events)
-                retry_workflow_notifications(now)
-                retry_workflow_recoveries(now)
-            except Exception as exc:
-                log(f"workflow loop failed: {type(exc).__name__}: {exc}")
-            next_workflow_retry = now + 1
         try:
             event = events.get(timeout=0.5)
         except queue.Empty:
             continue
-        try:
-            dispatch_event(event)
-            acknowledge_workflow_decision_inbox(event)
-        except Exception as exc:
-            log(f"event failed: {type(exc).__name__}: {exc}")
+        submit_event(event)
+    _shutdown_event.set()
     write_runtime_status(active_runs=0)
     return next(
         (consumer.returncode for consumer in _consumers if consumer.returncode),

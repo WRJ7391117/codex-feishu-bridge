@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag and App version
+        run: |
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+          test "${GITHUB_REF_NAME}" = "v${version}"
+      - name: Run test suite
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Build ad-hoc Universal package
+        run: ./scripts/build-app.sh
+      - name: Verify package
+        run: |
+          app="build/Codex 飞书桥接.app"
+          codesign --verify --deep --strict "$app"
+          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/CodexFeishuBridge"
+          (cd dist && shasum -a 256 -c Codex-Feishu-Bridge-macOS-universal.zip.sha256)
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/Codex-Feishu-Bridge-macOS-universal.zip \
+            dist/Codex-Feishu-Bridge-macOS-universal.zip.sha256 \
+            dist/update.json \
+            --title "Codex Feishu Bridge ${GITHUB_REF_NAME#v}" \
+            --notes-file RELEASE_NOTES.md

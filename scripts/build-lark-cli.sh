@@ -6,7 +6,7 @@ project_dir="${0:A:h:h}"
 output_path="${1:-${project_dir}/build/vendor/lark-cli}"
 source_tag="v1.0.89"
 source_commit="423e81fcc666c721f27c22be53086739d87d0f3e"
-patched_version="1.0.89-codex-feishu.2"
+patched_version="1.0.89-codex-feishu.3"
 patch_file="${project_dir}/patches/lark-cli-v1.0.89-card-action-response.patch"
 work_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/codex-feishu-lark-cli.XXXXXX")"
 trap '/bin/rm -rf -- "${work_dir}"' EXIT

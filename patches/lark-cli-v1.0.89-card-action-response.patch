@@ -57,7 +57,7 @@ index 3c92c7a..74dfacc 100644
  
  	opts := []larkws.ClientOption{larkws.WithEventHandler(d)}
  	if s.Domain != "" {
-@@ -65,6 +83,136 @@ func (s *FeishuSource) Start(ctx context.Context, eventTypes []string, emit func
+@@ -65,6 +83,141 @@ func (s *FeishuSource) Start(ctx context.Context, eventTypes []string, emit func
  	}
  }
  
@@ -78,7 +78,12 @@ index 3c92c7a..74dfacc 100644
 +				if err := rawHandler(ctx, event.EventReq); err != nil {
 +					return nil, err
 +				}
-+				return &callback.CardActionTriggerResponse{}, nil
++				return &callback.CardActionTriggerResponse{
++					Toast: &callback.Toast{
++						Type:    "info",
++						Content: "正在处理…",
++					},
++				}, nil
 +			})
 +			continue
 +		}
@@ -245,8 +250,8 @@ index 49c9e4c..0c10d69 100644
 +	if err != nil {
 +		t.Fatalf("marshal response: %v", err)
 +	}
-+	if string(body) != `{}` {
-+		t.Fatalf("response = %s, want {}", body)
++	if string(body) != `{"toast":{"type":"info","content":"正在处理…"}}` {
++		t.Fatalf("response = %s, want processing toast", body)
 +	}
 +}
 +

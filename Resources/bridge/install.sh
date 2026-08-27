@@ -23,6 +23,7 @@ umask 077
     "${resource_dir}/workflow_config.py" \
     "${resource_dir}/control.sh" \
     "${resource_dir}/diagnose.sh" \
+    "${resource_dir}/uninstall.sh" \
     "${resource_dir}/config.example.json" \
     "${resource_dir}/lark-cli" \
     --executables \
@@ -49,6 +50,7 @@ umask 077
     "${support_dir}/workflow-config" \
     "${support_dir}/control.sh" \
     "${support_dir}/diagnose.sh" \
+    "${support_dir}/uninstall.sh" \
     "${support_dir}/lark-cli" \
     "${HOME}/.codex/hooks/feishu_bridge_control.sh" \
     "${plist}" \
@@ -479,6 +481,7 @@ PY
     "${resource_dir}/workflow_config.py" "${support_dir}/workflow-config" 755 \
     "${resource_dir}/control.sh" "${support_dir}/control.sh" 755 \
     "${resource_dir}/diagnose.sh" "${support_dir}/diagnose.sh" 755 \
+    "${resource_dir}/uninstall.sh" "${support_dir}/uninstall.sh" 755 \
     "${resource_dir}/lark-cli" "${support_dir}/lark-cli" 755 \
     "${resource_dir}/control.sh" "${HOME}/.codex/hooks/feishu_bridge_control.sh" 755 <<'PY'
 import os

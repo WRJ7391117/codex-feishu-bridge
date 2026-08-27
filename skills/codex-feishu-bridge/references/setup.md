@@ -4,29 +4,28 @@
 
 - macOS 13+
 - Codex Desktop with at least one local Task
-- current system `lark-cli` for Profile setup; the App bundles its patched runtime CLI
 - a Feishu custom app with Bot capability
 
-Run `lark-cli update` when the user has authorized an update. Configure a dedicated bot profile with `lark-cli config init --name codex-notify`; never pass an App Secret in process arguments.
+The App bundles its patched runtime CLI. Use the first-connection assistant to configure a dedicated Profile. It passes App Secret through stdin to `lark-cli`, which stores it in macOS Keychain; never pass an App Secret in process arguments. A system `lark-cli` is optional and only needed for terminal maintenance.
 
-The installed bridge prefers its bundled `lark-cli 1.0.89-codex-feishu.2`. It registers `card.action.trigger` with the SDK's card-action handler and durably spools Ori One workflow decisions before returning Feishu's synchronous callback response. The system CLI and bundled CLI share the same Profile and Keychain credentials. General bridge use may explicitly override `lark_cli_path`, but workflow mode fails closed unless it uses the bundled CLI.
+The installed bridge prefers its bundled `lark-cli 1.0.89-codex-feishu.3`. It registers `card.action.trigger` with the SDK's card-action handler, returns a visible processing toast, and durably spools Ori One workflow decisions before returning Feishu's synchronous callback response. The system CLI and bundled CLI share the same Profile and Keychain credentials. General bridge use may explicitly override `lark_cli_path`, but workflow mode fails closed unless it uses the bundled CLI.
 
-Source package `1.9.4 (build 40)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
+Source package `1.9.10 (build 46)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
 
 ## Feishu console
 
-Enable long-connection delivery and subscribe to `im.message.receive_v1` and `application.bot.menu_v6`. Enable callback configuration for `card.action.trigger`. Configure a `TASK` main menu with four push-event submenus: “当前 Task” with Event Key `current_task`, “选择 Task” with `select_task`, “新建 Task” with `new_task`, and “归档当前 Task” with `archive_task`. Add top-level “接续桌面 Task” and “额度用量” push-event menus with `sync_desktop` and `codex_usage`. Keep the same six values in the Mac App configuration, publish a new Feishu app version, and allow about five minutes for the menu to appear. Bot menus are available only in P2P chats with the Bot.
+Enable long-connection delivery and subscribe to `im.message.receive_v1` and `application.bot.menu_v6`. Enable callback configuration for `card.action.trigger`. Configure a `TASK` main menu with four push-event submenus: “当前 Task” with Event Key `current_task`, “切换 Task” with `select_task`, “新建 Task” with `new_task`, and “归档当前 Task” with `archive_task`. Configure a top-level “接续桌面 Task” menu with two push-event submenus: “接续当前 Task” with `sync_desktop` and “接续其他 Task” with `sync_desktop_switch`. Add top-level “额度用量” with `codex_usage`. Keep the same seven values in the Mac App configuration, publish a new Feishu app version, and allow about five minutes for the menu to appear. Bot menus are available only in P2P chats with the Bot.
 
 The bot needs message receive/read/send permissions. Incoming image support also requires permission to read the matching message resource; `im:resource` is needed to upload result images. Follow `missing_scopes` from lark-cli rather than guessing broader permissions.
 
-To discover the permitted user's open_id, consume one bounded message event, then ask the user to send the Bot a test message:
+The first-connection assistant can discover the first permitted user's open_id from one bounded two-minute message listener. It does not grant any project. For terminal fallback, consume one bounded message event, then ask the user to send the Bot a test message:
 
 ```bash
 lark-cli --profile codex-notify event consume im.message.receive_v1 \
   --as bot --max-events 1 --timeout 2m
 ```
 
-Use the resulting `sender_id` in the App's configuration window. Add each approved user separately and give them either `*` or an exact comma-separated list of Codex Desktop sidebar project names. Existing single-user configs are read as that user with `*`; saving from v1.2.0 migrates them to `allowed_users` while retaining the legacy sender field for rollback.
+Use the resulting `sender_id` in the App's configuration window. The App reads current project names from the Codex Desktop sidebar for explicit multi-selection. Add each approved user separately; `*` remains an explicit manual choice and is never populated automatically. Existing single-user configs are read as that user with `*`; saving from v1.2.0 migrates them to `allowed_users` while retaining the legacy sender field for rollback.
 
 When self-service access requests are enabled, an unknown user may message the Bot in P2P. This records a pending request only. The Mac owner must open the App, choose “配置授权”, and assign exact projects before saving; never populate `*` automatically.
 
@@ -38,9 +37,11 @@ On an existing legacy installation, first launch migrates the old Profile/sender
 
 The installer also replaces the legacy `~/.codex/hooks/feishu_bridge_control.sh` wrapper with the current `com.deepori.codex-feishu-bridge` control script. Before copying any runtime file, it validates every required package resource, the bundled CLI, and all existing config/state/log/runtime destinations with lstat/open checks. Unsafe symlinks, non-regular files, or foreign ownership stop installation. It restricts private directories and files to `0700`/`0600`, then stages runtime files as a complete set and rolls them back on replacement failure. It does not start a bridge that was previously stopped.
 
-## Optional workflow notifications
+The App's “移除后台服务…” action refuses pending work, removes the LaunchAgent and runtime components, and preserves Profile, config, Task state, and logs for recovery. Full purge is separate: run the App-bundled `uninstall.sh --purge` before moving the App to Trash, then type `PURGE` on stdin. The purge validates fixed bridge directories and files before removing them; it never disables Gatekeeper or removes quarantine metadata.
 
-Keep workflow notifications disabled until the dedicated Codex Task exists. Do not use generic `jq` or command arguments to edit local identifiers. The installed `workflow-config --enable` reads only the dedicated Task UUID from stdin, selects the existing legacy sender only when it is already allowlisted, and leaves Chat unguessed. A returned Chat is associated with the durable notification record after the first card is sent.
+## Optional private extension: Ori One workflow notifications
+
+This extension is not part of the general bridge onboarding or public product promise. Keep workflow notifications disabled unless the Mac is an explicitly configured Ori One private deployment and the dedicated Codex Task exists. Do not use generic `jq` or command arguments to edit local identifiers. The installed `workflow-config --enable` reads only the dedicated Task UUID from stdin, selects the existing legacy sender only when it is already allowlisted, and leaves Chat unguessed. A returned Chat is associated with the durable notification record after the first card is sent.
 
 ```bash
 support="$HOME/Library/Application Support/Codex Feishu Bridge"
