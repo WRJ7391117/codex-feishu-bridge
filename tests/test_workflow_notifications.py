@@ -984,6 +984,7 @@ class WorkflowBridgeTests(unittest.TestCase):
         )
         self.config_path.chmod(0o600)
         self.bridge = load_bridge(self.config_path)
+        self.bridge.LARK_CLI = str(self.bridge.APP_SUPPORT / "lark-cli")
         self.bridge.STATE_PATH = directory / "bridge-state.json"
         self.bridge.LOG_PATH = directory / "bridge.log"
         self.bridge.WORKFLOW_STATE_PATH = directory / "workflow-state.json"

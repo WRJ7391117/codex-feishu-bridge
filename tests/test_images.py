@@ -382,6 +382,11 @@ class ImageReplyTests(unittest.TestCase):
             "title": "Task",
             "project": "Project",
         }
+        self.bridge.task_by_id = lambda task_id, user_id: {
+            "id": "task-id",
+            "title": "Task",
+            "project": "Project",
+        }
         replies = []
         self.bridge.reply = lambda message_id, text, kind: replies.append(
             (kind, text)

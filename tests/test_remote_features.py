@@ -2383,6 +2383,7 @@ class RemoteFeatureTests(unittest.TestCase):
     def test_message_handler_returns_while_task_runs(self):
         gate = threading.Event()
         self.bridge.selected_task = lambda user_id, state: self.tasks()[0]
+        self.bridge.task_by_id = lambda task_id, user_id: self.tasks()[0]
         self.bridge.reply_card_message = lambda *args, **kwargs: (True, "om_progress")
         self.bridge.patch_card = lambda *args, **kwargs: True
         self.bridge.reply = lambda *args, **kwargs: True
@@ -2410,6 +2411,11 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertLess(elapsed, 0.5)
         self.assertIsNotNone(self.bridge.active_run_for_task("task-a"))
         gate.set()
+        for _ in range(200):
+            if self.bridge.active_run_for_task("task-a") is None:
+                break
+            time.sleep(0.01)
+        self.assertIsNone(self.bridge.active_run_for_task("task-a"))
 
     def test_completed_result_becomes_current_before_its_reply_is_sent(self):
         task_a, task_b = self.tasks()[:2]
@@ -2484,6 +2490,13 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.reply = lambda *args, **kwargs: True
         self.bridge.reply_or_queue = lambda *args, **kwargs: True
 
+        def refresh_status(*args, **kwargs):
+            if kwargs.get("task") is not None:
+                raise RuntimeError("status unavailable")
+            return True
+
+        self.bridge.update_current_status_card = mock.Mock(side_effect=refresh_status)
+
         def run(task_id, prompt, **kwargs):
             calls.append(prompt)
             if len(calls) == 1:
@@ -2520,6 +2533,7 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.assertEqual(calls, ["第一条", "第二条"])
         self.assertEqual(self.bridge.load_state().get("pending_inputs"), [])
+        self.assertGreaterEqual(self.bridge.update_current_status_card.call_count, 2)
 
     def test_queued_message_can_be_canceled_from_its_card(self):
         entry = {

@@ -8764,7 +8764,16 @@ def process_message_run(
     finally:
         task_id = str(run["task"]["id"])
         remove_active_run(str(run["run_id"]))
-        update_current_status_card(str(run["user_id"]))
+        try:
+            update_current_status_card(
+                str(run["user_id"]),
+                task=run["task"],
+            )
+        except Exception as exc:
+            log(
+                "current status refresh failed after run: "
+                f"{type(exc).__name__}"
+            )
         start_next_queued_input(task_id)
 
 
