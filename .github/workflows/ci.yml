@@ -10,6 +10,10 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.23.x'
+          cache: false
       - name: Check shell scripts
         run: |
           for script in scripts/*.sh Resources/bridge/*.sh; do
