@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.9.15 (build 51)
+
+- Delivers the complete text result of every newly completed subscribed Task below its result card instead of limiting the user to the card preview.
+- Splits long subscription results into ordered Feishu replies with distinct idempotency keys, and durably retries any failed chunk without rerunning Codex.
+- Keeps subscription images and files attached to the same result route and tells the user where the complete result will appear.
+
 ## 1.9.14 (build 50)
 
 - Checks an existing lark-cli Profile when the first-connection assistant opens and reuses a healthy Keychain-backed Bot connection without asking for App ID or App Secret again.

@@ -932,6 +932,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.prepare_result_files = lambda message: (message, [])
         self.bridge.record_task_exchange = mock.Mock()
         self.bridge.follow_result_task = mock.Mock(return_value=False)
+        self.bridge.reply_complete_result = mock.Mock(return_value=True)
         self.bridge.update_current_status_card = mock.Mock(return_value=True)
         state = {
             "task_subscriptions": {
@@ -970,6 +971,7 @@ class RemoteFeatureTests(unittest.TestCase):
         )
         self.bridge.reply_image = mock.Mock(return_value=False)
         self.bridge.reply_file = mock.Mock(return_value=False)
+        self.bridge.reply_complete_result = mock.Mock(return_value=True)
         self.bridge.queue_pending_image = mock.Mock()
         self.bridge.queue_pending_file = mock.Mock()
         self.bridge.record_task_exchange = mock.Mock()
@@ -990,6 +992,63 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertTrue(delivered)
         self.bridge.queue_pending_image.assert_called_once()
         self.bridge.queue_pending_file.assert_called_once()
+
+    def test_complete_subscription_result_is_split_without_truncation(self):
+        task = self.tasks()[0]
+        result = "第一段结果。\n" + ("完整内容" * 40) + "\n最后一段。"
+        self.bridge.MAX_REPLY_CHARS = 60
+        self.bridge.reply = mock.Mock(return_value=True)
+        self.bridge.record_task_exchange = mock.Mock()
+        self.bridge.follow_result_task = mock.Mock(return_value=True)
+        self.bridge.update_current_status_card = mock.Mock(return_value=True)
+
+        delivered = self.bridge.deliver_task_subscription_result(
+            "ou_admin",
+            task,
+            {
+                "status": "completed",
+                "turn_id": "long-turn",
+                "message": result,
+                "images": [],
+            },
+        )
+
+        self.assertTrue(delivered)
+        chunks = [call.args[1] for call in self.bridge.reply.call_args_list]
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= 60 for chunk in chunks))
+        self.assertTrue("".join(chunks).endswith(result))
+        self.assertEqual(
+            [call.args[2] for call in self.bridge.reply.call_args_list],
+            [
+                f"final-task-subscription-long-turn-{index}"
+                for index in range(1, len(chunks) + 1)
+            ],
+        )
+
+    def test_failed_complete_result_chunk_is_kept_for_retry(self):
+        self.bridge.MAX_REPLY_CHARS = 20
+        self.bridge.reply = mock.Mock(side_effect=[True, False, True, True])
+        self.bridge.set_reply_failure_reason("网络超时")
+
+        self.assertTrue(
+            self.bridge.reply_complete_result(
+                "om_subscription",
+                "A" * 45,
+                "final-task-subscription-turn",
+            )
+        )
+
+        pending = self.bridge.load_state()["pending_replies"]
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(
+            pending[0]["kind"],
+            "final-task-subscription-turn-2",
+        )
+        self.assertTrue(
+            self.bridge.retry_pending_replies(now=time.time() + 10_000)
+        )
+        self.assertEqual(self.bridge.load_state()["pending_replies"], [])
 
     def test_revoked_user_or_archived_task_removes_subscription(self):
         task = self.tasks()[0]

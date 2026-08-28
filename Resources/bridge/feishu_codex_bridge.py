@@ -2536,6 +2536,33 @@ def reply_or_queue(message_id: str, text: str, kind: str) -> bool:
     return delivered
 
 
+def complete_reply_chunks(text: str) -> list[str]:
+    content = text.strip() or "Codex 没有返回文字结果。"
+    chunk_size = max(1, MAX_REPLY_CHARS)
+    return [
+        content[offset : offset + chunk_size]
+        for offset in range(0, len(content), chunk_size)
+    ]
+
+
+def reply_complete_result(
+    message_id: str,
+    text: str,
+    kind_prefix: str,
+) -> bool:
+    for index, chunk in enumerate(complete_reply_chunks(text), start=1):
+        kind = f"{kind_prefix}-{index}"
+        if reply(message_id, chunk, kind):
+            continue
+        queue_pending_reply(
+            message_id,
+            chunk,
+            kind,
+            current_reply_failure_reason() or "飞书 API 调用失败",
+        )
+    return True
+
+
 def pending_retry_identity(item: dict[str, Any]) -> tuple[str, ...]:
     operation = str(item.get("operation") or "text_reply")
     if operation == "queue_card":
@@ -2763,7 +2790,14 @@ def retry_pending_replies(now: float | None = None) -> bool:
             elif operation == "text_reply":
                 text = str(item.get("text") or "")
                 kind = str(item.get("kind") or "final")
-                if not message_id or not text or kind not in {"final", "workflow-choice"}:
+                if (
+                    not message_id
+                    or not text
+                    or not (
+                        kind in {"final", "workflow-choice"}
+                        or kind.startswith("final-")
+                    )
+                ):
                     pending.pop(index)
                     state["pending_replies"] = pending
                     save_state(state)
@@ -5887,7 +5921,11 @@ def build_task_subscription_result_card(
                 {"tag": "markdown", "content": card_markdown_escape(content)},
                 {
                     "tag": "markdown",
-                    "content": "<font color='grey'>当前 Task 已跟随这条最新结果，可直接继续发送消息。</font>",
+                    "content": (
+                        "<font color='grey'>完整文字结果将在本卡片下方发送；"
+                        "图片和文件会随结果附上。当前 Task 已跟随这条最新结果，"
+                        "可直接继续发送消息。</font>"
+                    ),
                 },
                 {
                     "tag": "button",
@@ -6675,6 +6713,17 @@ def deliver_task_subscription_result(
     )
     with result_delivery_lock(user_id):
         followed = follow_result_task(user_id, task)
+        reply_complete_result(
+            message_id,
+            task_status_prefix(
+                task,
+                "订阅结果已完成"
+                if str(snapshot.get("status") or "") == "completed"
+                else "订阅结果未完成",
+            )
+            + clean_result,
+            f"final-task-subscription-{str(snapshot.get('turn_id') or 'unknown')}",
+        )
     if followed:
         schedule_user_task_identity_refresh(
             user_id,
