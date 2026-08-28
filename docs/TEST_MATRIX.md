@@ -6,7 +6,7 @@ Updated: 2026-08-28
 
 | Surface | Target | Current evidence | Status |
 | --- | --- | --- | --- |
-| Source tests | isolated temporary HOME on macOS arm64 | 276 Python tests pass without the developer Codex database | Pass |
+| Source tests | isolated temporary HOME on macOS arm64 | 277 Python tests pass without the developer Codex database | Pass |
 | App compiler | macOS 13 deployment target | Swift build passes | Pass |
 | Package | arm64 + x86_64 | Universal Mach-O verified by `lipo` | Pass |
 | Package integrity | ZIP | generated SHA-256 manifest verifies from `dist/` | Pass |
@@ -16,7 +16,7 @@ Updated: 2026-08-28
 | First connection | new Feishu custom app | requires a second app/tenant and real Bot round trip | Not tested |
 | First user discovery | bounded message listener | implementation and tests pass; real new-app event not yet exercised | Not accepted |
 | Project authorization | Codex sidebar project picker | implementation and static tests pass | Not accepted visually |
-| Runtime | current Mac existing install | 1.9.20 install waits for the active Feishu run and requires post-restart verification | Pending safe update |
+| Runtime | current Mac existing install | 1.9.21 install waits for the active Feishu run and requires post-restart verification | Pending safe update |
 | Apple Silicon clean account | macOS 13+ | no clean-account install evidence yet | Not tested |
 | Intel Mac | macOS 13+ | x86_64 binary exists; no real Intel launch evidence | Not tested |
 | Gatekeeper | ad-hoc Release download | documented Finder right-click Open path | Not tested on another Mac |

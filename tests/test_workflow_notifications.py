@@ -2169,17 +2169,25 @@ class DiagnosticScriptTests(unittest.TestCase):
         self.assertIn('"name": "cli_update"', result.stdout)
         self.assertIn("1.0.90 available", result.stdout)
 
+    def test_diagnose_does_not_require_unconfigured_private_extension(self):
+        payload = {"checks": [], "ok": True}
+
+        result = self._run_diagnose(payload)
+
+        self.assertNotIn("workflow config:", result.stdout)
+        self.assertNotIn("workflow endpoint:", result.stdout)
+
 
 class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.9.20")
-        self.assertEqual(info["CFBundleVersion"], "56")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.9.21")
+        self.assertEqual(info["CFBundleVersion"], "57")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.9.20 (build 56)", readme)
-        self.assertIn("1.9.20 (build 56", release_notes)
+        self.assertIn("1.9.21 (build 57)", readme)
+        self.assertIn("1.9.21 (build 57", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):

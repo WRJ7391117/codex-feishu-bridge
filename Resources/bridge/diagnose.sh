@@ -111,20 +111,31 @@ active = max([int(app.get("active_consumers", 0)) for app in apps] + [0])
 raise SystemExit(0 if active == 3 else 1)
 PY
 
-    if [[ -x "${support_dir}/workflow-config" ]]; then
-        workflow_status="$("${support_dir}/workflow-config" --status 2>&1)" || result=1
-        print "workflow config: ${workflow_status}"
-    else
-        workflow_status="missing"
-        print "workflow config: missing client"
-        result=1
-    fi
-    if [[ "${workflow_status}" == "configured" ]]; then
-        if [[ -x "${support_dir}/workflow-notify" ]]; then
-            "${support_dir}/workflow-notify" --health 2>&1 || result=1
+    workflow_enabled="$(/usr/bin/python3 - "${config}" <<'PY'
+import json, sys
+try:
+    workflow = json.load(open(sys.argv[1], encoding="utf-8")).get("workflow_notifications")
+except Exception:
+    workflow = None
+print("yes" if isinstance(workflow, dict) and workflow.get("enabled") is True else "no")
+PY
+)"
+    if [[ "${workflow_enabled}" == "yes" ]]; then
+        if [[ -x "${support_dir}/workflow-config" ]]; then
+            workflow_status="$("${support_dir}/workflow-config" --status 2>&1)" || result=1
+            print "workflow config: ${workflow_status}"
         else
-            print "workflow endpoint: missing client"
+            workflow_status="missing"
+            print "workflow config: missing client"
             result=1
+        fi
+        if [[ "${workflow_status}" == "configured" ]]; then
+            if [[ -x "${support_dir}/workflow-notify" ]]; then
+                "${support_dir}/workflow-notify" --health 2>&1 || result=1
+            else
+                print "workflow endpoint: missing client"
+                result=1
+            fi
         fi
     fi
 fi

@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.9.21 (build 57)
+
+- Keeps general diagnostics independent of the separately installed private automation extension.
+- Checks the private workflow client and endpoint only when that extension is explicitly enabled in the local configuration.
+
 ## 1.9.20 (build 56)
 
 - Makes restart-recovery tests independent of any developer Mac Codex database so clean GitHub runners verify the same behavior.
