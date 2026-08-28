@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.9.19 (build 55)
+
+- Persists every accepted Feishu-owned Desktop turn with its original message, progress card, Task identity, and rollout cursor so a bridge restart can continue tracking it.
+- Changes an interrupted running card to “恢复中”, removes its stale stop action, and patches the original card when the turn finishes after restart.
+- Reuses the original source-message idempotency keys for recovered text, image, and file delivery, preventing duplicate final replies when a restart crosses the normal delivery boundary.
+
 ## 1.9.18 (build 54)
 
 - Labels the confirmation after “接续其他 Task” selection as “接续选定的 Task” so it cannot be mistaken for the pre-existing current Task.

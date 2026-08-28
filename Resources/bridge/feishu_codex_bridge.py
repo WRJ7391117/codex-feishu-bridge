@@ -4935,6 +4935,7 @@ def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
     templates = {
         "running": ("blue", "运行中", "blue"),
         "approval": ("yellow", "等待授权", "yellow"),
+        "recovering": ("blue", "恢复中", "blue"),
         "desktop_retrying": ("blue", "正在重试", "blue"),
         "desktop_unavailable": ("yellow", "等待选择", "yellow"),
         "completed": ("green", "已完成", "green"),
@@ -6566,6 +6567,14 @@ def desktop_result_subscriptions(state: dict[str, Any]) -> dict[str, dict[str, A
     return subscriptions
 
 
+def recoverable_runs(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    runs = state.setdefault("recoverable_runs", {})
+    if not isinstance(runs, dict):
+        runs = {}
+        state["recoverable_runs"] = runs
+    return runs
+
+
 def task_subscriptions(state: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]]:
     subscriptions = state.setdefault("task_subscriptions", {})
     if not isinstance(subscriptions, dict):
@@ -6904,8 +6913,12 @@ def deliver_desktop_sync_result(
     task: dict[str, str],
     message_id: str,
     snapshot: dict[str, Any],
+    *,
+    result_label: str = "桌面结果已同步",
+    reply_message_id: str = "",
 ) -> None:
     status = str(snapshot.get("status") or "missing")
+    reply_target = reply_message_id or message_id
     patch_card(message_id, build_desktop_sync_card(task, status))
     if status == "completed":
         result = str(snapshot.get("message") or "").strip()
@@ -6924,8 +6937,8 @@ def deliver_desktop_sync_result(
         with result_delivery_lock(user_id):
             followed = follow_result_task(user_id, task)
             delivered = reply_or_queue(
-                message_id,
-                task_status_prefix(task, "桌面结果已同步") + clean_result,
+                reply_target,
+                task_status_prefix(task, result_label) + clean_result,
                 "final",
             )
         if followed:
@@ -6935,17 +6948,17 @@ def deliver_desktop_sync_result(
                 task,
             )
         for index, image in enumerate(images, start=1):
-            if not reply_image(message_id, image, index):
+            if not reply_image(reply_target, image, index):
                 queue_pending_image(
-                    message_id,
+                    reply_target,
                     image,
                     index,
                     current_reply_failure_reason() or "飞书 API 调用失败",
                 )
         for index, file_path in enumerate(files, start=1):
-            if not reply_file(message_id, file_path, index):
+            if not reply_file(reply_target, file_path, index):
                 queue_pending_file(
-                    message_id,
+                    reply_target,
                     file_path,
                     index,
                     current_reply_failure_reason() or "飞书 API 调用失败",
@@ -6956,7 +6969,7 @@ def deliver_desktop_sync_result(
         )
     else:
         reply_or_queue(
-            message_id,
+            reply_target,
             task_status_prefix(task, "桌面运行未完成")
             + str(snapshot.get("message") or "没有读取到可同步的完成结果。"),
             "final",
@@ -7105,6 +7118,129 @@ def retry_desktop_result_subscriptions(now: float | None = None) -> bool:
             desktop_result_subscriptions(state).pop(user_id, None)
             save_state(state)
     log(f"desktop sync subscription finished status={snapshot.get('status')}")
+    return True
+
+
+def retry_recoverable_runs(now: float | None = None) -> bool:
+    timestamp = time.time() if now is None else now
+    with _state_lock:
+        state = load_state()
+        selected = next(
+            (
+                (turn_id, dict(value))
+                for turn_id, value in recoverable_runs(state).items()
+                if isinstance(value, dict)
+                and float(value.get("next_check_at") or 0) <= timestamp
+            ),
+            None,
+        )
+    if selected is None:
+        return False
+    turn_id, recovery = selected
+    if active_run_for_turn(turn_id) is not None:
+        return False
+    user_id = str(recovery.get("user_id") or "")
+    task_id = str(recovery.get("task", {}).get("id") or "")
+    source_message_id = str(recovery.get("source_message_id") or "")
+    progress_message_id = str(recovery.get("progress_message_id") or "")
+    task = task_by_id(task_id, user_id) if authorized_user(user_id) else None
+    expired = timestamp - float(recovery.get("created_at") or 0) > 24 * 60 * 60
+    terminal_status = str(recovery.get("terminal_status") or "")
+    if task is None or expired:
+        snapshot = {
+            "status": "missing",
+            "message": (
+                "本次重启恢复已失效：Task 已归档、删除或不再属于你的授权项目。"
+                if task is None
+                else "本次重启恢复已超过 24 小时，请在 Codex Desktop 中查看结果。"
+            ),
+        }
+    elif terminal_status in {"completed", "failed"}:
+        snapshot = {
+            "status": terminal_status,
+            "message": str(recovery.get("terminal_message") or ""),
+            "images": list(recovery.get("images") or []),
+        }
+    else:
+        snapshot = advance_rollout_turn(
+            rollout_path_for_task(task_id),
+            turn_id,
+            int(recovery.get("cursor_offset") or 0),
+            [str(item) for item in recovery.get("images", [])],
+        )
+    if snapshot.get("status") == "running":
+        if not recovery.get("recovery_announced") and progress_message_id:
+            card_run = dict(recovery)
+            card_run.update(
+                {
+                    "status": "桥接已恢复，正在继续等待 Codex 结果",
+                    "outcome": "recovering",
+                    "is_current_task": task_is_current(user_id, task_id),
+                }
+            )
+            patch_card(progress_message_id, build_run_card(card_run))
+        with _state_lock:
+            state = load_state()
+            current = recoverable_runs(state).get(turn_id)
+            if isinstance(current, dict):
+                current["cursor_offset"] = int(snapshot.get("cursor_offset") or 0)
+                current["images"] = list(snapshot.get("images") or [])
+                current["next_check_at"] = timestamp + 1
+                current["recovery_announced"] = True
+                save_state(state)
+        return True
+    if snapshot.get("status") == "missing" and task is not None:
+        missing_since = float(recovery.get("missing_since") or timestamp)
+        if timestamp - missing_since < 60:
+            with _state_lock:
+                state = load_state()
+                current = recoverable_runs(state).get(turn_id)
+                if isinstance(current, dict):
+                    current["missing_since"] = missing_since
+                    current["next_check_at"] = timestamp + 1
+                    save_state(state)
+            return True
+    delivery_message_id = progress_message_id
+    if task is not None and not delivery_message_id and source_message_id:
+        delivered, _chat_id, delivery_message_id = reply_card_message(
+            source_message_id,
+            build_desktop_sync_card(task, str(snapshot.get("status") or "missing")),
+            f"restart-recovery-{turn_id}",
+        )
+        if not delivered or not delivery_message_id:
+            with _state_lock:
+                state = load_state()
+                current = recoverable_runs(state).get(turn_id)
+                if isinstance(current, dict):
+                    current["next_check_at"] = timestamp + 2
+                    save_state(state)
+            return True
+    if task is not None and delivery_message_id:
+        deliver_desktop_sync_result(
+            user_id,
+            task,
+            delivery_message_id,
+            snapshot,
+            result_label="重启后结果已恢复",
+            reply_message_id=source_message_id or delivery_message_id,
+        )
+    elif source_message_id:
+        if progress_message_id:
+            failed_run = dict(recovery)
+            failed_run.update(
+                {
+                    "status": str(snapshot.get("message") or "重启后无法恢复本次运行"),
+                    "outcome": "failed",
+                }
+            )
+            patch_card(progress_message_id, build_run_card(failed_run))
+        reply_or_queue(
+            source_message_id,
+            str(snapshot.get("message") or "重启后无法恢复本次运行。"),
+            "final",
+        )
+    remove_recoverable_run(turn_id)
+    log(f"restart recovery finished status={snapshot.get('status')}")
     return True
 
 
@@ -8246,6 +8382,119 @@ def active_run_for_task(thread_id: str) -> dict[str, Any] | None:
         )
 
 
+def active_run_for_turn(turn_id: str) -> dict[str, Any] | None:
+    with _active_runs_lock:
+        return next(
+            (
+                run
+                for run in _active_runs.values()
+                if str(run.get("turn_id") or "") == turn_id
+                and run.get("outcome") in {"running", "approval", "desktop_retrying"}
+            ),
+            None,
+        )
+
+
+def persist_recoverable_run(run: dict[str, Any]) -> bool:
+    turn_id = str(run.get("turn_id") or "")
+    task = run.get("task") if isinstance(run.get("task"), dict) else {}
+    task_id = str(task.get("id") or "")
+    user_id = str(run.get("user_id") or "")
+    if not turn_id or not task_id or not user_id:
+        return False
+    snapshot: dict[str, Any] = {}
+    try:
+        snapshot = latest_rollout_turn(rollout_path_for_task(task_id))
+    except (OSError, sqlite3.Error):
+        snapshot = {}
+    same_turn = str(snapshot.get("turn_id") or "") == turn_id
+    entry = {
+        "run_id": str(run.get("run_id") or ""),
+        "turn_id": turn_id,
+        "user_id": user_id,
+        "chat_id": str(run.get("chat_id") or ""),
+        "source_message_id": str(run.get("source_message_id") or ""),
+        "progress_message_id": str(run.get("progress_message_id") or ""),
+        "task": {
+            "id": task_id,
+            "title": str(task.get("title") or ""),
+            "project": str(task.get("project") or ""),
+        },
+        "cursor_offset": int(snapshot.get("cursor_offset") or 0),
+        "images": list(snapshot.get("images") or []) if same_turn else [],
+        "created_at": time.time(),
+        "started_at": float(run.get("started_at") or time.time()),
+        "attachment_count": int(run.get("attachment_count") or 0),
+        "next_check_at": 0,
+    }
+    if same_turn and snapshot.get("status") in {"completed", "failed"}:
+        entry["terminal_status"] = str(snapshot.get("status") or "")
+        entry["terminal_message"] = str(snapshot.get("message") or "")
+    with _state_lock:
+        state = load_state()
+        existing = recoverable_runs(state).get(turn_id)
+        if isinstance(existing, dict):
+            entry["created_at"] = float(existing.get("created_at") or entry["created_at"])
+            entry["cursor_offset"] = max(
+                int(existing.get("cursor_offset") or 0),
+                int(entry.get("cursor_offset") or 0),
+            )
+            entry["images"] = list(
+                dict.fromkeys(
+                    [str(item) for item in existing.get("images", [])]
+                    + [str(item) for item in entry.get("images", [])]
+                )
+            )
+            for key in (
+                "recovery_announced",
+                "missing_since",
+                "terminal_status",
+                "terminal_message",
+            ):
+                if key in existing and key not in entry:
+                    entry[key] = existing[key]
+        recoverable_runs(state)[turn_id] = entry
+        save_state(state)
+    return True
+
+
+def remove_recoverable_run(turn_id: str) -> None:
+    if not turn_id:
+        return
+    with _state_lock:
+        state = load_state()
+        if recoverable_runs(state).pop(turn_id, None) is not None:
+            save_state(state)
+
+
+def prepare_active_run_recovery() -> None:
+    with _active_runs_lock:
+        runs = [
+            run
+            for run in _active_runs.values()
+            if run.get("outcome") in {"running", "approval", "desktop_retrying"}
+        ]
+    for run in runs:
+        turn_id = str(run.get("turn_id") or "")
+        if turn_id:
+            persist_recoverable_run(run)
+        message_id = str(run.get("progress_message_id") or "")
+        if not message_id:
+            continue
+        card_run = dict(run)
+        card_run.update(
+            {
+                "status": (
+                    "桥接正在重启，已保留当前 Task；恢复后继续推送结果"
+                    if turn_id
+                    else "桥接在提交确认前重启；请先查看 Codex Desktop，避免重复发送"
+                ),
+                "outcome": "recovering" if turn_id else "failed",
+            }
+        )
+        patch_card(message_id, build_run_card(card_run))
+
+
 def new_run(
     user_id: str,
     chat_id: str,
@@ -9141,6 +9390,7 @@ def set_run_turn_id(run: dict[str, Any], turn_id: str) -> None:
     with _active_runs_lock:
         run["turn_id"] = turn_id
     remember_bridge_turn(turn_id, str(run.get("user_id") or ""))
+    persist_recoverable_run(run)
     request_run_interrupt(run)
 
 
@@ -9469,6 +9719,7 @@ def process_message_run(
             set_run_progress(run, delivery_status, "completed", force=True)
     finally:
         task_id = str(run["task"]["id"])
+        remove_recoverable_run(str(run.get("turn_id") or ""))
         remove_active_run(str(run["run_id"]))
         try:
             update_current_status_card(
@@ -11010,6 +11261,10 @@ def enqueue_events(stream: Any, events: queue.Queue[dict[str, Any]]) -> None:
 
 
 def stop(_signum: int, _frame: Any) -> None:
+    try:
+        prepare_active_run_recovery()
+    except Exception as exc:
+        log(f"active run recovery preparation failed: {type(exc).__name__}: {exc}")
     _shutdown_event.set()
     with _identity_refresh_condition:
         _identity_refresh_condition.notify_all()
@@ -11118,6 +11373,7 @@ def maintenance_loop(events: queue.Queue[dict[str, Any]]) -> None:
     next_usage_refresh = 0.0
     next_cli_fallback_expiry = 0.0
     next_desktop_sync_retry = 0.0
+    next_restart_recovery_retry = 0.0
     next_task_subscription_poll = 0.0
     while not _shutdown_event.is_set():
         now = time.time()
@@ -11151,6 +11407,12 @@ def maintenance_loop(events: queue.Queue[dict[str, Any]]) -> None:
             except Exception as exc:
                 log(f"desktop sync loop failed: {type(exc).__name__}: {exc}")
             next_desktop_sync_retry = now + 1
+        if now >= next_restart_recovery_retry:
+            try:
+                retry_recoverable_runs(now)
+            except Exception as exc:
+                log(f"restart recovery loop failed: {type(exc).__name__}: {exc}")
+            next_restart_recovery_retry = now + 1
         if now >= next_task_subscription_poll:
             try:
                 poll_task_subscriptions()

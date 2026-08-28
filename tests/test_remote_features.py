@@ -1482,6 +1482,208 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertIn("最终结果", self.bridge.reply_or_queue.call_args.args[1])
         self.bridge.follow_result_task.assert_called_once_with("ou_admin", task)
 
+    def test_bridge_run_persists_restart_recovery_after_desktop_accepts(self):
+        task = self.tasks()[0]
+        rollout = Path(self.temporary.name) / "rollout.jsonl"
+        rollout.write_text(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_started",
+                        "turn_id": "turn-running",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.bridge.rollout_path_for_task = lambda task_id: rollout
+        self.bridge.request_run_interrupt = mock.Mock()
+        run = self.bridge.new_run(
+            "ou_admin",
+            "oc_test",
+            "om_source",
+            task,
+            [],
+            [],
+            "om_progress",
+        )
+
+        self.bridge.set_run_turn_id(run, "turn-running")
+
+        recovery = self.bridge.load_state()["recoverable_runs"]["turn-running"]
+        self.assertEqual(recovery["user_id"], "ou_admin")
+        self.assertEqual(recovery["source_message_id"], "om_source")
+        self.assertEqual(recovery["progress_message_id"], "om_progress")
+        self.assertEqual(recovery["task"], task)
+        self.assertGreater(recovery["cursor_offset"], 0)
+        self.assertNotIn("cancel_event", recovery)
+
+    def test_restart_recovery_delivers_original_run_result_once(self):
+        task = self.tasks()[0]
+        rollout = Path(self.temporary.name) / "rollout.jsonl"
+        started = {
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "turn-running"},
+        }
+        rollout.write_text(json.dumps(started) + "\n", encoding="utf-8")
+        cursor = rollout.stat().st_size
+        completed = {
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-running",
+                "last_agent_message": "重启后完整结果",
+            },
+        }
+        with rollout.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(completed, ensure_ascii=False) + "\n")
+        self.bridge.task_by_id = lambda task_id, user_id: task
+        self.bridge.rollout_path_for_task = lambda task_id: rollout
+        self.bridge.deliver_desktop_sync_result = mock.Mock()
+        self.bridge.save_state(
+            {
+                "recoverable_runs": {
+                    "turn-running": {
+                        "run_id": "run-1",
+                        "turn_id": "turn-running",
+                        "user_id": "ou_admin",
+                        "chat_id": "oc_test",
+                        "source_message_id": "om_source",
+                        "progress_message_id": "om_progress",
+                        "task": task,
+                        "cursor_offset": cursor,
+                        "images": [],
+                        "created_at": time.time(),
+                        "started_at": time.time(),
+                        "attachment_count": 0,
+                        "next_check_at": 0,
+                    }
+                }
+            }
+        )
+
+        self.assertTrue(self.bridge.retry_recoverable_runs())
+
+        delivered = self.bridge.deliver_desktop_sync_result.call_args
+        self.assertEqual(delivered.args[:3], ("ou_admin", task, "om_progress"))
+        self.assertEqual(delivered.args[3]["message"], "重启后完整结果")
+        self.assertEqual(delivered.kwargs["result_label"], "重启后结果已恢复")
+        self.assertEqual(delivered.kwargs["reply_message_id"], "om_source")
+        self.assertEqual(self.bridge.load_state().get("recoverable_runs"), {})
+        self.assertFalse(self.bridge.retry_recoverable_runs())
+
+    def test_restart_recovery_keeps_record_when_result_delivery_raises(self):
+        task = self.tasks()[0]
+        self.bridge.task_by_id = lambda task_id, user_id: task
+        self.bridge.advance_rollout_turn = mock.Mock(
+            return_value={
+                "status": "completed",
+                "message": "重启后完整结果",
+                "images": [],
+            }
+        )
+        self.bridge.deliver_desktop_sync_result = mock.Mock(
+            side_effect=RuntimeError("temporary delivery failure")
+        )
+        self.bridge.save_state(
+            {
+                "recoverable_runs": {
+                    "turn-running": {
+                        "run_id": "run-1",
+                        "turn_id": "turn-running",
+                        "user_id": "ou_admin",
+                        "source_message_id": "om_source",
+                        "progress_message_id": "om_progress",
+                        "task": task,
+                        "cursor_offset": 0,
+                        "images": [],
+                        "created_at": time.time(),
+                        "next_check_at": 0,
+                    }
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "temporary delivery failure"):
+            self.bridge.retry_recoverable_runs()
+
+        self.assertIn(
+            "turn-running",
+            self.bridge.load_state().get("recoverable_runs", {}),
+        )
+
+    def test_restart_recovery_does_not_race_a_live_bridge_worker(self):
+        task = self.tasks()[0]
+        run = self.bridge.new_run(
+            "ou_admin",
+            "oc_test",
+            "om_source",
+            task,
+            [],
+            [],
+            "om_progress",
+        )
+        run["turn_id"] = "turn-running"
+        self.bridge.register_active_run(run)
+        self.bridge.deliver_desktop_sync_result = mock.Mock()
+        self.bridge.save_state(
+            {
+                "recoverable_runs": {
+                    "turn-running": {
+                        "run_id": str(run["run_id"]),
+                        "turn_id": "turn-running",
+                        "user_id": "ou_admin",
+                        "source_message_id": "om_source",
+                        "progress_message_id": "om_progress",
+                        "task": task,
+                        "cursor_offset": 0,
+                        "images": [],
+                        "created_at": time.time(),
+                        "next_check_at": 0,
+                    }
+                }
+            }
+        )
+
+        self.assertFalse(self.bridge.retry_recoverable_runs())
+        self.bridge.deliver_desktop_sync_result.assert_not_called()
+
+    def test_shutdown_marks_running_card_as_recovering(self):
+        task = self.tasks()[0]
+        run = self.bridge.new_run(
+            "ou_admin",
+            "oc_test",
+            "om_source",
+            task,
+            [],
+            [],
+            "om_progress",
+        )
+        run["turn_id"] = "turn-running"
+        self.bridge.register_active_run(run)
+        self.bridge.rollout_path_for_task = lambda task_id: None
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge.prepare_active_run_recovery()
+
+        card = self.bridge.patch_card.call_args.args[1]
+        tags = [item["text"]["content"] for item in card["header"]["text_tag_list"]]
+        self.assertEqual(tags[-1], "恢复中")
+        self.assertNotIn(
+            "停止运行…",
+            [
+                item.get("text", {}).get("content")
+                for item in card["body"]["elements"]
+                if item.get("tag") == "button"
+            ],
+        )
+        self.assertIn(
+            "turn-running",
+            self.bridge.load_state().get("recoverable_runs", {}),
+        )
+
     def test_desktop_sync_menu_never_guesses_a_task_when_none_is_selected(self):
         task = self.tasks()[0]
         self.bridge.recent_tasks = lambda user_id: [task]
