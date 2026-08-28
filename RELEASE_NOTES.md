@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.9.16 (build 52)
+
+- Renames the Feishu Bot menu parent `TASK` to “Task 管理”.
+- Consolidates the former “接续桌面 Task” and “订阅 Task” entries under “管理桌面 Task”, ordered as “订阅桌面 Task”, “接续当前 Task”, and “接续其他 Task”.
+- Renames “额度用量” to “Codex 额度用量” while preserving all eight existing Event Keys and callback compatibility.
+
 ## 1.9.15 (build 51)
 
 - Delivers the complete text result of every newly completed subscribed Task below its result card instead of limiting the user to the card preview.

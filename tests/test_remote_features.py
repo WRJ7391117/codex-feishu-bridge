@@ -138,6 +138,18 @@ class RemoteFeatureTests(unittest.TestCase):
             "🔵 结果所属 Task\n项目：deepori\nTask：Home\n状态：已完成\n\n",
         )
 
+    def test_help_uses_current_bot_menu_structure(self):
+        help_text = self.bridge.help_text()
+        for label in (
+            "Task 管理",
+            "管理桌面 Task",
+            "订阅桌面 Task",
+            "接续当前 Task",
+            "接续其他 Task",
+            "Codex 额度用量",
+        ):
+            self.assertIn(label, help_text)
+
     def test_running_queued_and_approval_cards_show_current_task_identity(self):
         task = self.tasks()[0]
         run = {

@@ -5286,13 +5286,14 @@ def normalized_content(content: str) -> str:
 def help_text() -> str:
     return (
         "可用命令：\n"
-        "机器人菜单 TASK →“当前 Task” —— 查看当前状态卡\n"
-        "机器人菜单 TASK →“切换 Task” —— 切换当前 Task 或恢复已归档 Task\n"
-        "机器人菜单“新建 Task” —— 选择项目并新建 Task\n"
-        "机器人菜单 TASK →“归档当前 Task” —— 可取消或二次确认归档当前 Task\n"
-        "机器人菜单 接续桌面 Task →“接续当前 Task” —— 接续桥接中的当前 Task\n"
-        "机器人菜单 接续桌面 Task →“接续其他 Task” —— 先切换 Task 再接续\n"
-        "机器人菜单“订阅 Task” —— 多选需要自动接收 Desktop 新结果的 Task\n"
+        "机器人菜单 Task 管理 →“当前 Task” —— 查看当前状态卡\n"
+        "机器人菜单 Task 管理 →“切换 Task” —— 切换当前 Task 或恢复已归档 Task\n"
+        "机器人菜单 Task 管理 →“新建 Task” —— 选择项目并新建 Task\n"
+        "机器人菜单 Task 管理 →“归档当前 Task” —— 可取消或二次确认归档当前 Task\n"
+        "机器人菜单 管理桌面 Task →“订阅桌面 Task” —— 多选需要自动接收 Desktop 新结果的 Task\n"
+        "机器人菜单 管理桌面 Task →“接续当前 Task” —— 接续桥接中的当前 Task\n"
+        "机器人菜单 管理桌面 Task →“接续其他 Task” —— 先切换 Task 再接续\n"
+        "机器人菜单“Codex 额度用量” —— 查看额度和 Task 用量分析\n"
         "对话 —— 用文字打开 Task 选择卡片（备用）\n"
         "选择 N —— 文字选择 task（备用）\n"
         "搜索 关键词 —— 按标题搜索当前项目的 Task\n"
@@ -5855,7 +5856,7 @@ def build_task_subscriptions_card(
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
         "header": {
-            "title": {"tag": "plain_text", "content": "订阅 Task"},
+            "title": {"tag": "plain_text", "content": "订阅桌面 Task"},
             "subtitle": {
                 "tag": "plain_text",
                 "content": f"已订阅 {len(subscribed_tasks)}/{MAX_TASK_SUBSCRIPTIONS_PER_USER} 个",

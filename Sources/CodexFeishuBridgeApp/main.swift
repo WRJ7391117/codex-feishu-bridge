@@ -1901,14 +1901,16 @@ private struct ConfigurationChecklistView: View {
                         "card.action.trigger",
                     ])
                     checklistSection("机器人菜单 Event Key", items: [
+                        "一级菜单 · Task 管理",
                         "current_task · 当前 Task",
                         "select_task · 切换 Task",
                         "new_task · 新建 Task",
                         "archive_task · 归档当前 Task",
-                        "codex_usage · 额度用量",
+                        "一级菜单 · 管理桌面 Task",
+                        "task_subscriptions · 订阅桌面 Task",
                         "sync_desktop · 接续当前 Task",
                         "sync_desktop_switch · 接续其他 Task",
-                        "task_subscriptions · 订阅 Task",
+                        "codex_usage · Codex 额度用量",
                     ])
                     Divider()
                     Button("打开飞书开放平台", systemImage: "arrow.up.right.square") {
@@ -2034,7 +2036,7 @@ private struct ConfigurationView: View {
                         monospaced: true
                     )
                     configurationField(
-                        "额度用量",
+                        "Codex 额度用量",
                         placeholder: "codex_usage",
                         text: $model.draftUsageEventKey,
                         monospaced: true
@@ -2052,7 +2054,7 @@ private struct ConfigurationView: View {
                         monospaced: true
                     )
                     configurationField(
-                        "订阅 Task",
+                        "订阅桌面 Task",
                         placeholder: "task_subscriptions",
                         text: $model.draftTaskSubscriptionsEventKey,
                         monospaced: true

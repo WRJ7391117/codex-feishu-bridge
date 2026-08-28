@@ -2184,12 +2184,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.9.15")
-        self.assertEqual(info["CFBundleVersion"], "51")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.9.16")
+        self.assertEqual(info["CFBundleVersion"], "52")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.9.15 (build 51)", readme)
-        self.assertIn("1.9.15 (build 51", release_notes)
+        self.assertIn("1.9.16 (build 52)", readme)
+        self.assertIn("1.9.16 (build 52", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):
@@ -2247,9 +2247,10 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         self.assertIn('"用户 open_id"', configuration)
         self.assertIn('"允许项目"', configuration)
         self.assertIn('"当前 Task"', configuration)
-        self.assertIn('"额度用量"', configuration)
+        self.assertIn('"Codex 额度用量"', configuration)
         self.assertIn('"接续当前 Task"', configuration)
         self.assertIn('"接续其他 Task"', configuration)
+        self.assertIn('"订阅桌面 Task"', configuration)
         self.assertIn("八个机器人菜单 Event Key 都不能为空", source)
         self.assertIn("八个机器人菜单 Event Key 不能重复", source)
         self.assertIn(

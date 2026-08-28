@@ -80,6 +80,15 @@ class ProductOnboardingTests(unittest.TestCase):
             "sync_desktop_switch",
         ):
             self.assertIn(value, setup)
+        for label in (
+            "Task 管理",
+            "管理桌面 Task",
+            "订阅桌面 Task",
+            "接续当前 Task",
+            "接续其他 Task",
+            "Codex 额度用量",
+        ):
+            self.assertIn(label, setup)
         self.assertIn("不会默认开放全部项目", setup)
 
     def test_setup_is_a_generic_four_step_wizard(self):
