@@ -1326,9 +1326,10 @@ class RemoteFeatureTests(unittest.TestCase):
             if element.get("tag") == "button"
         }
         self.assertEqual(
-            buttons["接续当前 Task"]["behaviors"][0]["value"],
+            buttons["接续选定的 Task"]["behaviors"][0]["value"],
             {"action": "confirm_desktop_sync", "task_id": "task-b"},
         )
+        self.assertNotIn("接续当前 Task", buttons)
         self.assertEqual(state["card_contexts"]["om_sync"]["user_id"], "ou_admin")
         self.assertEqual(state["card_contexts"]["om_sync"]["type"], "desktop_sync_confirmation")
 

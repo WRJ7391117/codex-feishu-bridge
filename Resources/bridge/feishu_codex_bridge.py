@@ -4768,6 +4768,7 @@ def build_desktop_sync_confirmation_card(
     task: dict[str, str],
     status: str,
     current_changed: bool = False,
+    selected_from_list: bool = False,
 ) -> dict[str, Any]:
     status_text = (
         "运行中"
@@ -4831,7 +4832,14 @@ def build_desktop_sync_confirmation_card(
                 {"tag": "markdown", "content": message},
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "接续当前 Task"},
+                    "text": {
+                        "tag": "plain_text",
+                        "content": (
+                            "接续选定的 Task"
+                            if selected_from_list
+                            else "接续当前 Task"
+                        ),
+                    },
                     "type": "primary_filled",
                     "width": "fill",
                     "behaviors": [
@@ -10668,6 +10676,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
                         card = build_desktop_sync_confirmation_card(
                             selected,
                             str(snapshot.get("status") or "none"),
+                            selected_from_list=True,
                         )
                         context_type_override = "desktop_sync_confirmation"
                     else:

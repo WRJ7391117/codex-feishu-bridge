@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.9.18 (build 54)
+
+- Labels the confirmation after “接续其他 Task” selection as “接续选定的 Task” so it cannot be mistaken for the pre-existing current Task.
+- Keeps “接续当前 Task” unchanged for the direct current-Task path and when canceling a Task switch.
+
 ## 1.9.17 (build 53)
 
 - Reduces the subscribed-Task completion card to its Task identity, completion state, and one short pointer to the complete result below.
