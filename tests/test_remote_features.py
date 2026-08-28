@@ -940,8 +940,8 @@ class RemoteFeatureTests(unittest.TestCase):
                 (True, "oc_test", "om_subscription"),
             ]
         )
-        self.bridge.prepare_result_images = lambda message, images: (message, [])
-        self.bridge.prepare_result_files = lambda message: (message, [])
+        self.bridge.prepare_result_images = lambda message, images, roots: (message, [])
+        self.bridge.prepare_result_files = lambda message, roots: (message, [])
         self.bridge.record_task_exchange = mock.Mock()
         self.bridge.follow_result_task = mock.Mock(return_value=False)
         self.bridge.reply_complete_result = mock.Mock(return_value=True)
@@ -970,7 +970,7 @@ class RemoteFeatureTests(unittest.TestCase):
         after_success = self.bridge.load_state()["task_subscriptions"]["ou_admin"]["task-a"]
         self.assertEqual(after_success["cursor_offset"], rollout.stat().st_size)
 
-    def test_subscription_delivery_reuses_durable_image_and_file_paths(self):
+    def test_subscription_delivery_reuses_durable_image_audio_and_file_paths(self):
         task = self.tasks()[0]
         self.bridge.send_card = mock.Mock(
             return_value=(True, "oc_test", "om_subscription")
@@ -978,14 +978,14 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.prepare_result_images = mock.Mock(
             return_value=("完成", ["/tmp/result.png"])
         )
+        self.bridge.prepare_result_audio = mock.Mock(
+            return_value=("完成", ["/tmp/result.opus"])
+        )
         self.bridge.prepare_result_files = mock.Mock(
             return_value=("完成", [Path("/tmp/result.pdf")])
         )
-        self.bridge.reply_image = mock.Mock(return_value=False)
-        self.bridge.reply_file = mock.Mock(return_value=False)
         self.bridge.reply_complete_result = mock.Mock(return_value=True)
-        self.bridge.queue_pending_image = mock.Mock()
-        self.bridge.queue_pending_file = mock.Mock()
+        self.bridge.deliver_result_resources = mock.Mock(return_value=(0, 0, 0))
         self.bridge.record_task_exchange = mock.Mock()
         self.bridge.follow_result_task = mock.Mock(return_value=False)
         self.bridge.update_current_status_card = mock.Mock(return_value=True)
@@ -1002,8 +1002,12 @@ class RemoteFeatureTests(unittest.TestCase):
         )
 
         self.assertTrue(delivered)
-        self.bridge.queue_pending_image.assert_called_once()
-        self.bridge.queue_pending_file.assert_called_once()
+        self.bridge.deliver_result_resources.assert_called_once_with(
+            "om_subscription",
+            ["/tmp/result.png"],
+            ["/tmp/result.opus"],
+            [Path("/tmp/result.pdf")],
+        )
 
     def test_subscription_result_card_is_compact_and_does_not_repeat_result(self):
         task = self.tasks()[0]
@@ -1746,15 +1750,18 @@ class RemoteFeatureTests(unittest.TestCase):
     def test_confirm_desktop_sync_immediately_pushes_selected_completed_result(self):
         task = self.tasks()[0]
         rollout = Path(self.temporary.name) / "rollout.jsonl"
+        audio = Path(self.temporary.name) / "desktop.opus"
+        audio.write_bytes(b"OggS\x00OpusHead\x01")
         records = [
             {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-complete"}},
-            {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-complete", "last_agent_message": "已经完成"}},
+            {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-complete", "last_agent_message": f"已经完成 [语音](<{audio}>)"}},
         ]
         rollout.write_text(
             "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
             encoding="utf-8",
         )
         self.bridge.selected_task = lambda user_id, state: task
+        self.bridge.task_working_directory = lambda task_id: self.temporary.name
         self.bridge.rollout_path_for_task = lambda task_id: rollout
         self.bridge.patch_card = mock.Mock(return_value=True)
         self.bridge.reply_or_queue = mock.Mock(return_value=True)
@@ -1762,6 +1769,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.schedule_user_task_identity_refresh = mock.Mock()
         self.bridge.record_task_exchange = mock.Mock()
         self.bridge.follow_result_task = mock.Mock(return_value=False)
+        self.bridge.deliver_result_resources = mock.Mock(return_value=(0, 0, 0))
 
         self.bridge.handle_card_event(
             {
@@ -1777,6 +1785,12 @@ class RemoteFeatureTests(unittest.TestCase):
         )
 
         self.assertIn("已经完成", self.bridge.reply_or_queue.call_args.args[1])
+        self.bridge.deliver_result_resources.assert_called_once_with(
+            "om_sync",
+            [],
+            [str(audio.resolve())],
+            [],
+        )
         self.assertNotIn(
             "ou_admin",
             self.bridge.load_state().get("desktop_result_subscriptions", {}),
@@ -2989,13 +3003,21 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.task_by_id = lambda task_id, user_id: (
             task_a if task_id == task_a["id"] else task_b
         )
-        self.bridge.run_codex = lambda *args, **kwargs: (True, "A 的最终结果", [])
+        audio = Path(self.temporary.name) / "result.opus"
+        audio.write_bytes(b"OggS\x00OpusHead\x01")
+        self.bridge.task_working_directory = lambda task_id: self.temporary.name
+        self.bridge.run_codex = lambda *args, **kwargs: (
+            True,
+            f"A 的最终结果 [语音](<{audio}>)",
+            [],
+        )
         self.bridge.restore_pending_task_name = lambda *args: False
         self.bridge.set_run_progress = mock.Mock()
         self.bridge.schedule_user_task_identity_refresh = mock.Mock()
         self.bridge.update_current_status_card = lambda *args, **kwargs: True
         self.bridge.start_next_queued_input = lambda *args: None
         self.bridge.remove_active_run = lambda *args: None
+        self.bridge.deliver_result_resources = mock.Mock(return_value=(0, 0, 0))
 
         def deliver(message_id, content, kind):
             observed["selected"] = self.bridge.load_state()["selected"]["ou_admin"]
@@ -3008,6 +3030,13 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(observed["selected"], task_a["id"])
         self.assertTrue(observed["content"].startswith("🟢 当前 Task\n"))
         self.assertIn("Task：Home", observed["content"])
+        self.bridge.deliver_result_resources.assert_called_once_with(
+            "om_task_a",
+            [],
+            [str(audio.resolve())],
+            [],
+            notify_failures=True,
+        )
         self.bridge.schedule_user_task_identity_refresh.assert_called_once_with(
             "ou_admin",
             "当前 Task 已跟随最新结果",

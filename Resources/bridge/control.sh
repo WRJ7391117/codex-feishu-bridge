@@ -16,6 +16,37 @@ is_running() {
     /bin/launchctl print "${service}" 2>/dev/null | /usr/bin/grep -q $'^\tstate = running$'
 }
 
+start_service() {
+    if [[ ! -f "${support_dir}/config.json" || ! -f "${plist}" ]]; then
+        print -u2 "桥接尚未安装或配置"
+        return 1
+    fi
+    /bin/launchctl enable "${service}" || return 1
+    if ! is_loaded; then
+        /bin/launchctl bootstrap "${domain}" "${plist}" || return 1
+    fi
+    /bin/launchctl kickstart -k "${service}" || return 1
+    for _attempt in {1..50}; do
+        is_running && return 0
+        /bin/sleep 0.1
+    done
+    print -u2 "无法启动飞书桥接服务，请运行诊断"
+    return 1
+}
+
+stop_service() {
+    if is_loaded; then
+        /bin/launchctl bootout "${service}" || return 1
+    fi
+    /bin/launchctl disable "${service}" || return 1
+    for _attempt in {1..100}; do
+        ! is_loaded && return 0
+        /bin/sleep 0.1
+    done
+    print -u2 "无法关闭飞书桥接服务"
+    return 1
+}
+
 case "${1:-status}" in
     status)
         if is_running; then
@@ -25,52 +56,16 @@ case "${1:-status}" in
         fi
         ;;
     start)
-        if [[ ! -f "${support_dir}/config.json" || ! -f "${plist}" ]]; then
-            print -u2 "桥接尚未安装或配置"
-            exit 1
-        fi
-        /bin/launchctl enable "${service}"
-        if ! is_loaded; then
-            /bin/launchctl bootstrap "${domain}" "${plist}"
-        fi
-        /bin/launchctl kickstart -k "${service}"
-        for _attempt in {1..50}; do
-            is_running && break
-            /bin/sleep 0.1
-        done
-        if is_running; then
-            print "on"
-        else
-            print -u2 "无法启动飞书桥接服务，请运行诊断"
-            exit 1
-        fi
+        start_service || exit 1
+        print "on"
         ;;
     stop)
-        if is_loaded; then
-            /bin/launchctl bootout "${service}"
-        fi
-        /bin/launchctl disable "${service}"
-        for _attempt in {1..50}; do
-            ! is_loaded && break
-            /bin/sleep 0.1
-        done
-        if is_loaded; then
-            print -u2 "无法关闭飞书桥接服务"
-            exit 1
-        fi
+        stop_service || exit 1
         print "off"
         ;;
     restart)
-        if is_loaded; then
-            /bin/launchctl bootout "${service}"
-        fi
-        for _attempt in {1..100}; do
-            ! is_loaded && break
-            /bin/sleep 0.1
-        done
-        /bin/launchctl enable "${service}"
-        /bin/launchctl bootstrap "${domain}" "${plist}"
-        /bin/launchctl kickstart -k "${service}"
+        stop_service || exit 1
+        start_service || exit 1
         print "on"
         ;;
     *)

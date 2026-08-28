@@ -171,7 +171,7 @@ private final class BridgeController: @unchecked Sendable {
         return run(cli.path, ["--profile", profile, "doctor"])
     }
 
-    func discoverFeishuUser(_ profile: String) -> CommandResult {
+    func discoverFeishuUser(_ profile: String, challenge: String) -> CommandResult {
         guard let cli = bundledBridgeDirectory?.appendingPathComponent("lark-cli") else {
             return CommandResult(status: 1, output: "App 内置 lark-cli 不存在")
         }
@@ -194,7 +194,7 @@ private final class BridgeController: @unchecked Sendable {
         for line in result.output.split(whereSeparator: \.isNewline) {
             guard let data = String(line).data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data),
-                  let sender = findOpenID(in: object) else {
+                  let sender = findP2PUser(in: object, challenge: challenge) else {
                 continue
             }
             return CommandResult(status: 0, output: sender)
@@ -205,24 +205,41 @@ private final class BridgeController: @unchecked Sendable {
         )
     }
 
-    private func findOpenID(in value: Any) -> String? {
+    private func findP2PUser(in value: Any, challenge: String) -> String? {
         if let object = value as? [String: Any] {
-            if let sender = object["sender_id"] as? String, sender.hasPrefix("ou_") {
+            if let sender = object["sender_id"] as? String,
+               sender.hasPrefix("ou_"),
+               object["sender_type"] as? String == "user",
+               object["chat_type"] as? String == "p2p",
+               messageText(object["content"]) == challenge {
                 return sender
             }
             for nested in object.values {
-                if let sender = findOpenID(in: nested) {
+                if let sender = findP2PUser(in: nested, challenge: challenge) {
                     return sender
                 }
             }
         } else if let values = value as? [Any] {
             for nested in values {
-                if let sender = findOpenID(in: nested) {
+                if let sender = findP2PUser(in: nested, challenge: challenge) {
                     return sender
                 }
             }
         }
         return nil
+    }
+
+    private func messageText(_ value: Any?) -> String? {
+        if let object = value as? [String: Any], let text = object["text"] as? String {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard let raw = value as? String else { return nil }
+        if let data = raw.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let text = object["text"] as? String {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func isRunning() -> Bool {
@@ -438,25 +455,25 @@ private final class BridgeController: @unchecked Sendable {
     }
 
     func removeAccessRequests(openIDs: Set<String>) throws {
-        guard !openIDs.isEmpty,
-              let data = try? Data(contentsOf: stateURL),
-              var state = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let requests = state["access_requests"] as? [[String: Any]] else {
-            return
+        guard !openIDs.isEmpty else { return }
+        guard let script = bundledBridgeDirectory?.appendingPathComponent("feishu_codex_bridge.py") else {
+            throw BridgeUpdateError.message("App 内置桥接脚本不存在。")
         }
-        state["access_requests"] = requests.filter { request in
-            guard let openID = request["open_id"] as? String else { return false }
-            return !openIDs.contains(openID)
+        let payload = try JSONSerialization.data(withJSONObject: openIDs.sorted())
+        guard let input = String(data: payload, encoding: .utf8) else {
+            throw BridgeUpdateError.message("无法编码授权申请更新。")
         }
-        let encoded = try JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys])
-        var payload = encoded
-        payload.append(0x0A)
-        try FileManager.default.createDirectory(
-            at: stateURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
+        let result = run(
+            script.path,
+            ["--remove-access-requests"],
+            standardInput: input,
+            redacting: nil
         )
-        try payload.write(to: stateURL, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
+        if result.status != 0 {
+            throw BridgeUpdateError.message(
+                result.output.isEmpty ? "无法安全更新授权申请。" : result.output
+            )
+        }
     }
 
     private func run(_ executable: String, _ arguments: [String]) -> CommandResult {
@@ -823,10 +840,11 @@ private final class BridgeViewModel: ObservableObject {
         }
         isDiscoveringUser = true
         discoveredOpenID = ""
-        userDiscoveryResult = "监听已启动。请在两分钟内用机主飞书账号给这个 Bot 发送一条单聊消息。"
+        let challenge = String(format: "%06d", Int.random(in: 0...999_999))
+        userDiscoveryResult = "监听已启动。请在两分钟内用机主飞书账号单聊 Bot，并发送验证码：\(challenge)"
         let controller = bridge
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = controller.discoverFeishuUser(profile)
+            let result = controller.discoverFeishuUser(profile, challenge: challenge)
             Task { @MainActor in
                 guard let self else { return }
                 self.isDiscoveringUser = false
@@ -1674,7 +1692,7 @@ private struct ConnectionSetupView: View {
     private var authorizationStep: some View {
         setupPage(
             title: "授权使用者",
-            subtitle: "用需要使用桥接的飞书账号给机器人发送一条单聊消息，然后在这里完成识别和项目授权。"
+            subtitle: "用需要使用桥接的飞书账号单聊机器人，并发送 App 显示的六位验证码，然后完成项目授权。"
         ) {
             instructionRow(
                 icon: "1.circle",

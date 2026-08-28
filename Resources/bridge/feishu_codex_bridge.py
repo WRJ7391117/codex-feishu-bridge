@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
@@ -216,6 +217,7 @@ ALLOWED_CHAT_IDS = {
 MAX_PROMPT_CHARS = int(CONFIG.get("max_prompt_chars", 12000))
 MAX_REPLY_CHARS = int(CONFIG.get("max_reply_chars", 3000))
 MAX_RESULT_IMAGES = max(0, int(CONFIG.get("max_result_images", 8)))
+MAX_RESULT_AUDIO = max(0, int(CONFIG.get("max_result_audio", 4)))
 MAX_RESULT_FILES = max(0, int(CONFIG.get("max_result_files", 4)))
 MAX_RESULT_FILE_BYTES = max(
     1,
@@ -241,10 +243,14 @@ DOCUMENT_SUFFIXES = {
     ".yml", ".zsh",
 }
 AUDIO_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"}
+NATIVE_AUDIO_SUFFIXES = {".ogg", ".opus"}
 FILE_SUFFIXES = DOCUMENT_SUFFIXES | AUDIO_SUFFIXES
 MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^)\n]+)\s*\)")
 MARKDOWN_FILE_PATTERN = re.compile(
     r"(?<!!)\[([^\]\n]*)\]\(\s*(<[^>\n]+>|[^)\n]+)\s*\)"
+)
+MARKDOWN_AUDIO_PATTERN = re.compile(
+    r"!?\[([^\]\n]*)\]\(\s*(<[^>\n]+>|[^)\n]+)\s*\)"
 )
 IMAGE_KEY_PATTERN = r"img_[A-Za-z0-9_-]{3,512}"
 FILE_KEY_PATTERN = r"file_[A-Za-z0-9_-]{3,512}"
@@ -289,6 +295,8 @@ CARD_SEND_TIMEOUT_SECONDS = 5
 PENDING_REPLY_DELAYS = (15, 30, 60, 120, 300, 600)
 PENDING_CARD_PATCH_DELAYS = (2, 5, 15, 30, 60, 120)
 MAX_PENDING_REPLIES = 50
+MAX_PROCESSED_EVENTS = 10_000
+PROCESSED_EVENT_TTL_SECONDS = 7 * 24 * 60 * 60
 MAX_PENDING_IMAGE_BYTES = max(
     1,
     int(CONFIG.get("max_pending_image_bytes", 20 * 1024 * 1024)),
@@ -327,7 +335,77 @@ _last_reply_failure_reason = ""
 _reply_failure_context = threading.local()
 
 _consumers: list[subprocess.Popen[str]] = []
-_state_lock = threading.RLock()
+
+
+class InterprocessStateLock:
+    """Reentrant thread lock plus a process-wide lock for state.json mutations."""
+
+    def __init__(self) -> None:
+        self._thread_lock = threading.RLock()
+        self._local = threading.local()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if timeout == -1:
+            acquired = self._thread_lock.acquire(blocking)
+        else:
+            acquired = self._thread_lock.acquire(blocking, timeout)
+        if not acquired:
+            return False
+        depth = int(getattr(self._local, "depth", 0))
+        if depth == 0:
+            lock_path = STATE_PATH.with_name("state.lock")
+            try:
+                lock_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+                parent_stat = lock_path.parent.lstat()
+                if (
+                    lock_path.parent.is_symlink()
+                    or not stat.S_ISDIR(parent_stat.st_mode)
+                    or parent_stat.st_uid != os.getuid()
+                ):
+                    raise RuntimeError("bridge state lock directory is unsafe")
+                lock_path.parent.chmod(0o700)
+                flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(lock_path, flags, 0o600)
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_uid != os.getuid()
+                ):
+                    raise RuntimeError("bridge state lock is unsafe")
+                os.fchmod(descriptor, 0o600)
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            except Exception:
+                if "descriptor" in locals():
+                    os.close(descriptor)
+                self._thread_lock.release()
+                raise
+            self._local.descriptor = descriptor
+        self._local.depth = depth + 1
+        return True
+
+    def release(self) -> None:
+        depth = int(getattr(self._local, "depth", 0))
+        if depth <= 0:
+            raise RuntimeError("cannot release un-acquired state lock")
+        if depth == 1:
+            descriptor = int(self._local.descriptor)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+                del self._local.descriptor
+        self._local.depth = depth - 1
+        self._thread_lock.release()
+
+    def __enter__(self) -> "InterprocessStateLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
+        self.release()
+
+
+_state_lock = InterprocessStateLock()
 _event_lanes_lock = threading.Lock()
 _event_lanes: dict[str, queue.Queue[dict[str, Any]]] = {}
 _shutdown_event = threading.Event()
@@ -525,6 +603,27 @@ def save_state(state: dict[str, Any]) -> None:
                 os.close(directory_descriptor)
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def remove_access_requests(open_ids: set[str]) -> int:
+    with _state_lock:
+        state = load_state()
+        requests = state.get("access_requests")
+        if not isinstance(requests, list):
+            return 0
+        kept = [
+            request
+            for request in requests
+            if not (
+                isinstance(request, dict)
+                and str(request.get("open_id") or "") in open_ids
+            )
+        ]
+        removed = len(requests) - len(kept)
+        if removed:
+            state["access_requests"] = kept
+            save_state(state)
+        return removed
 
 
 def runtime_status_path() -> Path:
@@ -901,7 +1000,8 @@ def latest_rollout_turn(path: Path | None) -> dict[str, Any]:
                     )
                 elif event_type == "image_generation_end":
                     image = normalized_image_reference(
-                        str(payload.get("saved_path") or "")
+                        str(payload.get("saved_path") or ""),
+                        trusted_local=True,
                     )
                     if image is not None and image not in reverse_images:
                         reverse_images.append(image)
@@ -969,7 +1069,8 @@ def advance_rollout_turn(
                 event_type = str(payload.get("type") or "")
                 if event_type == "image_generation_end":
                     image = normalized_image_reference(
-                        str(payload.get("saved_path") or "")
+                        str(payload.get("saved_path") or ""),
+                        trusted_local=True,
                     )
                     if image is not None and image not in snapshot["images"]:
                         snapshot["images"].append(image)
@@ -1038,7 +1139,8 @@ def scan_task_subscription_rollout(
                     result["images"] = []
                 elif event_type == "image_generation_end" and result["active_turn_id"]:
                     image = normalized_image_reference(
-                        str(payload.get("saved_path") or "")
+                        str(payload.get("saved_path") or ""),
+                        trusted_local=True,
                     )
                     if image is not None and image not in result["images"]:
                         result["images"].append(image)
@@ -2323,7 +2425,7 @@ def remove_pending_resource_file(item: dict[str, Any]) -> None:
             return
         raw_path = str(item.get("image") or "")
         spool = pending_image_spool_directory()
-    elif operation == "file_reply":
+    elif operation in {"audio_reply", "file_reply"}:
         raw_path = str(item.get("file") or "")
         spool = pending_file_spool_directory()
     else:
@@ -2334,17 +2436,23 @@ def remove_pending_resource_file(item: dict[str, Any]) -> None:
     try:
         path.resolve().relative_to(spool.resolve())
         path.unlink(missing_ok=True)
-        if operation == "file_reply" and path.parent != spool:
+        if operation in {"audio_reply", "file_reply"} and path.parent != spool:
             path.parent.rmdir()
     except (OSError, ValueError):
         return
 
 
 def trim_pending_replies(pending: list[Any]) -> list[Any]:
-    while len(pending) > MAX_PENDING_REPLIES:
-        removed = pending.pop(0)
-        if isinstance(removed, dict):
-            remove_pending_resource_file(removed)
+    transient_operations = {"card_patch", "menu_card", "queue_card"}
+    transient_indexes = [
+        index
+        for index, item in enumerate(pending)
+        if isinstance(item, dict)
+        and str(item.get("operation") or "") in transient_operations
+    ]
+    while len(transient_indexes) > MAX_PENDING_REPLIES:
+        pending.pop(transient_indexes.pop(0))
+        transient_indexes = [index - 1 for index in transient_indexes]
     return pending
 
 
@@ -2374,7 +2482,9 @@ def queue_pending_image(
         spool.mkdir(parents=True, exist_ok=True)
         spool.chmod(0o700)
         digest = hashlib.sha256(
-            f"{message_id}:{index}".encode("utf-8")
+            f"{message_id}:{index}:{source}:{source.stat().st_mtime_ns}:{size}".encode(
+                "utf-8"
+            )
         ).hexdigest()[:32]
         target = spool / f"{digest}{source.suffix.lower()}"
         temporary = target.with_suffix(target.suffix + ".tmp")
@@ -2401,27 +2511,22 @@ def queue_pending_image(
             and item.get("message_id") == message_id
             and int(item.get("index") or 0) == index
         ]
-        for item in replaced:
-            if str(item.get("image") or "") != stored_image:
-                remove_pending_resource_file(item)
-        pending = [item for item in pending if item not in replaced]
-        pending.append(
-            {
-                "operation": "image_reply",
-                "message_id": message_id,
-                "image": stored_image,
-                "remote": remote,
-                "index": index,
-                "reason": reason or "飞书 API 调用失败",
-                "attempts": 0,
-                "created_at": timestamp,
-                "next_attempt_at": timestamp + pending_reply_delay(0),
-            }
-        )
+        new_entry = {
+            "operation": "image_reply",
+            "message_id": message_id,
+            "image": stored_image,
+            "remote": remote,
+            "index": index,
+            "reason": reason or "飞书 API 调用失败",
+            "attempts": 0,
+            "created_at": timestamp,
+            "next_attempt_at": timestamp + pending_reply_delay(0),
+        }
+        candidate = [item for item in pending if item not in replaced] + [new_entry]
         if not remote:
             local_items = [
                 item
-                for item in pending
+                for item in candidate
                 if isinstance(item, dict)
                 and item.get("operation") == "image_reply"
                 and item.get("remote") is not True
@@ -2432,29 +2537,26 @@ def queue_pending_image(
                 else 0
                 for item in local_items
             )
-            while total > MAX_PENDING_IMAGE_SPOOL_BYTES and local_items:
-                oldest = local_items.pop(0)
-                try:
-                    total -= Path(str(oldest.get("image") or "")).stat().st_size
-                except OSError:
-                    pass
-                remove_pending_resource_file(oldest)
-                pending.remove(oldest)
-        while len(pending) > MAX_PENDING_REPLIES:
-            removed = pending.pop(0)
-            if isinstance(removed, dict):
-                remove_pending_resource_file(removed)
-        state["pending_replies"] = pending
+            if total > MAX_PENDING_IMAGE_SPOOL_BYTES:
+                remove_pending_resource_file(
+                    {"operation": "image_reply", "image": stored_image}
+                )
+                return False
+        for item in replaced:
+            if str(item.get("image") or "") != stored_image:
+                remove_pending_resource_file(item)
+        state["pending_replies"] = trim_pending_replies(candidate)
         save_state(state)
     log(f"image reply queued index={index} reason={reason or '飞书 API 调用失败'}")
     return True
 
 
-def queue_pending_file(
+def queue_pending_local_file(
     message_id: str,
     file_path: str,
     index: int,
     reason: str,
+    operation: str,
     now: float | None = None,
 ) -> bool:
     source = Path(file_path).resolve()
@@ -2463,7 +2565,9 @@ def queue_pending_file(
     except OSError:
         return False
     if (
-        source.suffix.lower() not in FILE_SUFFIXES
+        operation not in {"audio_reply", "file_reply"}
+        or source.suffix.lower()
+        not in (AUDIO_SUFFIXES if operation == "audio_reply" else FILE_SUFFIXES)
         or size <= 0
         or size > MAX_PENDING_FILE_BYTES
     ):
@@ -2472,7 +2576,10 @@ def queue_pending_file(
     spool.mkdir(parents=True, exist_ok=True)
     spool.chmod(0o700)
     digest = hashlib.sha256(
-        f"{message_id}:{index}".encode("utf-8")
+        (
+            f"{operation}:{message_id}:{index}:{source}:"
+            f"{source.stat().st_mtime_ns}:{size}"
+        ).encode("utf-8")
     ).hexdigest()[:32]
     item_directory = spool / digest
     item_directory.mkdir(mode=0o700, exist_ok=True)
@@ -2497,30 +2604,26 @@ def queue_pending_file(
             item
             for item in pending
             if isinstance(item, dict)
-            and item.get("operation") == "file_reply"
+            and item.get("operation") == operation
             and item.get("message_id") == message_id
             and int(item.get("index") or 0) == index
         ]
-        for item in replaced:
-            if str(item.get("file") or "") != str(target):
-                remove_pending_resource_file(item)
-        pending = [item for item in pending if item not in replaced]
-        pending.append(
-            {
-                "operation": "file_reply",
-                "message_id": message_id,
-                "file": str(target),
-                "index": index,
-                "reason": reason or "飞书 API 调用失败",
-                "attempts": 0,
-                "created_at": timestamp,
-                "next_attempt_at": timestamp + pending_reply_delay(0),
-            }
-        )
+        new_entry = {
+            "operation": operation,
+            "message_id": message_id,
+            "file": str(target),
+            "index": index,
+            "reason": reason or "飞书 API 调用失败",
+            "attempts": 0,
+            "created_at": timestamp,
+            "next_attempt_at": timestamp + pending_reply_delay(0),
+        }
+        candidate = [item for item in pending if item not in replaced] + [new_entry]
         local_items = [
             item
-            for item in pending
-            if isinstance(item, dict) and item.get("operation") == "file_reply"
+            for item in candidate
+            if isinstance(item, dict)
+            and item.get("operation") in {"audio_reply", "file_reply"}
         ]
         total = sum(
             Path(str(item.get("file") or "")).stat().st_size
@@ -2528,22 +2631,55 @@ def queue_pending_file(
             else 0
             for item in local_items
         )
-        while total > MAX_PENDING_FILE_SPOOL_BYTES and local_items:
-            oldest = local_items.pop(0)
-            try:
-                total -= Path(str(oldest.get("file") or "")).stat().st_size
-            except OSError:
-                pass
-            remove_pending_resource_file(oldest)
-            pending.remove(oldest)
-        while len(pending) > MAX_PENDING_REPLIES:
-            removed = pending.pop(0)
-            if isinstance(removed, dict):
-                remove_pending_resource_file(removed)
-        state["pending_replies"] = pending
+        if total > MAX_PENDING_FILE_SPOOL_BYTES:
+            remove_pending_resource_file(
+                {"operation": operation, "file": str(target)}
+            )
+            return False
+        for item in replaced:
+            if str(item.get("file") or "") != str(target):
+                remove_pending_resource_file(item)
+        state["pending_replies"] = trim_pending_replies(candidate)
         save_state(state)
-    log(f"file reply queued index={index} reason={reason or '飞书 API 调用失败'}")
+    log(
+        f"{operation} queued index={index} "
+        f"reason={reason or '飞书 API 调用失败'}"
+    )
     return True
+
+
+def queue_pending_audio(
+    message_id: str,
+    audio_path: str,
+    index: int,
+    reason: str,
+    now: float | None = None,
+) -> bool:
+    return queue_pending_local_file(
+        message_id,
+        audio_path,
+        index,
+        reason,
+        "audio_reply",
+        now,
+    )
+
+
+def queue_pending_file(
+    message_id: str,
+    file_path: str,
+    index: int,
+    reason: str,
+    now: float | None = None,
+) -> bool:
+    return queue_pending_local_file(
+        message_id,
+        file_path,
+        index,
+        reason,
+        "file_reply",
+        now,
+    )
 
 
 def reply_or_queue(message_id: str, text: str, kind: str) -> bool:
@@ -2589,7 +2725,7 @@ def pending_retry_identity(item: dict[str, Any]) -> tuple[str, ...]:
     operation = str(item.get("operation") or "text_reply")
     if operation == "queue_card":
         return (operation, str(item.get("queue_id") or ""))
-    if operation in {"image_reply", "file_reply"}:
+    if operation in {"audio_reply", "image_reply", "file_reply"}:
         return (
             operation,
             str(item.get("message_id") or ""),
@@ -2797,7 +2933,7 @@ def retry_pending_replies(now: float | None = None) -> bool:
                     state["pending_replies"] = pending
                     save_state(state)
                     return True
-            elif operation == "file_reply":
+            elif operation in {"audio_reply", "file_reply"}:
                 file_path = str(item.get("file") or "")
                 try:
                     file_index = int(item.get("index") or 0)
@@ -2851,6 +2987,12 @@ def retry_pending_replies(now: float | None = None) -> bool:
                 str(retry_item.get("image") or ""),
                 int(retry_item.get("index") or 0),
             )
+        elif operation == "audio_reply":
+            delivered = reply_result_audio(
+                message_id,
+                str(retry_item.get("file") or ""),
+                int(retry_item.get("index") or 0),
+            )
         elif operation == "file_reply":
             delivered = reply_file(
                 message_id,
@@ -2900,7 +3042,7 @@ def retry_pending_replies(now: float | None = None) -> bool:
                 if queued_entry is not None:
                     queued_entry["progress_message_id"] = progress_message_id
                     queued_entry["ready"] = True
-            if operation in {"image_reply", "file_reply"}:
+            if operation in {"audio_reply", "image_reply", "file_reply"}:
                 remove_pending_resource_file(current)
             pending.remove(current)
             state["pending_replies"] = pending
@@ -2911,7 +3053,12 @@ def retry_pending_replies(now: float | None = None) -> bool:
             except (TypeError, ValueError):
                 attempts = 1
             current["attempts"] = attempts
-            if operation in {"text_reply", "image_reply", "file_reply"}:
+            if operation in {
+                "text_reply",
+                "audio_reply",
+                "image_reply",
+                "file_reply",
+            }:
                 current["reason"] = _last_reply_failure_reason or current.get("reason")
             current["next_attempt_at"] = timestamp + pending_reply_delay(attempts)
             state["pending_replies"] = pending
@@ -3289,7 +3436,39 @@ def codex_attachments(input_files: list[dict[str, str]]) -> list[dict[str, str]]
     ]
 
 
-def normalized_image_reference(reference: str) -> str | None:
+def result_roots_for_task(task: dict[str, Any]) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    task_id = str(task.get("id") or "")
+    if task_id:
+        try:
+            working_directory = task_working_directory(task_id)
+        except (OSError, sqlite3.Error):
+            working_directory = ""
+        if working_directory:
+            roots.append(Path(working_directory).resolve())
+    controlled_output = STATE_PATH.parent / "result-attachments"
+    if controlled_output.is_dir():
+        roots.append(controlled_output.resolve())
+    return tuple(dict.fromkeys(roots))
+
+
+def local_result_path_allowed(path: Path, allowed_roots: tuple[Path, ...]) -> bool:
+    resolved = path.resolve()
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root.resolve())
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def normalized_image_reference(
+    reference: str,
+    allowed_roots: tuple[Path, ...] = (),
+    *,
+    trusted_local: bool = False,
+) -> str | None:
     value = reference.strip()
     if value.startswith("<") and value.endswith(">"):
         value = value[1:-1].strip()
@@ -3311,14 +3490,20 @@ def normalized_image_reference(reference: str) -> str | None:
         or not path.is_file()
     ):
         return None
-    return str(path.resolve())
+    resolved = path.resolve()
+    if not trusted_local and not local_result_path_allowed(resolved, allowed_roots):
+        return None
+    return str(resolved)
 
 
-def extract_result_images(text: str) -> tuple[str, list[str]]:
+def extract_result_images(
+    text: str,
+    allowed_roots: tuple[Path, ...] = (),
+) -> tuple[str, list[str]]:
     images: list[str] = []
 
     def replace(match: re.Match[str]) -> str:
-        image = normalized_image_reference(match.group(1))
+        image = normalized_image_reference(match.group(1), allowed_roots)
         if image is None:
             return "图片不可用"
         if image not in images:
@@ -3331,13 +3516,20 @@ def extract_result_images(text: str) -> tuple[str, list[str]]:
 def prepare_result_images(
     text: str,
     rollout_images: list[str],
+    allowed_roots: tuple[Path, ...] = (),
 ) -> tuple[str, list[str]]:
-    clean_text, linked_images = extract_result_images(text)
+    clean_text, linked_images = extract_result_images(text, allowed_roots)
     if MAX_RESULT_IMAGES == 0:
         return clean_text, []
     images: list[str] = []
-    for reference in rollout_images + linked_images:
-        image = normalized_image_reference(reference)
+    for reference in rollout_images:
+        image = normalized_image_reference(reference, trusted_local=True)
+        if image is not None and image not in images:
+            images.append(image)
+        if len(images) >= MAX_RESULT_IMAGES:
+            break
+    for reference in linked_images:
+        image = normalized_image_reference(reference, allowed_roots)
         if image is not None and image not in images:
             images.append(image)
         if len(images) >= MAX_RESULT_IMAGES:
@@ -3347,7 +3539,11 @@ def prepare_result_images(
     return clean_text, images
 
 
-def normalized_file_reference(reference: str) -> str | None:
+def normalized_local_result_reference(
+    reference: str,
+    suffixes: set[str],
+    allowed_roots: tuple[Path, ...] = (),
+) -> str | None:
     value = reference.strip()
     if value.startswith("<") and value.endswith(">"):
         value = value[1:-1].strip()
@@ -3362,7 +3558,7 @@ def normalized_file_reference(reference: str) -> str | None:
     path = Path(value).expanduser()
     if (
         not path.is_absolute()
-        or path.suffix.lower() not in FILE_SUFFIXES
+        or path.suffix.lower() not in suffixes
         or not path.is_file()
     ):
         return None
@@ -3372,14 +3568,82 @@ def normalized_file_reference(reference: str) -> str | None:
         return None
     if size <= 0 or size > MAX_RESULT_FILE_BYTES:
         return None
-    return str(path.resolve())
+    resolved = path.resolve()
+    if not local_result_path_allowed(resolved, allowed_roots):
+        return None
+    return str(resolved)
 
 
-def extract_result_files(text: str, limit: int | None = None) -> tuple[str, list[str]]:
+def normalized_audio_reference(
+    reference: str,
+    allowed_roots: tuple[Path, ...] = (),
+) -> str | None:
+    return normalized_local_result_reference(reference, AUDIO_SUFFIXES, allowed_roots)
+
+
+def normalized_file_reference(
+    reference: str,
+    allowed_roots: tuple[Path, ...] = (),
+) -> str | None:
+    return normalized_local_result_reference(reference, DOCUMENT_SUFFIXES, allowed_roots)
+
+
+def is_native_opus(path: str | Path) -> bool:
+    audio = Path(path)
+    if audio.suffix.lower() not in NATIVE_AUDIO_SUFFIXES:
+        return False
+    try:
+        with audio.open("rb") as handle:
+            return b"OpusHead" in handle.read(64 * 1024)
+    except OSError:
+        return False
+
+
+def extract_result_audio(
+    text: str,
+    limit: int | None = None,
+    allowed_roots: tuple[Path, ...] = (),
+) -> tuple[str, list[str]]:
+    audio_files: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        audio_path = normalized_audio_reference(match.group(2), allowed_roots)
+        if audio_path is None:
+            return match.group(0)
+        if (
+            limit is not None
+            and len(audio_files) >= limit
+            and audio_path not in audio_files
+        ):
+            return match.group(0)
+        if audio_path not in audio_files:
+            audio_files.append(audio_path)
+        label = match.group(1).strip() or Path(audio_path).name
+        if is_native_opus(audio_path):
+            return f"音频见下方：{label}"
+        return f"音频附件见下方：{label}"
+
+    return MARKDOWN_AUDIO_PATTERN.sub(replace, text).strip(), audio_files
+
+
+def prepare_result_audio(
+    text: str,
+    allowed_roots: tuple[Path, ...] = (),
+) -> tuple[str, list[str]]:
+    if MAX_RESULT_AUDIO == 0:
+        return text, []
+    return extract_result_audio(text, MAX_RESULT_AUDIO, allowed_roots)
+
+
+def extract_result_files(
+    text: str,
+    limit: int | None = None,
+    allowed_roots: tuple[Path, ...] = (),
+) -> tuple[str, list[str]]:
     files: list[str] = []
 
     def replace(match: re.Match[str]) -> str:
-        file_path = normalized_file_reference(match.group(2))
+        file_path = normalized_file_reference(match.group(2), allowed_roots)
         if file_path is None:
             return match.group(0)
         if limit is not None and len(files) >= limit and file_path not in files:
@@ -3392,10 +3656,13 @@ def extract_result_files(text: str, limit: int | None = None) -> tuple[str, list
     return MARKDOWN_FILE_PATTERN.sub(replace, text).strip(), files
 
 
-def prepare_result_files(text: str) -> tuple[str, list[str]]:
+def prepare_result_files(
+    text: str,
+    allowed_roots: tuple[Path, ...] = (),
+) -> tuple[str, list[str]]:
     if MAX_RESULT_FILES == 0:
         return text, []
-    return extract_result_files(text, MAX_RESULT_FILES)
+    return extract_result_files(text, MAX_RESULT_FILES, allowed_roots)
 
 
 def reply_image(message_id: str, image: str, index: int) -> bool:
@@ -3451,7 +3718,63 @@ def reply_image(message_id: str, image: str, index: int) -> bool:
     return False
 
 
-def reply_file(message_id: str, file_path: str, index: int) -> bool:
+def reply_audio(message_id: str, audio_path: str, index: int) -> bool:
+    set_reply_failure_reason("")
+    path = Path(audio_path).resolve()
+    if not is_native_opus(path):
+        set_reply_failure_reason("该音频格式不支持飞书原生播放")
+        return False
+    command = [
+        LARK_CLI,
+        "--profile",
+        LARK_PROFILE,
+        "im",
+        "+messages-reply",
+        "--message-id",
+        message_id,
+        "--audio",
+        f"./{path.name}",
+        "--as",
+        "bot",
+        "--idempotency-key",
+        idempotency_key(message_id, f"audio-{index}"),
+    ]
+    for attempt in range(1, 3):
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=lark_environment(),
+                cwd=path.parent,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            set_reply_failure_reason(lark_reply_failure_reason(error=exc))
+            log(
+                f"audio reply failed index={index} attempt={attempt} "
+                f"reason={current_reply_failure_reason()}"
+            )
+            continue
+        if lark_succeeded(result):
+            set_reply_failure_reason("")
+            return True
+        set_reply_failure_reason(lark_reply_failure_reason(result=result))
+        log(
+            f"audio reply failed index={index} attempt={attempt} "
+            f"{lark_reply_failure_metadata(result)} "
+            f"reason={current_reply_failure_reason()}"
+        )
+    return False
+
+
+def reply_file(
+    message_id: str,
+    file_path: str,
+    index: int,
+    *,
+    kind_prefix: str = "file",
+) -> bool:
     set_reply_failure_reason("")
     path = Path(file_path).resolve()
     command = [
@@ -3467,7 +3790,7 @@ def reply_file(message_id: str, file_path: str, index: int) -> bool:
         "--as",
         "bot",
         "--idempotency-key",
-        idempotency_key(message_id, f"file-{index}"),
+        idempotency_key(message_id, f"{kind_prefix}-{index}"),
     ]
     for attempt in range(1, 3):
         try:
@@ -3496,6 +3819,78 @@ def reply_file(message_id: str, file_path: str, index: int) -> bool:
             f"reason={current_reply_failure_reason()}"
         )
     return False
+
+
+def reply_result_audio(message_id: str, audio_path: str, index: int) -> bool:
+    if is_native_opus(audio_path):
+        return reply_audio(message_id, audio_path, index)
+    return reply_file(
+        message_id,
+        audio_path,
+        index,
+        kind_prefix="audio-file",
+    )
+
+
+def deliver_result_resources(
+    message_id: str,
+    images: list[str],
+    audio_files: list[str],
+    files: list[str],
+    *,
+    notify_failures: bool = False,
+) -> tuple[int, int, int]:
+    resource_groups = (
+        (
+            "image",
+            images,
+            reply_image,
+            queue_pending_image,
+            "张图片",
+        ),
+        (
+            "audio",
+            audio_files,
+            reply_result_audio,
+            queue_pending_audio,
+            "段音频",
+        ),
+        (
+            "file",
+            files,
+            reply_file,
+            queue_pending_file,
+            "个文件",
+        ),
+    )
+    failed_counts: list[int] = []
+    for kind, resources, send_resource, queue_resource, unit in resource_groups:
+        failed = 0
+        queued = 0
+        for index, resource in enumerate(resources, start=1):
+            if send_resource(message_id, resource, index):
+                continue
+            failed += 1
+            if queue_resource(
+                message_id,
+                resource,
+                index,
+                current_reply_failure_reason() or "飞书 API 调用失败",
+            ):
+                queued += 1
+        failed_counts.append(failed)
+        if notify_failures and failed:
+            reply(
+                message_id,
+                (
+                    f"有 {queued} {unit}暂未送达，连接恢复后会自动补发。"
+                    if queued == failed
+                    else f"有 {queued} {unit}等待自动补发，另有 "
+                    f"{failed - queued} {unit}无法保存，请在 Codex Desktop 中查看。"
+                ),
+                f"{kind}-error",
+            )
+    return tuple(failed_counts)
 
 
 def sent_message_id(stdout: str) -> str | None:
@@ -4310,8 +4705,7 @@ def patch_workflow_completed_cards(
 
 def workflow_event_processed(key: str) -> bool:
     with _state_lock:
-        processed = load_state().get("processed", [])
-        return isinstance(processed, list) and key in processed
+        return processed_event_seen(load_state(), key)
 
 
 def handle_workflow_card_action(
@@ -6706,11 +7100,14 @@ def deliver_task_subscription_result(
     snapshot: dict[str, Any],
 ) -> bool:
     result = str(snapshot.get("message") or "").strip()
+    allowed_roots = result_roots_for_task(task)
+    clean_result, audio_files = prepare_result_audio(result, allowed_roots)
     clean_result, images = prepare_result_images(
-        result,
+        clean_result,
         [str(item) for item in snapshot.get("images", [])],
+        allowed_roots,
     )
-    clean_result, files = prepare_result_files(clean_result)
+    clean_result, files = prepare_result_files(clean_result, allowed_roots)
     card = build_task_subscription_result_card(
         task,
         str(snapshot.get("status") or "failed"),
@@ -6751,26 +7148,12 @@ def deliver_task_subscription_result(
             "当前 Task 已跟随订阅结果",
             task,
         )
-    for index, image in enumerate(images, start=1):
-        if not reply_image(message_id, image, index):
-            queue_pending_image(
-                message_id,
-                image,
-                index,
-                current_reply_failure_reason() or "飞书 API 调用失败",
-            )
-    for index, file_path in enumerate(files, start=1):
-        if not reply_file(message_id, file_path, index):
-            queue_pending_file(
-                message_id,
-                file_path,
-                index,
-                current_reply_failure_reason() or "飞书 API 调用失败",
-            )
+    deliver_result_resources(message_id, images, audio_files, files)
     update_current_status_card(user_id, task=task)
     log(
         "task subscription result delivered "
-        f"status={snapshot.get('status')} images={len(images)} files={len(files)}"
+        f"status={snapshot.get('status')} images={len(images)} "
+        f"audio={len(audio_files)} files={len(files)}"
     )
     return True
 
@@ -6945,11 +7328,14 @@ def deliver_desktop_sync_result(
     if status == "completed":
         result = str(snapshot.get("message") or "").strip()
         result = result or "Codex 已完成，但没有返回文字结果。"
+        allowed_roots = result_roots_for_task(task)
+        clean_result, audio_files = prepare_result_audio(result, allowed_roots)
         clean_result, images = prepare_result_images(
-            result,
+            clean_result,
             [str(item) for item in snapshot.get("images", [])],
+            allowed_roots,
         )
-        clean_result, files = prepare_result_files(clean_result)
+        clean_result, files = prepare_result_files(clean_result, allowed_roots)
         record_task_exchange(
             user_id,
             str(task["id"]),
@@ -6969,25 +7355,11 @@ def deliver_desktop_sync_result(
                 "当前 Task 已跟随桌面结果",
                 task,
             )
-        for index, image in enumerate(images, start=1):
-            if not reply_image(reply_target, image, index):
-                queue_pending_image(
-                    reply_target,
-                    image,
-                    index,
-                    current_reply_failure_reason() or "飞书 API 调用失败",
-                )
-        for index, file_path in enumerate(files, start=1):
-            if not reply_file(reply_target, file_path, index):
-                queue_pending_file(
-                    reply_target,
-                    file_path,
-                    index,
-                    current_reply_failure_reason() or "飞书 API 调用失败",
-                )
+        deliver_result_resources(reply_target, images, audio_files, files)
         log(
             "desktop sync result delivered "
-            f"text={delivered} images={len(images)} files={len(files)}"
+            f"text={delivered} images={len(images)} "
+            f"audio={len(audio_files)} files={len(files)}"
         )
     else:
         reply_or_queue(
@@ -8947,7 +9319,10 @@ def wait_for_desktop_turn(
                 }:
                     on_progress("正在整理回复")
             if event_type == "image_generation_end":
-                image = normalized_image_reference(str(payload.get("saved_path") or ""))
+                image = normalized_image_reference(
+                    str(payload.get("saved_path") or ""),
+                    trusted_local=True,
+                )
                 if image is not None and image not in images:
                     images.append(image)
                 continue
@@ -8989,7 +9364,10 @@ def rollout_images_since(rollout_path: Path | None, start_offset: int) -> list[s
                 continue
             if not isinstance(payload, dict) or payload.get("type") != "image_generation_end":
                 continue
-            image = normalized_image_reference(str(payload.get("saved_path") or ""))
+            image = normalized_image_reference(
+                str(payload.get("saved_path") or ""),
+                trusted_local=True,
+            )
             if image is not None and image not in images:
                 images.append(image)
     return images
@@ -9397,14 +9775,55 @@ def run_codex(
         )
 
 
-def mark_processed(state: dict[str, Any], key: str) -> bool:
+def processed_event_seen(
+    state: dict[str, Any],
+    key: str,
+    now: float | None = None,
+) -> bool:
+    timestamp = time.time() if now is None else now
+    recent = state.get("processed_events")
+    if isinstance(recent, dict):
+        try:
+            recorded_at = float(recent.get(key) or 0)
+        except (TypeError, ValueError):
+            recorded_at = 0
+        if recorded_at and timestamp - recorded_at <= PROCESSED_EVENT_TTL_SECONDS:
+            return True
+    processed = state.get("processed")
+    return isinstance(processed, list) and key in processed
+
+
+def mark_processed(
+    state: dict[str, Any],
+    key: str,
+    now: float | None = None,
+) -> bool:
     with _state_lock:
-        processed = state.setdefault("processed", [])
-        if key in processed:
+        timestamp = time.time() if now is None else now
+        current = load_state()
+        if processed_event_seen(current, key, timestamp):
             return False
-        processed.append(key)
-        state["processed"] = processed[-200:]
-        save_state(state)
+        recent = current.get("processed_events")
+        if not isinstance(recent, dict):
+            recent = {}
+        recent = {
+            str(event_key): float(recorded_at)
+            for event_key, recorded_at in recent.items()
+            if isinstance(event_key, str)
+            and isinstance(recorded_at, (int, float))
+            and timestamp - float(recorded_at) <= PROCESSED_EVENT_TTL_SECONDS
+        }
+        recent[key] = timestamp
+        if len(recent) > MAX_PROCESSED_EVENTS:
+            recent = dict(
+                sorted(recent.items(), key=lambda item: item[1])[-MAX_PROCESSED_EVENTS:]
+            )
+        current["processed_events"] = recent
+        current["processed"] = list(recent)[-200:]
+        save_state(current)
+        if state is not current:
+            state.clear()
+            state.update(current)
         return True
 
 
@@ -9649,8 +10068,14 @@ def process_message_run(
             if success
             else "未完成"
         )
-        clean_result, images = prepare_result_images(result, rollout_images)
-        clean_result, files = prepare_result_files(clean_result)
+        allowed_roots = result_roots_for_task(task)
+        clean_result, audio_files = prepare_result_audio(result, allowed_roots)
+        clean_result, images = prepare_result_images(
+            clean_result,
+            rollout_images,
+            allowed_roots,
+        )
+        clean_result, files = prepare_result_files(clean_result, allowed_roots)
         if not waiting_for_choice:
             record_task_exchange(
                 str(run["user_id"]),
@@ -9684,58 +10109,20 @@ def process_message_run(
                 "当前 Task 已跟随最新结果",
                 task,
             )
-        failed_images = 0
-        queued_images = 0
-        for index, image in enumerate(images, start=1):
-            if reply_image(message_id, image, index):
-                continue
-            failed_images += 1
-            if queue_pending_image(
-                message_id,
-                image,
-                index,
-                current_reply_failure_reason() or "飞书 API 调用失败",
-            ):
-                queued_images += 1
-        if failed_images:
-            reply(
-                message_id,
-                (
-                    f"有 {queued_images} 张图片暂未送达，连接恢复后会自动补发。"
-                    if queued_images == failed_images
-                    else f"有 {queued_images} 张图片等待自动补发，另有 "
-                    f"{failed_images - queued_images} 张无法保存，请在 Codex Desktop 中查看。"
-                ),
-                "image-error",
-            )
-        failed_files = 0
-        queued_files = 0
-        for index, file_path in enumerate(files, start=1):
-            if reply_file(message_id, file_path, index):
-                continue
-            failed_files += 1
-            if queue_pending_file(
-                message_id,
-                file_path,
-                index,
-                current_reply_failure_reason() or "飞书 API 调用失败",
-            ):
-                queued_files += 1
-        if failed_files:
-            reply(
-                message_id,
-                (
-                    f"有 {queued_files} 个文件暂未送达，连接恢复后会自动补发。"
-                    if queued_files == failed_files
-                    else f"有 {queued_files} 个文件等待自动补发，另有 "
-                    f"{failed_files - queued_files} 个无法保存，请在 Codex Desktop 中查看。"
-                ),
-                "file-error",
-            )
+        failed_images, failed_audio, failed_files = deliver_result_resources(
+            message_id,
+            images,
+            audio_files,
+            files,
+            notify_failures=True,
+        )
         if success:
             delivery_status = (
                 "已完成，结果已返回飞书"
-                if delivered and not failed_images and not failed_files
+                if delivered
+                and not failed_images
+                and not failed_audio
+                and not failed_files
                 else "已完成，部分结果等待自动补发"
             )
             set_run_progress(run, delivery_status, "completed", force=True)
@@ -9756,7 +10143,7 @@ def process_message_run(
         start_next_queued_input(task_id)
 
 
-def handle_message_event(event: dict[str, Any]) -> None:
+def _handle_message_event_once(event: dict[str, Any]) -> None:
     chat_id = str(event.get("chat_id") or "")
     user_id = str(event.get("sender_id") or "")
     message_type = str(event.get("message_type") or "")
@@ -9804,7 +10191,7 @@ def handle_message_event(event: dict[str, Any]) -> None:
             authorize_chat(state, user_id, chat_id)
         elif not is_authorized_chat(state, user_id, chat_id):
             return
-        if not mark_processed(state, message_id):
+        if processed_event_seen(state, message_id):
             return
 
     pending_project = str(
@@ -9974,7 +10361,18 @@ def handle_message_event(event: dict[str, Any]) -> None:
     start_claimed_run(run, content, image_keys, file_keys, raw_content, message_type)
 
 
-def handle_card_event(event: dict[str, Any]) -> None:
+def handle_message_event(event: dict[str, Any]) -> None:
+    message_id = str(event.get("message_id") or "")
+    if message_id:
+        with _state_lock:
+            if processed_event_seen(load_state(), message_id):
+                return
+    _handle_message_event_once(event)
+    if message_id:
+        mark_processed(load_state(), message_id)
+
+
+def _handle_card_event_once(event: dict[str, Any]) -> None:
     chat_id = str(event.get("chat_id") or "")
     user_id = str(event.get("operator_id") or "")
     action_name = str(event.get("action_name") or "")
@@ -10000,7 +10398,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         }:
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
             change = ""
             if action == "toggle_task_subscription":
@@ -10054,7 +10452,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         if action in {"confirm_desktop_sync", "cancel_desktop_sync"}:
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
                 task = selected_task(user_id, state)
             if action == "cancel_desktop_sync":
@@ -10105,7 +10503,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
                 return
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
             if action == "cancel_cli_fallback":
                 if remove_cli_fallback(fallback_id) is None:
@@ -10177,7 +10575,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         if action == "cancel_queued_input":
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
             entry = cancel_pending_input(
                 str(payload.get("queue_id") or ""),
@@ -10202,14 +10600,14 @@ def handle_card_event(event: dict[str, Any]) -> None:
         if action == "refresh_current_status":
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
             update_current_status_card(user_id, ensure=True)
             return
         if action == "refresh_codex_usage":
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
             if message_id:
                 patch_card(
@@ -10228,7 +10626,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         if action == "show_codex_usage":
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
             if message_id:
                 patch_card(message_id, build_codex_usage_card(codex_usage_snapshot()))
@@ -10239,7 +10637,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         }:
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
             scope = "daily" if action == "show_daily_task_usage_analysis" else "period"
             if message_id:
@@ -10253,7 +10651,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         if action == "cancel_task_switch":
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
                 task = selected_task(user_id, state)
                 context_type = card_context_for_event(state, user_id, message_id)
@@ -10319,7 +10717,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         if action == "new_task":
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
                 requested_project = str(payload.get("project") or "")
                 projects = set(available_project_names(user_id))
@@ -10340,7 +10738,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
         if action in {"archive_task", "restore_task"}:
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
                 current_task = selected_task(user_id, state)
             requested_task_id = str(payload.get("task_id") or "")
@@ -10471,7 +10869,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
             favorite_stale = False
             with _state_lock:
                 state = load_state()
-                if not mark_processed(state, f"card:{event_id}"):
+                if processed_event_seen(state, f"card:{event_id}"):
                     return
                 if action == "toggle_task_favorite":
                     task = selected_task(user_id, state)
@@ -10590,7 +10988,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
             return
         with _state_lock:
             state = load_state()
-            if not mark_processed(state, f"card:{event_id}"):
+            if processed_event_seen(state, f"card:{event_id}"):
                 return
         if action == "stop_run":
             cancel_event = run.get("cancel_event")
@@ -10657,7 +11055,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     log("card ignored reason=unrecognized-chat-and-card")
                     return
                 authorize_chat(state, user_id, chat_id)
-            if not mark_processed(state, f"card:{event_id}"):
+            if processed_event_seen(state, f"card:{event_id}"):
                 return
             if action_name == "subscription_project_selector":
                 if selected_value not in projects:
@@ -10746,7 +11144,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     log("card ignored reason=unrecognized-chat-and-card")
                     return
                 authorize_chat(state, user_id, chat_id)
-            if not mark_processed(state, f"card:{event_id}"):
+            if processed_event_seen(state, f"card:{event_id}"):
                 return
             state.setdefault("last_projects", {})[user_id] = selected_value
             save_state(state)
@@ -10793,7 +11191,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
                     log("card ignored reason=unrecognized-chat-and-card")
                     return
                 authorize_chat(state, user_id, chat_id)
-            if not mark_processed(state, f"card:{event_id}"):
+            if processed_event_seen(state, f"card:{event_id}"):
                 return
             if action_name == "archived_project_selector":
                 if selected_value not in projects:
@@ -10891,7 +11289,7 @@ def handle_card_event(event: dict[str, Any]) -> None:
                 log("card ignored reason=unrecognized-chat-and-card")
                 return
             authorize_chat(state, user_id, chat_id)
-        if not mark_processed(state, f"card:{event_id}"):
+        if processed_event_seen(state, f"card:{event_id}"):
             return
         if action_name == "task_scope_selector":
             if selected_value not in {"all", "recent", "favorites"}:
@@ -10997,7 +11395,19 @@ def handle_card_event(event: dict[str, Any]) -> None:
         schedule_user_task_identity_refresh(user_id, "当前 Task 已切换", selected)
 
 
-def handle_menu_event(event: dict[str, Any]) -> None:
+def handle_card_event(event: dict[str, Any]) -> None:
+    event_id = str(event.get("event_id") or "")
+    processed_key = f"card:{event_id}" if event_id else ""
+    if processed_key:
+        with _state_lock:
+            if processed_event_seen(load_state(), processed_key):
+                return
+    _handle_card_event_once(event)
+    if processed_key:
+        mark_processed(load_state(), processed_key)
+
+
+def _handle_menu_event_once(event: dict[str, Any]) -> None:
     user_id = str(event.get("operator_id") or "")
     event_key = str(event.get("event_key") or "")
     if event_key not in {
@@ -11016,7 +11426,7 @@ def handle_menu_event(event: dict[str, Any]) -> None:
         return
     with _state_lock:
         state = load_state()
-        if not mark_processed(state, f"menu:{event_id}"):
+        if processed_event_seen(state, f"menu:{event_id}"):
             return
     if event_key == CURRENT_TASK_MENU_EVENT_KEY:
         task = selected_task(user_id, state)
@@ -11083,6 +11493,18 @@ def handle_menu_event(event: dict[str, Any]) -> None:
         f"archive-task-{event_id}",
     )
     log(f"menu handled key={event_key} result=archive-card")
+
+
+def handle_menu_event(event: dict[str, Any]) -> None:
+    event_id = str(event.get("event_id") or "")
+    processed_key = f"menu:{event_id}" if event_id else ""
+    if processed_key:
+        with _state_lock:
+            if processed_event_seen(load_state(), processed_key):
+                return
+    _handle_menu_event_once(event)
+    if processed_key:
+        mark_processed(load_state(), processed_key)
 
 
 def dispatch_event(event: dict[str, Any]) -> None:
@@ -11454,6 +11876,20 @@ def maintenance_loop(events: queue.Queue[dict[str, Any]]) -> None:
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--remove-access-requests"]:
+        try:
+            payload = json.load(sys.stdin)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return 2
+        if not isinstance(payload, list) or not payload or any(
+            not isinstance(open_id, str)
+            or not open_id.startswith("ou_")
+            or len(open_id) > 256
+            for open_id in payload
+        ):
+            return 2
+        print(remove_access_requests(set(payload)))
+        return 0
     if sys.argv[1:] == ["--diagnose-json"]:
         report = diagnostic_report()
         print(json.dumps(report, ensure_ascii=False, indent=2))

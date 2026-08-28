@@ -3,8 +3,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -176,6 +178,131 @@ class ReplyReliabilityTests(unittest.TestCase):
             self.bridge.load_state().get("pending_replies", []),
             [],
         )
+
+    def test_durable_final_replies_are_not_evicted_by_transient_limit(self):
+        durable = [
+            {
+                "operation": "text_reply",
+                "message_id": f"om_final_{index}",
+                "text": "结果",
+                "kind": "final",
+            }
+            for index in range(60)
+        ]
+        transient = [
+            {
+                "operation": "card_patch",
+                "message_id": f"om_card_{index}",
+                "card": {},
+            }
+            for index in range(60)
+        ]
+
+        trimmed = self.bridge.trim_pending_replies(durable + transient)
+
+        self.assertEqual(
+            len([item for item in trimmed if item["operation"] == "text_reply"]),
+            60,
+        )
+        self.assertEqual(
+            len([item for item in trimmed if item["operation"] == "card_patch"]),
+            self.bridge.MAX_PENDING_REPLIES,
+        )
+
+    def test_processed_event_history_extends_beyond_legacy_200_window(self):
+        state = self.bridge.load_state()
+        for index in range(250):
+            self.assertTrue(
+                self.bridge.mark_processed(state, f"event-{index}", now=1000 + index)
+            )
+
+        reloaded = self.bridge.load_state()
+        self.assertTrue(
+            self.bridge.processed_event_seen(reloaded, "event-0", now=1300)
+        )
+        self.assertLessEqual(len(reloaded["processed"]), 200)
+        self.assertEqual(len(reloaded["processed_events"]), 250)
+
+    def test_failed_message_dispatch_is_not_marked_processed(self):
+        event = {"message_id": "om_crash"}
+        with mock.patch.object(
+            self.bridge,
+            "_handle_message_event_once",
+            side_effect=RuntimeError("crash"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.bridge.handle_message_event(event)
+
+        self.assertFalse(
+            self.bridge.processed_event_seen(
+                self.bridge.load_state(),
+                "om_crash",
+            )
+        )
+
+    def test_access_request_update_preserves_unrelated_state(self):
+        self.bridge.save_state(
+            {
+                "access_requests": [
+                    {"open_id": "ou_remove"},
+                    {"open_id": "ou_keep"},
+                ],
+                "pending_inputs": [{"queue_id": "queue-1"}],
+            }
+        )
+
+        self.assertEqual(self.bridge.remove_access_requests({"ou_remove"}), 1)
+
+        state = self.bridge.load_state()
+        self.assertEqual(state["access_requests"], [{"open_id": "ou_keep"}])
+        self.assertEqual(state["pending_inputs"], [{"queue_id": "queue-1"}])
+
+    def test_access_request_helper_waits_for_cross_process_state_lock(self):
+        home = self.root = Path(self.temporary.name) / "home"
+        state_path = home / ".codex/feishu-bridge/state.json"
+        config_path = home / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            '{"allowed_users":[{"open_id":"ou_admin","allowed_projects":["*"]}]}',
+            encoding="utf-8",
+        )
+        self.bridge.STATE_PATH = state_path
+        self.bridge.save_state(
+            {
+                "access_requests": [{"open_id": "ou_remove"}],
+                "pending_inputs": [{"queue_id": "queue-1"}],
+            }
+        )
+        environment = os.environ.copy()
+        environment["HOME"] = str(home)
+        environment["CODEX_FEISHU_BRIDGE_CONFIG"] = str(config_path)
+
+        self.bridge._state_lock.acquire()
+        try:
+            process = subprocess.Popen(
+                [sys.executable, str(BRIDGE_PATH), "--remove-access-requests"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=environment,
+            )
+            assert process.stdin is not None
+            process.stdin.write('["ou_remove"]')
+            process.stdin.close()
+            time.sleep(0.15)
+            self.assertIsNone(process.poll())
+        finally:
+            self.bridge._state_lock.release()
+
+        return_code = process.wait(timeout=5)
+        assert process.stdout is not None and process.stderr is not None
+        process.stdout.close()
+        process.stderr.close()
+        self.assertEqual(return_code, 0)
+        state = self.bridge.load_state()
+        self.assertEqual(state["access_requests"], [])
+        self.assertEqual(state["pending_inputs"], [{"queue_id": "queue-1"}])
 
     def test_due_reply_is_delivered_and_removed_with_recovery_notice(self):
         self.bridge.queue_pending_reply(

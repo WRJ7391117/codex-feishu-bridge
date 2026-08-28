@@ -155,6 +155,7 @@ def validate_config(payload) -> None:
         "max_prompt_chars",
         "max_reply_chars",
         "max_result_images",
+        "max_result_audio",
         "max_result_files",
         "max_result_file_bytes",
         "max_pending_file_bytes",

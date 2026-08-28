@@ -10,7 +10,7 @@ The App bundles its patched runtime CLI. Use the first-connection assistant to c
 
 The installed bridge prefers its bundled `lark-cli 1.0.89-codex-feishu.3`. It registers `card.action.trigger` with the SDK's card-action handler and returns a visible processing toast. The system CLI and bundled CLI share the same Profile and Keychain credentials.
 
-Source package `1.9.21 (build 57)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
+Source package `1.9.23 (build 59)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
 
 ## Feishu console
 
@@ -18,7 +18,7 @@ Enable long-connection delivery and subscribe to `im.message.receive_v1` and `ap
 
 The bot needs message receive/read/send permissions. Incoming image support also requires permission to read the matching message resource; `im:resource` is needed to upload result images. Follow `missing_scopes` from lark-cli rather than guessing broader permissions.
 
-The first-connection assistant can discover the first permitted user's open_id from one bounded two-minute message listener. It does not grant any project. For terminal fallback, consume one bounded message event, then ask the user to send the Bot a test message:
+The first-connection assistant can discover the first permitted user's open_id from one bounded two-minute message listener. It accepts only a user-sent P2P message whose text exactly matches the six-digit one-time code shown by the App, and it does not grant any project. For terminal fallback, consume one bounded message event, then ask the user to send the Bot a test message:
 
 ```bash
 lark-cli --profile codex-notify event consume im.message.receive_v1 \
@@ -31,7 +31,7 @@ When self-service access requests are enabled, an unknown user may message the B
 
 ## Install
 
-Run `scripts/install-latest.sh` from this skill after explicit authorization, or download the latest release manually. The installer places the App in `/Applications` when writable, otherwise in `~/Applications`. The App installs runtime files under `~/Library/Application Support/Codex Feishu Bridge/` and preserves an existing config and Task state.
+Run `scripts/install-latest.sh` from this skill after explicit authorization, or download the latest release manually. The installer verifies GitHub's SHA-256 asset digest, bundle identity and version, code signature, arm64/x86_64 architectures, and downgrade direction before replacement. It places the App in `/Applications` when writable, otherwise in `~/Applications`. The App installs runtime files under `~/Library/Application Support/Codex Feishu Bridge/` and preserves an existing config and Task state.
 
 On an existing legacy installation, first launch migrates the old Profile/sender/chat settings and replaces `com.openai.codex.feishu-bridge` with `com.deepori.codex-feishu-bridge`. The old plist is retained as a `.migrated-backup` file.
 

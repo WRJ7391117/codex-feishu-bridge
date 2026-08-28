@@ -15,6 +15,8 @@ UNINSTALLER = ROOT / "Resources/bridge/uninstall.sh"
 BRIDGE_SOURCE = ROOT / "Resources/bridge/feishu_codex_bridge.py"
 INSTALLER = ROOT / "Resources/bridge/install.sh"
 BUILD_SCRIPT = ROOT / "scripts/build-app.sh"
+LOCAL_INSTALLER = ROOT / "scripts/install-local.sh"
+PUBLIC_INSTALLER = ROOT / "skills/codex-feishu-bridge/scripts/install-latest.sh"
 README = ROOT / "README.md"
 
 
@@ -128,6 +130,9 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('"--max-events", "1"', discovery)
         self.assertIn('"--timeout", "2m"', discovery)
         self.assertIn('sender.hasPrefix("ou_")', discovery)
+        self.assertIn('object["sender_type"] as? String == "user"', discovery)
+        self.assertIn('object["chat_type"] as? String == "p2p"', discovery)
+        self.assertIn('messageText(object["content"]) == challenge', discovery)
         authorization = self.source.split("func continueToUserAuthorization", 1)[1].split(
             "func prepareConfiguration", 1
         )[0]
@@ -155,6 +160,32 @@ class ProductOnboardingTests(unittest.TestCase):
             config["task_subscriptions_menu_event_key"], "task_subscriptions"
         )
         self.assertNotIn("workflow_notifications", config)
+
+    def test_public_installer_verifies_release_and_refuses_downgrade(self):
+        installer = PUBLIC_INSTALLER.read_text(encoding="utf-8")
+        for requirement in (
+            "api.github.com/repos/${repository}/releases/latest",
+            'digest.startswith("sha256:")',
+            "/usr/bin/shasum -a 256",
+            "CFBundleIdentifier",
+            "CFBundleShortVersionString",
+            "/usr/bin/codesign --verify --deep --strict",
+            "arm64",
+            "x86_64",
+            "refusing to downgrade the installed App",
+            '${destination}.incoming',
+            '${destination}.previous',
+            "旧版本已恢复",
+        ):
+            self.assertIn(requirement, installer)
+
+    def test_app_delegates_state_mutation_to_locked_bridge_helper(self):
+        updater = self.source.split("func removeAccessRequests", 1)[1].split(
+            "private func run", 1
+        )[0]
+        self.assertIn('appendingPathComponent("feishu_codex_bridge.py")', updater)
+        self.assertIn('"--remove-access-requests"', updater)
+        self.assertNotIn("payload.write(to: stateURL", updater)
 
     def test_public_package_excludes_private_extension_components(self):
         build = BUILD_SCRIPT.read_text(encoding="utf-8")
@@ -269,6 +300,19 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('"${support_dir}/uninstall.sh" 755', installer)
         self.assertIn('run(script.path, ["--keep-data"])', self.source)
         self.assertIn("移除服务并保留数据", self.source)
+
+    def test_local_installer_updates_runtime_before_copying_the_app(self):
+        installer = LOCAL_INSTALLER.read_text(encoding="utf-8")
+
+        self.assertNotIn('if [[ ! -d "${app_source}" ]]', installer)
+        self.assertLess(
+            installer.index('"${project_dir}/scripts/build-app.sh"'),
+            installer.index('"${app_source}/Contents/Resources/bridge/install.sh"'),
+        )
+        self.assertLess(
+            installer.index('"${app_source}/Contents/Resources/bridge/install.sh"'),
+            installer.index('/usr/bin/ditto "${app_source}"'),
+        )
 
 
 if __name__ == "__main__":

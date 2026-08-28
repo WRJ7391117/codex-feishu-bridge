@@ -51,7 +51,10 @@ class ImageReplyTests(unittest.TestCase):
                 f"重复 ![图](<{local}>)"
             )
 
-            clean, images = self.bridge.extract_result_images(text)
+            clean, images = self.bridge.extract_result_images(
+                text,
+                (Path(directory).resolve(),),
+            )
 
             self.assertEqual(clean.count("图片见下方"), 3)
             self.assertEqual(
@@ -66,6 +69,27 @@ class ImageReplyTests(unittest.TestCase):
 
         self.assertEqual(clean, "图片不可用 图片不可用")
         self.assertEqual(images, [])
+
+    def test_local_result_outside_authorized_task_root_is_not_uploaded(self):
+        with tempfile.TemporaryDirectory() as task_directory, tempfile.TemporaryDirectory() as private_directory:
+            private_image = Path(private_directory) / "private.png"
+            private_image.write_bytes(b"private")
+            private_document = Path(private_directory) / "state.json"
+            private_document.write_text('{"secret":true}', encoding="utf-8")
+
+            clean, images = self.bridge.extract_result_images(
+                f"![私有文件](<{private_image}>)",
+                (Path(task_directory).resolve(),),
+            )
+            file_text, files = self.bridge.prepare_result_files(
+                f"[私有状态](<{private_document}>)",
+                (Path(task_directory).resolve(),),
+            )
+
+        self.assertEqual(clean, "图片不可用")
+        self.assertEqual(images, [])
+        self.assertIn(str(private_document), file_text)
+        self.assertEqual(files, [])
 
     def test_zero_image_limit_disables_sending(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -158,7 +182,10 @@ class ImageReplyTests(unittest.TestCase):
                 "缺失：[文件](/tmp/missing.docx)"
             )
 
-            clean, files = self.bridge.prepare_result_files(text)
+            clean, files = self.bridge.prepare_result_files(
+                text,
+                (Path(directory).resolve(),),
+            )
 
             self.assertIn("文件见下方：下载", clean)
             self.assertIn("[说明](https://example.com/help)", clean)

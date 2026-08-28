@@ -2,7 +2,7 @@
 
 把飞书 Bot 变成 Codex Desktop 的移动入口：在飞书里按项目选择桌面版左侧栏中的 Task，发送文字、图片、文件或音频，并接收可更新的运行状态和最终结果。
 
-版本说明：当前源码和本机构建为 `1.9.21 (build 57)`。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.9.23 (build 59)`。不得用旧版本或同版本不同构建覆盖。
 
 面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
@@ -33,8 +33,9 @@
 - 可在进度卡中停止当前运行；停止结果会区分“已确认”和“未确认”
 - Codex 请求命令、文件修改或临时权限时，可在飞书卡片中“允许一次”或“拒绝”
 - 完成后先回复文字结果，再逐张回复 Codex 生成或引用的图片
+- Codex 明确链接的 Opus/Ogg Opus 音频会作为飞书原生语音返回；MP3、WAV、M4A 等格式会作为音频附件返回
 - Codex 明确链接的 PDF、Office、文本和代码结果文件会自动作为飞书附件返回
-- 最终文字、结果图片、结果文件和进度卡发送失败都会持久化；网络恢复后补发而不重跑 Codex
+- 最终文字、结果图片、结果音频、结果文件和进度卡发送失败都会持久化；网络恢复后补发而不重跑 Codex
 - 标准 macOS 主窗口集中显示事件消费者、运行 Task、排队消息、待补发、最近事件、配置、诊断和日志入口，并可设置 1～8 个并发 Task
 - 菜单栏保留随时开启、关闭和快速打开控制中心的入口
 - 用户级 LaunchAgent 常驻，异常退出后自动重启
@@ -54,7 +55,7 @@
        ├─ 检查“飞书用户 → 允许项目”权限
        ├─ 保存“飞书用户 → 当前 Task”状态
        ├─ 持久跟踪“飞书用户 → 多个 Task → 新桌面结果”订阅
-       ├─ 读取 Codex 官方实时额度并仅向所有者展示
+       ├─ 向所有白名单用户展示同一 Mac 账户的 Codex 实时额度
        ├─ 将飞书附件下载到本轮受限临时目录
        ├─ 后台运行并原地更新进度卡
        └─ 通过 Codex Desktop IPC 继续同一个 Task
@@ -125,7 +126,7 @@ App 运行时优先使用随安装包提供的 `1.0.89-codex-feishu.3`，它在�
    - 主菜单“Codex 额度用量”直接选择“推送事件” → Event Key `codex_usage`
 6. 创建并发布新的飞书应用版本；发布成功后菜单可能需要约 5 分钟生效。机器人菜单仅在与 Bot 的单聊中显示。
 
-首次连接向导可启动一次两分钟监听。让机主给 Bot 发送一条单聊消息后，App 会自动识别 `open_id`，但不会自动授予任何项目。终端备用方式如下：
+首次连接向导可启动一次两分钟监听。让机主单聊 Bot 并发送 App 当次显示的六位验证码后，App 才会识别该消息的 `open_id`，但不会自动授予任何项目。终端备用方式如下：
 
 ```bash
 lark-cli --profile codex-notify event consume im.message.receive_v1 \
@@ -202,7 +203,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 ~/.codex/log/feishu-bridge.log
 ```
 
-`config.json` 保存 Profile 名、用户白名单、项目权限和菜单设置，不保存 App Secret。`state.json` 按用户分别保存当前 Task、收藏/最近记录、最近对话摘要、桌面结果订阅、访问申请、搜索/分页状态、待执行输入队列，以及尚未送达飞书的最终文字、图片、文件或卡片。本地待补发图片和文件分别复制到 `~/.codex/feishu-bridge/reply-images/` 与 `reply-files/`，送达后自动删除。队列和桌面结果订阅跨桥接重启保留；配置、状态与日志都限制为仅当前 macOS 用户可访问。
+`config.json` 保存 Profile 名、用户白名单、项目权限和菜单设置，不保存 App Secret。`state.json` 按用户分别保存当前 Task、收藏/最近记录、最近对话摘要、桌面结果订阅、访问申请、搜索/分页状态、待执行输入队列，以及尚未送达飞书的最终文字、图片、音频、文件或卡片。本地待补发图片复制到 `~/.codex/feishu-bridge/reply-images/`，音频和文件复制到 `reply-files/`，送达后自动删除。队列和桌面结果订阅跨桥接重启保留；配置、状态与日志都限制为仅当前 macOS 用户可访问。
 
 ## 从源码构建
 
@@ -212,6 +213,8 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 ./scripts/build-app.sh
 ./scripts/install-local.sh
 ```
+
+`install-local.sh` 会重新构建并先安全更新 LaunchAgent 实际使用的运行脚本，再复制 App；存在活动飞书运行或待处理队列时会拒绝覆盖。
 
 使用 Developer ID 和 Keychain 中的 notarytool Profile 构建正式公证包：
 
@@ -250,8 +253,10 @@ NOTARY_PROFILE="codex-feishu-notary" \
 - 飞书授权只支持“允许一次”或“拒绝”，不会授予永久权限，也不会绕过 Desktop 的权限模型
 - 每轮最多发送 8 张结果图片；本地图片只接受 Codex 明确返回且实际存在的常见图片格式
 - 单张待补发结果图片默认最多 20 MB，补发缓存总量默认最多 100 MB；超限会淘汰最旧缓存
+- 每轮最多发送 4 段结果音频、单段 50 MB；只处理 Codex 最终回复明确链接的受支持本机音频
+- Opus（`.opus`）和 Ogg Opus（`.ogg`）使用飞书原生播放器；其他支持格式作为附件发送
 - 每轮最多发送 4 个结果文件、单个 50 MB；只处理 Codex 最终回复明确链接的受支持本机文件
-- 待补发结果文件复制到私有缓存，总量默认最多 200 MB；普通网页链接不会自动上传
+- 待补发结果音频和文件复制到私有缓存，总量默认最多 200 MB；普通网页链接不会自动上传
 - 桥接不绕过 Codex 的权限、沙箱或用户确认
 - 公开仓库不包含任何 App Secret、Token、用户 ID、Chat ID 或本机 Task 数据
 

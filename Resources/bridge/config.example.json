@@ -21,6 +21,7 @@
   "max_prompt_chars": 12000,
   "max_reply_chars": 3000,
   "max_result_images": 8,
+  "max_result_audio": 4,
   "max_result_files": 4,
   "max_result_file_bytes": 52428800,
   "max_input_images": 4,

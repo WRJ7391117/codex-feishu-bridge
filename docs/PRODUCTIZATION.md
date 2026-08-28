@@ -35,7 +35,7 @@ This avoids a shared multi-tenant service, central credential custody, cross-ten
 
 ### Private deployments
 
-Private automation extensions are distributed and configured separately. They are not included in the public App, first-run setup, example config, or general product promise.
+Optional automation-extension source remains visible in this repository for existing private deployments, but it is excluded from the public App, first-run setup, example config, and general product promise. Deployment configuration and credentials remain local and are never shipped. A future private-repository extraction must preserve existing installations and history rather than deleting the only maintained copy.
 
 ## P0 acceptance criteria
 
@@ -44,7 +44,7 @@ Private automation extensions are distributed and configured separately. They ar
 3. The user can enter App ID and App Secret in the App. The secret never appears in process arguments, `config.json`, logs, diagnostics, or crash text.
 4. The App can confirm Profile, bot identity, Feishu endpoint, and Codex Desktop readiness separately.
 5. The App shows the exact permissions, events, card callback, menu keys, and publication steps required in the Feishu console.
-6. The first Feishu user can send one Bot message, be discovered by `open_id`, and receive no Task access until the Mac owner assigns explicit projects.
+6. The first Feishu user must send the one-time code shown by the App in a P2P Bot message, be discovered by `open_id`, and receive no Task access until the Mac owner assigns explicit projects.
 7. A connection test proves all three event consumers and one real Bot round trip. A passing local self-test alone is not success.
 8. Updates preserve config and Task state, refuse to interrupt pending work, and verify version, SHA-256, bundle identity, signature, and both architectures.
 9. Uninstall can remove the service while preserving local state. A separate explicit purge removes local bridge state and credentials.

@@ -1,5 +1,20 @@
 # Release Notes
 
+## 1.9.23 (build 59)
+
+- Restricts local result links to the selected Task workspace or a dedicated bridge output directory, while keeping current-turn image-generation events available.
+- Serializes App and background `state.json` mutations with one process-wide file lock, acknowledges Feishu events after dispatch, and retains seven days of deduplication history.
+- Preserves failed final text and attachments instead of silently evicting them at the transient-card queue limit; a full attachment spool rejects the new item and reports that it was not saved.
+- Verifies Ogg content before using Feishu native audio, validates first-user discovery with a one-time P2P challenge, and reports restart success only after launchd confirms the service is running.
+- Makes the public installer verify GitHub's SHA-256 digest, bundle identity/version, code signature, Universal architectures, and downgrade direction before replacement.
+
+## 1.9.22 (build 58)
+
+- Sends explicitly linked Opus and Ogg Opus results as native playable Feishu audio messages, while returning MP3, WAV, M4A, AAC, and FLAC as audio attachments.
+- Recognizes both ordinary Markdown links and Codex Desktop's `![audio](path)` output form before image parsing, so audio is not misclassified as an unavailable image or duplicated as a document.
+- Gives audio its own limits, idempotency keys, durable retry type, and cross-restart spool path across normal turns, Desktop handoff, and Task subscriptions.
+- Makes the local developer installer rebuild and replace the LaunchAgent runtime before copying the App, preventing a new App version from leaving an older `bridge.py` active.
+
 ## 1.9.21 (build 57)
 
 - Keeps general diagnostics independent of the separately installed private automation extension.
