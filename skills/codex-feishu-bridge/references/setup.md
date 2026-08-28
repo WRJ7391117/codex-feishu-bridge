@@ -8,9 +8,9 @@
 
 The App bundles its patched runtime CLI. Use the first-connection assistant to configure a dedicated Profile. It passes App Secret through stdin to `lark-cli`, which stores it in macOS Keychain; never pass an App Secret in process arguments. A system `lark-cli` is optional and only needed for terminal maintenance.
 
-The installed bridge prefers its bundled `lark-cli 1.0.89-codex-feishu.3`. It registers `card.action.trigger` with the SDK's card-action handler, returns a visible processing toast, and durably spools Ori One workflow decisions before returning Feishu's synchronous callback response. The system CLI and bundled CLI share the same Profile and Keychain credentials. General bridge use may explicitly override `lark_cli_path`, but workflow mode fails closed unless it uses the bundled CLI.
+The installed bridge prefers its bundled `lark-cli 1.0.89-codex-feishu.3`. It registers `card.action.trigger` with the SDK's card-action handler and returns a visible processing toast. The system CLI and bundled CLI share the same Profile and Keychain credentials.
 
-Source package `1.9.19 (build 55)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
+Source package `1.9.20 (build 56)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
 
 ## Feishu console
 
@@ -38,34 +38,5 @@ On an existing legacy installation, first launch migrates the old Profile/sender
 The installer also replaces the legacy `~/.codex/hooks/feishu_bridge_control.sh` wrapper with the current `com.deepori.codex-feishu-bridge` control script. Before copying any runtime file, it validates every required package resource, the bundled CLI, and all existing config/state/log/runtime destinations with lstat/open checks. Unsafe symlinks, non-regular files, or foreign ownership stop installation. It restricts private directories and files to `0700`/`0600`, then stages runtime files as a complete set and rolls them back on replacement failure. It does not start a bridge that was previously stopped.
 
 The App's “移除后台服务…” action refuses pending work, removes the LaunchAgent and runtime components, and preserves Profile, config, Task state, and logs for recovery. Full purge is separate: run the App-bundled `uninstall.sh --purge` before moving the App to Trash, then type `PURGE` on stdin. The purge validates fixed bridge directories and files before removing them; it never disables Gatekeeper or removes quarantine metadata.
-
-## Optional private extension: Ori One workflow notifications
-
-This extension is not part of the general bridge onboarding or public product promise. Keep workflow notifications disabled unless the Mac is an explicitly configured Ori One private deployment and the dedicated Codex Task exists. Do not use generic `jq` or command arguments to edit local identifiers. The installed `workflow-config --enable` reads only the dedicated Task UUID from stdin, selects the existing legacy sender only when it is already allowlisted, and leaves Chat unguessed. A returned Chat is associated with the durable notification record after the first card is sent.
-
-```bash
-support="$HOME/Library/Application Support/Codex Feishu Bridge"
-"$support/workflow-config" --status
-read -r workflow_task_id
-printf '%s\n' "$workflow_task_id" | "$support/workflow-config" --enable
-unset workflow_task_id
-```
-
-The config tool prints only `configured`, `disabled`, or `invalid`. `workflow-config --disable` writes the disabled state while preserving any existing local binding. The bridge reads config only at process start, so restart it once from the App control window after either enabling or disabling before checking health.
-
-Validate before a real send:
-
-```bash
-support="$HOME/Library/Application Support/Codex Feishu Bridge"
-"$support/workflow-notify" --health
-"$support/workflow-notify" --dry-run < event.json
-"$support/workflow-notify" --status
-```
-
-Only the final command without `--dry-run` enqueues a new proactive notification. `--retry-outbox` can cause a due queued item to make a real API/IPC attempt, so treat it as a state-changing operation.
-
-With the user present for the required end-to-end check, run `workflow-notify --roundtrip-test`. It creates a unique `TEST-ROUNDTRIP` card. Its reply enters the fixed Codex Task once, patches the completed card once, and only reports a test receipt: it must not call Neon, `resolve-attention`, or the orchestrator; edit files; or lease/advance a `ONE-*` task.
-
-The bridge alone owns the one 24-hour reminder for an unanswered decision. Keep reminder generation disabled in Neon and the deterministic runner.
 
 The App automatically checks the latest GitHub Release when its control window opens. It can install an update only from `/Applications` or `~/Applications`, and only after the three pending-work queues are empty and the GitHub SHA-256, bundle identity/version, code signature, and Universal architectures pass. The helper logs aggregate update results to `~/.codex/log/feishu-bridge-app-update.log` and restores the previous App if replacement or launch fails. Source builds are ad-hoc by default. A release operator with a Developer ID certificate and a `notarytool` Keychain profile can set `CODE_SIGN_IDENTITY` and `NOTARY_PROFILE`; the build then enables hardened runtime, waits for notarization, staples the ticket, and regenerates the archive plus SHA-256 manifest. Never claim notarization when those credentials were not used.

@@ -32,15 +32,29 @@ BRIDGE_RESOURCE_DIR = Path(__file__).resolve().parent
 if str(BRIDGE_RESOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(BRIDGE_RESOURCE_DIR))
 
-from workflow_notifications import (  # noqa: E402
-    ORI_ONE_WORKFLOW_ID,
-    WorkflowNotificationError,
-    WorkflowDecisionInbox,
-    WorkflowStateError,
-    WorkflowStore,
-    event_key as workflow_event_key,
-    validate_payload as validate_workflow_payload,
-)
+try:
+    from workflow_notifications import (  # noqa: E402
+        ORI_ONE_WORKFLOW_ID,
+        WorkflowNotificationError,
+        WorkflowDecisionInbox,
+        WorkflowStateError,
+        WorkflowStore,
+        event_key as workflow_event_key,
+        validate_payload as validate_workflow_payload,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "workflow_notifications":
+        raise
+    ORI_ONE_WORKFLOW_ID = ""
+    WorkflowNotificationError = ValueError
+    WorkflowStateError = RuntimeError
+    WorkflowDecisionInbox = None
+    WorkflowStore = None
+    workflow_event_key = None
+    validate_workflow_payload = None
+
+
+WORKFLOW_EXTENSION_AVAILABLE = WorkflowStore is not None
 
 
 HOME = Path.home()
@@ -79,8 +93,14 @@ WORKFLOW_CONFIG = (
     if isinstance(CONFIG.get("workflow_notifications"), dict)
     else {}
 )
-_workflow_store = WorkflowStore(WORKFLOW_STATE_PATH)
-_workflow_decision_inbox = WorkflowDecisionInbox(WORKFLOW_DECISION_INBOX_PATH)
+_workflow_store = (
+    WorkflowStore(WORKFLOW_STATE_PATH) if WORKFLOW_EXTENSION_AVAILABLE else None
+)
+_workflow_decision_inbox = (
+    WorkflowDecisionInbox(WORKFLOW_DECISION_INBOX_PATH)
+    if WORKFLOW_EXTENSION_AVAILABLE
+    else None
+)
 _workflow_server_socket: socket.socket | None = None
 _workflow_control_socket: socket.socket | None = None
 _workflow_delivery_lock = threading.Lock()
@@ -378,6 +398,8 @@ def workflow_notifications_enabled() -> bool:
 def workflow_configuration_valid() -> bool:
     if not workflow_notifications_enabled():
         return True
+    if not WORKFLOW_EXTENSION_AVAILABLE:
+        return False
     try:
         config_stat = CONFIG_PATH.lstat()
     except OSError:
@@ -3761,7 +3783,7 @@ def build_workflow_card(
 ) -> dict[str, Any]:
     requires_action = record.get("status") == "user_action_required"
     selected = record.get("selected_action")
-    title = str(record.get("task_id") or "Ori One Mind")[:128]
+    title = str(record.get("task_id") or "自动化工作流")[:128]
     summary = card_markdown_escape(str(record.get("summary") or "")[:2000])
     elements: list[dict[str, Any]] = [
         {"tag": "markdown", "content": f"**摘要**\n{summary}"},
@@ -3843,7 +3865,7 @@ def build_workflow_card(
 
     if requires_action and user_id:
         target_task, current_task = workflow_task_route(user_id)
-        target_label = workflow_task_label(target_task, "Ori One Mind 专用 Task")
+        target_label = workflow_task_label(target_task, "工作流专用 Task")
         current_label = workflow_task_label(current_task, "尚未选择")
         same_task = bool(
             target_task
@@ -3933,13 +3955,13 @@ def build_workflow_card(
             "update_multi": True,
             "width_mode": "default",
             "enable_forward": False,
-            "summary": {"content": f"Ori One Mind · {tag_text}"},
+            "summary": {"content": f"自动化工作流 · {tag_text}"},
         },
         "header": {
             "title": {"tag": "plain_text", "content": title},
             "subtitle": {
                 "tag": "plain_text",
-                "content": "Ori One Mind 自动研发" + (" · 24 小时提醒" if reminder else ""),
+                "content": "自动化工作流" + (" · 24 小时提醒" if reminder else ""),
             },
             "template": template,
             "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
@@ -4048,13 +4070,13 @@ def workflow_recovery_prompt(recovery: dict[str, Any]) -> str:
     summary = str(recovery.get("summary") or "")
     if recovery.get("task_id") == "TEST-ROUNDTRIP":
         return (
-            "这是 Ori One Mind 飞书桥 TEST-ROUNDTRIP 往返测试。\n"
+            "这是自动化工作流的 TEST-ROUNDTRIP 往返测试。\n"
             f"{workflow_recovery_signature(recovery)}\n"
             f"选择：{action_label}\n"
             f"测试事项：{summary}\n\n"
             "只回报这次测试回执：专用 Codex Task 已收到一次飞书选择。"
-            "不得调用 Neon、编排器或 resolve-attention；不得读取或修改仓库文件；"
-            "不得租用、推进或改变任何 ONE 研发任务。"
+            "不得调用外部业务系统、编排器或正式恢复命令；不得读取或修改仓库文件；"
+            "不得租用、推进或改变任何正式研发任务。"
         )
     command = " ".join(
         [
@@ -4074,7 +4096,7 @@ def workflow_recovery_prompt(recovery: dict[str, Any]) -> str:
         ]
     )
     return (
-        "用户已通过飞书处理 Ori One Mind 自动研发人工门。\n"
+        "用户已通过飞书处理自动化工作流人工门。\n"
         f"{workflow_recovery_signature(recovery)}\n"
         f"任务：{recovery.get('task_id')}\n"
         f"选择：{action_label}\n"
@@ -4092,13 +4114,13 @@ def workflow_recovery_prompt(recovery: dict[str, Any]) -> str:
 def workflow_recovery_signature(recovery: dict[str, Any]) -> str:
     if recovery.get("task_id") == "TEST-ROUNDTRIP":
         return (
-            "Ori One Mind 飞书桥往返测试响应\n"
+            "自动化工作流飞书桥往返测试响应\n"
             f"roundtrip_event_id: {recovery.get('event_id')}\n"
             f"selected_action_id: {recovery.get('selected_action_id')}\n"
             f"resolution: {recovery.get('resolution')}"
         )
     return (
-        "Ori One Mind 飞书人工门响应\n"
+        "自动化工作流飞书人工门响应\n"
         f"attention_request_id: {recovery.get('attention_request_id')}\n"
         f"selected_action_id: {recovery.get('selected_action_id')}\n"
         f"resolution: {recovery.get('resolution')}"

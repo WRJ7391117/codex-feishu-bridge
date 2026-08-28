@@ -12,8 +12,7 @@ Use this skill for the local macOS bridge published at `WRJ7391117/codex-feishu-
 - This is a Mac-resident bridge. Do not describe it as Codex running inside Feishu.
 - Treat Codex Task, thread, chat, and conversation as the same object; user-facing wording should use “Task”. A message is one turn inside a Task.
 - Never copy or commit `config.json`, lark-cli credentials, `state.json`, logs, user IDs, Chat IDs, or Codex databases.
-- Workflow callers may provide only `workflow_id`, `event_id`, `task_id`, `status`, `summary`, `workbench_url`, and `actions`. `workflow_id` is fixed to `ori-one-mind`; action items have exact `id / label / description / recommended / resolution` fields. Recipient, Chat, and dedicated Codex Task identifiers come only from the local 0600 config.
-- Workflow-visible summary, labels, and descriptions must contain no credentials, database URLs, private keys, Feishu user IDs, or Chat IDs; the local validator rejects these before persistence or delivery.
+- Optional private extensions are not shipped in the public App. Preserve already-installed extension files during a normal update, but do not add private configuration to a new public installation.
 - Never grant a new user `*` or add them to the allowlist without the Mac owner's explicit authorization. Project names must match the Codex Desktop sidebar exactly.
 - Do not disable Gatekeeper or remove quarantine attributes. An ad-hoc release may require Finder → right-click → Open.
 - Start, stop, install, and update are state-changing actions. Confirm the user's intent unless it is already explicit.
@@ -31,7 +30,6 @@ Use this skill for the local macOS bridge published at `WRJ7391117/codex-feishu-
    - Existing installation: use the App's main control window first; the menu bar is a shortcut. Use its installed `control.sh` only when automation is necessary.
    - Diagnosis: read [troubleshooting.md](references/troubleshooting.md) and verify each layer independently.
    - Architecture explanation: read [architecture.md](references/architecture.md).
-   - Local workflow notification: validate with `workflow-notify --dry-run`, then read [architecture.md](references/architecture.md) before enabling or sending.
 3. After a mutation, verify separately:
    - App bundle and signature
    - LaunchAgent loaded state
@@ -41,7 +39,6 @@ Use this skill for the local macOS bridge published at `WRJ7391117/codex-feishu-
    - an end-to-end Feishu message only when the user is present to perform it
    - for attachment changes, text, image, file, and audio round trips plus the Bot's message-resource permissions
    - for remote-control changes, a real progress-card patch, stop confirmation, and one-time approval callback
-   - for workflow changes, dry-run, safe status, durable retry, one-time decision consumption, card completion patch, and recovery into the configured dedicated Task
    - for Task-management changes, verify all eight Bot menu Event Keys, including `current_task`, `sync_desktop`, `sync_desktop_switch`, `task_subscriptions`, and `codex_usage`, then use a disposable authorized-project Task for create/search/archive acceptance; restore archived test data afterward
    - for Task-subscription changes, verify subscribe/cancel, multiple Tasks, restart recovery, multi-user isolation, permission revocation, no historical backfill, durable attachment delivery, and no duplicate final reply for a bridge-owned turn
    - for Desktop handoff changes, verify an already-completed Desktop turn, a running Desktop turn that finishes after subscription, restart recovery, multi-user isolation, and no duplicate final reply for a bridge-owned turn
@@ -54,8 +51,6 @@ support="$HOME/Library/Application Support/Codex Feishu Bridge"
 "$support/control.sh" start
 "$support/control.sh" stop
 "$support/diagnose.sh"
-"$support/workflow-notify" --health
-"$support/workflow-notify" --status
 ```
 
 Do not infer service health from a passing Python self-test. A working service requires a loaded LaunchAgent, live event consumers, and an actual message round trip.

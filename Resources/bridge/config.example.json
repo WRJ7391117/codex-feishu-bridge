@@ -31,12 +31,5 @@
   "max_pending_image_spool_bytes": 104857600,
   "max_pending_inputs": 50,
   "max_pending_inputs_per_task": 10,
-  "max_concurrent_runs": 2,
-  "workflow_notifications": {
-    "enabled": false,
-    "allowed_workflow_id": "ori-one-mind",
-    "recipient_open_id": "",
-    "recipient_chat_id": "",
-    "codex_task_id": ""
-  }
+  "max_concurrent_runs": 2
 }

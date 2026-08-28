@@ -1577,6 +1577,7 @@ class RemoteFeatureTests(unittest.TestCase):
     def test_restart_recovery_keeps_record_when_result_delivery_raises(self):
         task = self.tasks()[0]
         self.bridge.task_by_id = lambda task_id, user_id: task
+        self.bridge.rollout_path_for_task = lambda task_id: None
         self.bridge.advance_rollout_turn = mock.Mock(
             return_value={
                 "status": "completed",

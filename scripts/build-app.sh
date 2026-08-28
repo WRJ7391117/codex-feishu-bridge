@@ -34,12 +34,14 @@ source_file="${project_dir}/Sources/CodexFeishuBridgeApp/main.swift"
 /bin/cp "${project_dir}/THIRD_PARTY_NOTICES.md" "${resources_dir}/THIRD_PARTY_NOTICES.md"
 /bin/cp -R "${project_dir}/Resources/bridge" "${resources_dir}/bridge"
 /bin/rm -rf "${resources_dir}/bridge/__pycache__"
+/bin/rm -f \
+    "${resources_dir}/bridge/workflow_notifications.py" \
+    "${resources_dir}/bridge/workflow_notify.py" \
+    "${resources_dir}/bridge/workflow_config.py"
 /usr/bin/install -m 755 "${bundled_lark_cli}" "${resources_dir}/bridge/lark-cli"
 /bin/chmod 755 \
     "${resources_dir}/bridge/"*.sh \
-    "${resources_dir}/bridge/feishu_codex_bridge.py" \
-    "${resources_dir}/bridge/workflow_config.py" \
-    "${resources_dir}/bridge/workflow_notify.py"
+    "${resources_dir}/bridge/feishu_codex_bridge.py"
 
 icon_source="${project_dir}/Resources/AppIcon.svg"
 icon_png="${build_dir}/AppIcon.png"

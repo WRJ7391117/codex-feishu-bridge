@@ -1,13 +1,12 @@
 # Architecture
 
-The bridge has six independent layers:
+The bridge has five independent layers:
 
 1. Feishu app: Bot permissions, events, callbacks, and the custom menu.
 2. bundled lark-cli: one bot profile and three long-running event consumers.
 3. `bridge.py`: user/chat allowlist, project authorization, task catalog, per-user state, deduplication, and replies.
 4. Codex Desktop: local task catalog, task rollout files, and desktop IPC.
 5. macOS runtime: menu bar App and user LaunchAgent.
-6. optional local workflow ingress: two 0600 Unix sockets for exact-schema notification submission and safe health/status/retry control.
 
 Event flow:
 
@@ -15,8 +14,6 @@ Event flow:
 Feishu -> lark-cli event consume -> bridge.py -> optional attachment download -> Codex Desktop IPC
 Feishu <- lark-cli card patch + text/image reply <- bridge.py <- Codex task state/result
 
-local deterministic runner -> workflow-notify -> durable workflow outbox -> Feishu card
-Feishu decision -> identity/chat/token check -> durable recovery -> fixed Codex Task IPC
 ```
 
 The bridge consumes:
@@ -24,12 +21,6 @@ The bridge consumes:
 - `im.message.receive_v1` for text, image, file, and audio input
 - `card.action.trigger` for project/Task selection, Task creation/archive confirmation, stop, and one-time approval decisions
 - `application.bot.menu_v6` for the “Task 管理” submenus “当前 Task”, “切换 Task”, “新建 Task”, and “归档当前 Task”; the “管理桌面 Task” submenus “订阅桌面 Task”, “接续当前 Task”, and “接续其他 Task”; and the top-level “Codex 额度用量” menu
-
-Workflow ingress is disabled by default. Its notification socket accepts exactly seven top-level fields and only two statuses; it never accepts a recipient, Chat ID, App credential, or Codex Task ID from the caller. The workflow ID is fixed to `ori-one-mind`, action objects use the exact five-field contract, and the workbench URL is restricted to the private DeepOri automation page. The local 0600 config binds the workflow to one recipient and one dedicated Codex Task. A separate control socket exposes only health, aggregate status, and explicit outbox retry.
-
-Accepted workflow events are written to `workflow-state.json` before any Feishu API call. The workflow/event pair is the idempotency identity; a conflicting payload is rejected. The state file is a current-user `0600` regular file written with atomic replacement plus file and directory fsync. Existing-file read, JSON, schema, owner, mode, or symlink failures close the ingress rather than constructing an empty outbox. Network failures remain in the outbox and use the same Feishu idempotency key. A pending action request schedules exactly one reminder after 24 hours; the bridge is the sole reminder owner, so Neon and the runner must not create another reminder.
-
-Decision cards combine allowlisted identity, expected Chat, event identity, and a random one-time token. They label both the configured dedicated target Task and the user's current chat Task; acting on the card never changes the current Task implicitly. After a decision, the completed card states where the result was submitted, says that no follow-up “已点击” message is needed, and offers explicit actions to switch to the target Task or keep the current Task. The bundled `lark-cli` first writes each workflow callback as a private, fsynced per-event inbox file and only then returns Feishu's callback ACK; bridge startup and its retry loop replay remaining files. The response is committed before the card patch or Desktop IPC, and the source event identity permits unfinished side effects to resume without creating a second recovery. Once the required card patches and any text reply are delivered or durably queued, auxiliary processed-state deduplication completes and the inbox file is removed. A direct reply to the card uses the Feishu parent message as its one-time correlation. A normal recovery record targets only the configured dedicated Task and tells it to run `resolve-attention` with the exact request, action label, and resolution before continuing. The isolated `TEST-ROUNDTRIP` record instead tells that Task to report a receipt only and explicitly forbids Neon, orchestrator, repository, and `ONE-*` task actions. Recovery messages retry in strict `created_at` FIFO order when that Task is busy or Desktop is offline. An uncertain recovery does not block unrelated initial notifications and is reconciled only by finding the same test or request/action/resolution signature in a user input in that Task's rollout; without evidence it is never submitted again blindly.
 
 Card actions differ from ordinary events at the WebSocket ingress. The bundled CLI registers `card.action.trigger` with `OnP2CardActionTrigger`, forwards the unchanged raw event into the local bus, and immediately returns a valid `CardActionTriggerResponse` with a visible processing toast. This synchronous response prevents Feishu error `108002`; the later complete-card update remains a separate delayed-update API call.
 

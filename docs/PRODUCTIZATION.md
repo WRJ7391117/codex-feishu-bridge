@@ -33,13 +33,9 @@ This avoids a shared multi-tenant service, central credential custody, cross-ten
 - transmit text and supported attachments;
 - display progress, approvals, results, and Codex usage.
 
-### Optional extensions
-
-Workflow notifications are an extension surface. They must be disabled by default, absent from first-run setup, and unable to affect the general bridge when unconfigured.
-
 ### Private deployments
 
-The current Ori One workflow contract, fixed workflow ID, private workbench URL, dedicated Task routing, and related recovery text belong to a private extension. They are not part of the general product promise.
+Private automation extensions are distributed and configured separately. They are not included in the public App, first-run setup, example config, or general product promise.
 
 ## P0 acceptance criteria
 

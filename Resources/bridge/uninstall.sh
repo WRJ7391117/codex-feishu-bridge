@@ -101,9 +101,6 @@ fi
     "${legacy_plist}" \
     "${HOME}/.codex/hooks/feishu_bridge_control.sh" \
     "${support_dir}/bridge.py" \
-    "${support_dir}/workflow_notifications.py" \
-    "${support_dir}/workflow-notify" \
-    "${support_dir}/workflow-config" \
     "${support_dir}/control.sh" \
     "${support_dir}/diagnose.sh" \
     "${support_dir}/uninstall.sh" \
@@ -113,6 +110,11 @@ if [[ "${mode}" == "--keep-data" ]]; then
     print "service removed; local data preserved"
     exit 0
 fi
+
+/bin/rm -f -- \
+    "${support_dir}/workflow_notifications.py" \
+    "${support_dir}/workflow-notify" \
+    "${support_dir}/workflow-config"
 
 /usr/bin/python3 -B - \
     "${support_dir}" \

@@ -9,7 +9,6 @@ Check the layers in order:
 5. `~/.codex/log/feishu-bridge.log` contains ready markers for all three event keys; `feishu-bridge-launchd.log` only captures uncaught process output
 6. Feishu console has the receive event, bot menu event, and card callback enabled
 7. Perform one real message round trip
-8. If workflow mode is enabled, run `workflow-config --status`, `workflow-notify --health`, and `workflow-notify --status`; verify both socket files and workflow state are mode 0600
 
 Common interpretations:
 
@@ -39,11 +38,3 @@ Common interpretations:
 - Codex result text arrives but result images do not: confirm the Bot has `im:resource`, then inspect the bridge log for `image reply failed`. Markdown alone cannot upload a Mac-local path; the bridge must send a separate image reply.
 - An incoming Feishu image reports that it cannot be read: confirm the Bot can read that message resource, then inspect the bridge log for `image download failed`. The resource key must belong to the same `message_id`; the bridge intentionally refuses guessed, cross-message, oversized, unsupported, or path-escaping resources.
 - An incoming file/audio reports that it cannot be read: confirm message-resource read permission, supported suffix, the 50 MB limit, and that the resource key belongs to the same message. Archives, executables, empty files, and path-escaping downloads are intentionally rejected.
-- `workflow-notify --dry-run` returns exit 2: the payload is missing a required field, includes an extra field such as recipient/Chat, does not use `workflow_id=ori-one-mind`, points outside the private automation workbench, uses an unsupported status, or has an invalid five-field action list. Do not weaken the schema.
-- `workflow-config --status` reports `invalid`: verify the support directory is a current-user `0700` directory and `config.json` is a current-user, non-symlink `0600` regular file. Enabling also requires the legacy sender to remain in `allowed_users` and a canonical dedicated Task UUID from stdin. Do not print or copy the file contents into diagnostics.
-- `workflow-notify --health` reports `bridge_unavailable` and workflow sockets/state do not exist: the installed bridge predates workflow support or has not been configured/restarted. Verify the installed App version, install the current package, enable it with `workflow-config`, and then start/restart through the App before testing; do not infer workflow readiness from the three legacy consumers alone.
-- `TEST-ROUNDTRIP` reaches the dedicated Task but tries to resolve a Neon attention or advance a research task: stop the test and verify the installed `workflow_recovery_prompt` has the isolated test branch. A valid test only records one receipt and one completed-card patch.
-- Workflow status shows a pending notification: check network/lark-cli health, then use `--retry-outbox` only when a real retry is intended. The original event ID preserves idempotency.
-- Workflow status shows `delivery_unknown`: Desktop may have accepted the turn without returning confirmation. The bridge will reconcile it only if the same request/action/resolution signature appears in the configured dedicated Task. If it remains unknown, inspect that Task before any manual action; never replay it blindly.
-- Workflow ingress returns `workflow_state_unavailable`: do not delete or replace the outbox. Check that `workflow-state.json` is a non-symlink regular file owned by the current user with mode `0600`, then inspect JSON/schema integrity from a backup. The bridge intentionally refuses to recreate an empty state over an unreadable existing file.
-- A workflow decision card does not resume: confirm the configured recipient is still allowlisted, the Chat matches, and the fixed Task still exists. The decision remains durable if the Task is busy or Desktop is offline.

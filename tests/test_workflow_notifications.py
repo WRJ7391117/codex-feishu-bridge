@@ -722,9 +722,6 @@ class InstallerSafetyTests(unittest.TestCase):
         package.mkdir()
         for name in (
             "feishu_codex_bridge.py",
-            "workflow_notifications.py",
-            "workflow_notify.py",
-            "workflow_config.py",
             "control.sh",
             "diagnose.sh",
             "uninstall.sh",
@@ -756,17 +753,7 @@ class InstallerSafetyTests(unittest.TestCase):
         state_directory.mkdir(parents=True, mode=0o700)
         support.chmod(0o700)
         state_directory.chmod(0o700)
-        config = {
-            "allowed_users": [],
-            "allowed_chat_ids": [],
-            "workflow_notifications": {
-                "enabled": False,
-                "allowed_workflow_id": "ori-one-mind",
-                "recipient_open_id": "",
-                "recipient_chat_id": "",
-                "codex_task_id": "",
-            },
-        }
+        config = {"allowed_users": [], "allowed_chat_ids": []}
         config_path = support / "config.json"
         config_path.write_text(json.dumps(config), encoding="utf-8")
         config_path.chmod(0o600)
@@ -799,9 +786,6 @@ class InstallerSafetyTests(unittest.TestCase):
         preflight = source[preflight_start:runtime_start]
         for required in (
             "feishu_codex_bridge.py",
-            "workflow_notifications.py",
-            "workflow_notify.py",
-            "workflow_config.py",
             "control.sh",
             "diagnose.sh",
             "uninstall.sh",
@@ -810,16 +794,15 @@ class InstallerSafetyTests(unittest.TestCase):
             "config.json",
             "state.json",
             "runtime-status.json",
-            "workflow-state.json",
-            "workflow-decision-inbox",
             "feishu-bridge.log",
             "feishu-bridge-launchd.log",
         ):
             self.assertIn(required, preflight)
+        self.assertNotIn('${resource_dir}/workflow_notifications.py', preflight)
+        self.assertNotIn("--workflow-state", preflight)
         self.assertLess(preflight_start, source.index("path.mkdir"))
         self.assertLess(preflight_start, runtime_start)
         self.assertGreater(source.index("/bin/launchctl print"), preflight_start)
-        self.assertGreater(source.index("/bin/launchctl print"), source.index("._validate_state"))
         self.assertIn("backups", source[runtime_start:])
         self.assertIn("os.replace(backup, destination)", source[runtime_start:])
 
@@ -869,6 +852,13 @@ class InstallerSafetyTests(unittest.TestCase):
             original = json.loads(config_path.read_text(encoding="utf-8"))
             original["task_menu_event_key"] = "custom_select_task"
             original["preserved_setting"] = {"enabled": True}
+            original["workflow_notifications"] = {
+                "enabled": False,
+                "allowed_workflow_id": "private-extension",
+                "recipient_open_id": "",
+                "recipient_chat_id": "",
+                "codex_task_id": "",
+            }
             config_path.write_text(json.dumps(original), encoding="utf-8")
             config_path.chmod(0o600)
 
@@ -945,7 +935,7 @@ class InstallerSafetyTests(unittest.TestCase):
             self.assertFalse((package / "__pycache__").exists())
             self.assertFalse((home / "Library/LaunchAgents").exists())
 
-    def test_invalid_existing_workflow_schema_fails_before_runtime_changes(self):
+    def test_private_extension_state_is_not_interpreted_by_general_installer(self):
         with tempfile.TemporaryDirectory() as directory:
             package, home, _config_path, workflow_path, runtime = (
                 self._installer_fixture(Path(directory))
@@ -955,28 +945,28 @@ class InstallerSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             workflow_path.chmod(0o600)
-            original_runtime = runtime.read_bytes()
+            original_workflow = workflow_path.read_bytes()
 
             result = self._run_installer(package, home)
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(runtime.read_bytes(), original_runtime)
-            self.assertFalse((home / "Library/LaunchAgents").exists())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotEqual(runtime.read_text(encoding="utf-8"), "existing runtime\n")
+            self.assertEqual(workflow_path.read_bytes(), original_workflow)
 
-    def test_invalid_existing_workflow_json_fails_before_runtime_changes(self):
+    def test_private_extension_json_is_preserved_by_general_installer(self):
         with tempfile.TemporaryDirectory() as directory:
             package, home, _config_path, workflow_path, runtime = (
                 self._installer_fixture(Path(directory))
             )
             workflow_path.write_text('{"version":', encoding="utf-8")
             workflow_path.chmod(0o600)
-            original_runtime = runtime.read_bytes()
+            original_workflow = workflow_path.read_bytes()
 
             result = self._run_installer(package, home)
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(runtime.read_bytes(), original_runtime)
-            self.assertFalse((home / "Library/LaunchAgents").exists())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotEqual(runtime.read_text(encoding="utf-8"), "existing runtime\n")
+            self.assertEqual(workflow_path.read_bytes(), original_workflow)
 
 
 class WorkflowBridgeTests(unittest.TestCase):
@@ -1806,9 +1796,9 @@ class WorkflowBridgeTests(unittest.TestCase):
 
         self.assertIn("TEST-ROUNDTRIP", prompt)
         self.assertIn("只回报这次测试回执", prompt)
-        self.assertIn("不得调用 Neon", prompt)
+        self.assertIn("不得调用外部业务系统", prompt)
         self.assertIn("不得读取或修改仓库文件", prompt)
-        self.assertIn("不得租用、推进或改变任何 ONE 研发任务", prompt)
+        self.assertIn("不得租用、推进或改变任何正式研发任务", prompt)
         self.assertNotIn("resolve-attention --request-id", prompt)
         self.assertNotIn("bin/orchestrator.mjs", prompt)
         self.assertIn("roundtrip_event_id: test-roundtrip-event", signature)
@@ -2184,12 +2174,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.9.19")
-        self.assertEqual(info["CFBundleVersion"], "55")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.9.20")
+        self.assertEqual(info["CFBundleVersion"], "56")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.9.19 (build 55)", readme)
-        self.assertIn("1.9.19 (build 55", release_notes)
+        self.assertIn("1.9.20 (build 56)", readme)
+        self.assertIn("1.9.20 (build 56", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):

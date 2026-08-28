@@ -102,9 +102,6 @@ private final class BridgeController: @unchecked Sendable {
         }
         let runtimeFiles = [
             "feishu_codex_bridge.py": "bridge.py",
-            "workflow_notifications.py": "workflow_notifications.py",
-            "workflow_notify.py": "workflow-notify",
-            "workflow_config.py": "workflow-config",
             "control.sh": "control.sh",
             "diagnose.sh": "diagnose.sh",
             "uninstall.sh": "uninstall.sh",

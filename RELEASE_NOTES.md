@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.9.20 (build 56)
+
+- Makes restart-recovery tests independent of any developer Mac Codex database so clean GitHub runners verify the same behavior.
+- Removes private automation components, policy examples, and documentation from the general public App while preserving separately installed extension files during normal updates.
+- Keeps the public bridge operational when no private extension module is installed and retains the 1.9.19 durable turn-recovery behavior.
+
 ## 1.9.19 (build 55)
 
 - Persists every accepted Feishu-owned Desktop turn with its original message, progress card, Task identity, and rollout cursor so a bridge restart can continue tracking it.

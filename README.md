@@ -2,7 +2,7 @@
 
 把飞书 Bot 变成 Codex Desktop 的移动入口：在飞书里按项目选择桌面版左侧栏中的 Task，发送文字、图片、文件或音频，并接收可更新的运行状态和最终结果。
 
-版本说明：当前源码和本机构建为 `1.9.19 (build 55)`。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.9.20 (build 56)`。不得用旧版本或同版本不同构建覆盖。
 
 面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
@@ -35,8 +35,6 @@
 - 完成后先回复文字结果，再逐张回复 Codex 生成或引用的图片
 - Codex 明确链接的 PDF、Office、文本和代码结果文件会自动作为飞书附件返回
 - 最终文字、结果图片、结果文件和进度卡发送失败都会持久化；网络恢复后补发而不重跑 Codex
-- 为经批准的本机自动化工作流主动发送里程碑卡片或人工决策卡；普通过程和通用 turn-complete 不发送
-- workflow 通知先写入本机持久 outbox，断网后按原幂等事件自动补发；人工决策只消费一次
 - 标准 macOS 主窗口集中显示事件消费者、运行 Task、排队消息、待补发、最近事件、配置、诊断和日志入口，并可设置 1～8 个并发 Task
 - 菜单栏保留随时开启、关闭和快速打开控制中心的入口
 - 用户级 LaunchAgent 常驻，异常退出后自动重启
@@ -76,64 +74,6 @@
 
 飞书消息运行期间，Codex Desktop 仍会提示该 Task“已在另一个应用中打开”，以避免两个客户端同时写入；桥接会主动加载完整历史，因此桌面版可在提示下方只读查看已有内容和实时更新。飞书运行完成后，桌面版恢复可输入状态。
 
-### 可选私有扩展：Ori One workflow 通知
-
-这一扩展不属于通用桥接的产品承诺，不出现在首次连接向导中，并且默认关闭。它保留给明确需要 Ori One 自动研发通知的私有部署。安装后使用专用 `workflow-config` 配置，不要用通用 `jq`、命令参数或日志处理含本机标识的 `config.json`。`--enable` 只从 stdin 读取置顶专用 Codex Task UUID，自动选择已经同时存在于 legacy sender 和用户白名单中的本机用户；它不会猜测 Chat。Chat 留空时，以首张卡实际返回并写入持久 outbox 的 Chat 关联为准。
-
-```bash
-support="$HOME/Library/Application Support/Codex Feishu Bridge"
-"$support/workflow-config" --status
-read -r workflow_task_id
-printf '%s\n' "$workflow_task_id" | "$support/workflow-config" --enable
-unset workflow_task_id
-```
-
-需要关闭时单独运行：
-
-```bash
-"$support/workflow-config" --disable
-```
-
-配置工具只输出 `configured`、`disabled` 或 `invalid`，不输出用户、Chat 或 Task 标识。`--disable` 只写入关闭状态，可保留已经存在的本机绑定。桥接进程只在启动时读取配置，因此启用或关闭后都要从 App 控制中心重启一次后台桥接，状态才会生效。
-
-安装后的入口及只读/受控操作：
-
-```bash
-support="$HOME/Library/Application Support/Codex Feishu Bridge"
-"$support/workflow-notify" --health
-"$support/workflow-notify" --status
-"$support/workflow-notify" --dry-run < event.json
-"$support/workflow-notify" --roundtrip-test
-"$support/workflow-notify" --retry-outbox
-"$support/workflow-notify" < event.json
-```
-
-通知 JSON 必须且只能包含以下七个字段；`status` 只允许 `milestone_completed` 或 `user_action_required`：
-
-```json
-{
-  "workflow_id": "ori-one-mind",
-  "event_id": "ONE-G1-102-completed-r1",
-  "task_id": "ONE-G1-102",
-  "status": "milestone_completed",
-  "summary": "确定性检查、独立审查、提交和部署均已完成。",
-  "workbench_url": "https://deepori.cn/ori-one/workbench/automation/",
-  "actions": []
-}
-```
-
-`workflow_id` 固定为 `ori-one-mind`。`workbench_url` 只允许 `https://deepori.cn/ori-one/workbench/automation/` 及其安全子路径，不接受本地地址、其他域名、端口、查询参数或锚点。
-
-`milestone_completed` 的 `actions` 必须为空。`user_action_required` 必须带 2–5 个 action，每个 action 只能包含 `id / label / description / recommended / resolution`，且恰好一个推荐项；`resolution` 只允许 `resume / pause / stop`。`--dry-run` 只验证、不入队、不发送；payload 中出现 recipient、Chat 字段或其他额外字段会返回退出码 `2`。
-
-CLI 退出码：`0` 表示验证通过或本机桥已接受请求；`1` 表示桥不可用或运行态操作失败；`2` 表示参数或 payload 无效。`--status` 只返回待发通知、待决策、待提醒和待恢复数量，不输出 workflow、任务、用户或 Chat 标识。
-
-人工决策卡的按钮携带随机单次令牌；桥接器还会校验本机配置的用户和 Chat。有效响应先原子落盘，只安排一次卡片“已处理”更新，最后通过 Desktop IPC 恢复固定的专用 Codex Task；后续重复 callback 仅返回幂等确认。用户也可以直接回复该卡片的选项序号、ID 或完整名称。真实人工门恢复消息明确携带 `attention_request_id / selected_action_id / selected_action_label / resolution`，要求 Task 首先执行编排器的 `resolve-attention`，成功后才按检查点继续。
-
-`--roundtrip-test` 会生成唯一的 `TEST-ROUNDTRIP` 安全测试卡。用户选择后，固定 Task 只收到一次测试 receipt；这条专用分支不读取或修改仓库、不调用 Neon 或 `resolve-attention`，也不租用或推进任何 `ONE-*` 任务。该命令会真实发卡，只能在用户在场、已明确同意端到端验证时运行。
-
-Task 忙碌或 Desktop 暂不可用时，恢复消息按 `created_at` 留在严格持久 FIFO 中；提交确认不确定时标记为 `delivery_unknown`。未知恢复不会阻塞无关的初始通知；桥接器只从专用 Task 的用户输入记录核对相同 request/action/resolution 是否已经写入，确认后结清，没有证据时保持未知状态，绝不盲目重发。24 小时未处理提醒由桥接器唯一负责且只发送一次，Neon 和编排器不得再生成第二条提醒。
-
 ## 安装
 
 ### 1. 前置条件
@@ -160,7 +100,7 @@ App 已内置桥接所需的专用 `lark-cli`；普通用户无需先安装命�
 lark-cli --profile codex-notify doctor
 ```
 
-App 运行时优先使用随安装包提供的 `1.0.89-codex-feishu.3`，它在官方 `v1.0.89` 基础上修复 `card.action.trigger` 的 WebSocket 回执类型、同步显示“正在处理…”反馈，并在 Ori One 工作流决策回执前写入本机耐久 inbox；Profile 和 Keychain 凭据仍与系统 `lark-cli` 共用。通用桥接可用 `lark_cli_path` 覆盖，但启用 workflow 时必须使用该内置版本，否则健康检查会 fail closed。
+App 运行时优先使用随安装包提供的 `1.0.89-codex-feishu.3`，它在官方 `v1.0.89` 基础上修复 `card.action.trigger` 的 WebSocket 回执类型并同步显示“正在处理…”反馈；Profile 和 Keychain 凭据仍与系统 `lark-cli` 共用。
 
 ### 4. 配置飞书开发者后台
 
@@ -256,20 +196,13 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 ├── bridge.py
 ├── config.json
 ├── control.sh
-├── diagnose.sh
-├── workflow-config
-├── workflow-notify
-└── workflow_notifications.py
+└── diagnose.sh
 ~/Library/LaunchAgents/com.deepori.codex-feishu-bridge.plist
 ~/.codex/feishu-bridge/state.json
-~/.codex/feishu-bridge/workflow-state.json
-~/.codex/feishu-bridge/workflow-decision-inbox/
-~/.codex/feishu-bridge/workflow-notifications.sock
-~/.codex/feishu-bridge/workflow-control.sock
 ~/.codex/log/feishu-bridge.log
 ```
 
-`config.json` 保存 Profile 名、用户白名单、项目权限和本机 workflow 映射，不保存 App Secret。`state.json` 按用户分别保存当前 Task、收藏/最近记录、最近对话摘要、桌面结果订阅、访问申请、搜索/分页状态、待执行输入队列，以及尚未送达飞书的最终文字、图片、文件或卡片。本地待补发图片和文件分别复制到 `~/.codex/feishu-bridge/reply-images/` 与 `reply-files/`，送达后自动删除。`workflow-state.json` 保存主动通知 outbox、单次决策与恢复状态；`workflow-decision-inbox/` 在飞书 ACK 前以逐事件 `0600` 文件暂存 workflow callback，业务副作用完成后删除。队列和桌面结果订阅跨桥接重启保留；配置、状态、inbox、socket 与日志都限制为仅当前 macOS 用户可访问。
+`config.json` 保存 Profile 名、用户白名单、项目权限和菜单设置，不保存 App Secret。`state.json` 按用户分别保存当前 Task、收藏/最近记录、最近对话摘要、桌面结果订阅、访问申请、搜索/分页状态、待执行输入队列，以及尚未送达飞书的最终文字、图片、文件或卡片。本地待补发图片和文件分别复制到 `~/.codex/feishu-bridge/reply-images/` 与 `reply-files/`，送达后自动删除。队列和桌面结果订阅跨桥接重启保留；配置、状态与日志都限制为仅当前 macOS 用户可访问。
 
 ## 从源码构建
 
@@ -303,15 +236,6 @@ NOTARY_PROFILE="codex-feishu-notary" \
 - 群聊必须显式列入允许列表，或先由同一用户通过受信任卡片建立状态
 - 消息按飞书 `message_id` 去重，回复使用幂等键
 - 最终文字回复失败时会记录脱敏原因并进入持久化补发队列；网络恢复后使用原幂等键自动补发
-- workflow 通知入口使用 `0600` Unix Socket；payload 不能包含收件人或 Chat 标识，目标只能来自 `0600` 本机配置
-- 主动通知只允许里程碑完成与需要用户处理两类；通用 turn-complete 通知保持关闭
-- workflow/event ID 在持久状态中幂等；相同 ID 的不同 payload 会被拒绝，断网补发不重新触发研发任务
-- 人工决策同时校验配置用户、Chat、事件和随机令牌；成功消费后令牌即删除，只建立一条固定 Task 恢复记录
-- 重复卡片 callback 不会再次消费决定或再次安排完成卡 patch；`TEST-ROUNDTRIP` 只向专用 Task 写入测试回执
-- `delivery_unknown` 只读核对专用 Task 的 request/action/resolution 证据；无证据不重复提交
-- 24 小时人工门提醒只由本机桥接器生成一次，Neon 与调用方不得另行提醒
-- workflow 状态文件只接受当前用户拥有的 `0600` 普通文件；损坏 JSON、schema 漂移、符号链接或权限异常都会拒绝入口，绝不按空 outbox 覆盖
-- workflow 卡片与 Task 提示中的可见文字会在入队前拒绝明显凭据、数据库连接串、私钥及飞书用户/Chat 标识
 - 安装器在复制任何运行文件前预检全部安装资源、内置 CLI、配置、状态和日志；运行文件先完整暂存，替换失败时回滚，避免半升级
 - 排队卡或进度卡更新失败时会保存待补发状态；同一张进度卡只保留最新版本，网络恢复后自动更新，不会重新执行 Codex
 - 如果排队消息已经开始执行，尚未送达的旧“已排队”卡会被丢弃，避免恢复后显示过期状态
@@ -333,7 +257,7 @@ NOTARY_PROFILE="codex-feishu-notary" \
 
 ## 与 Codex Remote 的当前差异
 
-`1.6.1 (build 24)` 已覆盖已有 Task 续聊、输入/结果附件、最近对话摘要、Task 收藏/最近使用、实时进度、同 Task 排队/跨 Task 并发、停止、一次性授权、新建 Task、搜索/分页/刷新、归档及恢复。Desktop 的“置顶”目前没有可供第三方稳定调用的 Codex app-server 方法，因此桥接不直接修改 Codex SQLite 或 Electron 私有状态；置顶仍在 Desktop 中操作。飞书真实点击、结果文件、文件/音频输入、授权回调和 workflow 决策往返仍需要在目标租户中做端到端验收，本地自测不能替代该证据。
+Desktop 的“置顶”目前没有可供第三方稳定调用的 Codex app-server 方法，因此桥接不直接修改 Codex SQLite 或 Electron 私有状态；置顶仍在 Desktop 中操作。飞书真实点击、结果文件、文件/音频输入和授权回调仍需要在目标租户中做端到端验收，本地自测不能替代该证据。
 
 ## License
 

@@ -18,9 +18,6 @@ umask 077
 /usr/bin/python3 -B - \
     --resources \
     "${resource_dir}/feishu_codex_bridge.py" \
-    "${resource_dir}/workflow_notifications.py" \
-    "${resource_dir}/workflow_notify.py" \
-    "${resource_dir}/workflow_config.py" \
     "${resource_dir}/control.sh" \
     "${resource_dir}/diagnose.sh" \
     "${resource_dir}/uninstall.sh" \
@@ -33,21 +30,15 @@ umask 077
     "${launch_agents_dir}" \
     "${HOME}/.codex/log" \
     "${HOME}/.codex/feishu-bridge" \
-    "${HOME}/.codex/feishu-bridge/workflow-decision-inbox" \
     "${HOME}/.codex/hooks" \
     --config \
     "${support_dir}/config.json" \
-    --workflow-state \
-    "${HOME}/.codex/feishu-bridge/workflow-state.json" \
     --files \
     "${HOME}/.codex/feishu-bridge/state.json" \
     "${HOME}/.codex/feishu-bridge/runtime-status.json" \
     "${HOME}/.codex/log/feishu-bridge.log" \
     "${HOME}/.codex/log/feishu-bridge-launchd.log" \
     "${support_dir}/bridge.py" \
-    "${support_dir}/workflow_notifications.py" \
-    "${support_dir}/workflow-notify" \
-    "${support_dir}/workflow-config" \
     "${support_dir}/control.sh" \
     "${support_dir}/diagnose.sh" \
     "${support_dir}/uninstall.sh" \
@@ -227,26 +218,6 @@ for path in sections["config"]:
     payload = read_json(path, "existing bridge config is invalid")
     if payload is not None:
         validate_config(payload)
-
-workflow_module_path = next(
-    path for path in sections["resources"] if path.name == "workflow_notifications.py"
-)
-import importlib.util
-spec = importlib.util.spec_from_file_location(
-    "codex_feishu_workflow_install_preflight",
-    workflow_module_path,
-)
-if spec is None or spec.loader is None:
-    raise SystemExit("installation workflow validator is unavailable")
-workflow_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(workflow_module)
-for path in sections["workflow-state"]:
-    payload = read_json(path, "existing workflow state is invalid")
-    if payload is not None:
-        try:
-            workflow_module.WorkflowStore(path)._validate_state(payload)
-        except workflow_module.WorkflowStateError as exc:
-            raise SystemExit("existing workflow state is invalid") from exc
 
 state_path = next(
     (path for path in sections["files"] if path.name == "state.json"),
@@ -497,9 +468,6 @@ PY
 # Stage every runtime file first, then replace the set transactionally with rollback.
 /usr/bin/python3 - \
     "${resource_dir}/feishu_codex_bridge.py" "${support_dir}/bridge.py" 755 \
-    "${resource_dir}/workflow_notifications.py" "${support_dir}/workflow_notifications.py" 644 \
-    "${resource_dir}/workflow_notify.py" "${support_dir}/workflow-notify" 755 \
-    "${resource_dir}/workflow_config.py" "${support_dir}/workflow-config" 755 \
     "${resource_dir}/control.sh" "${support_dir}/control.sh" 755 \
     "${resource_dir}/diagnose.sh" "${support_dir}/diagnose.sh" 755 \
     "${resource_dir}/uninstall.sh" "${support_dir}/uninstall.sh" 755 \

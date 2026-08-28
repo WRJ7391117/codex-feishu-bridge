@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,10 @@ APP_SOURCE = ROOT / "Sources/CodexFeishuBridgeApp/main.swift"
 PRODUCT_BOUNDARY = ROOT / "docs/PRODUCTIZATION.md"
 CONFIG_EXAMPLE = ROOT / "Resources/bridge/config.example.json"
 UNINSTALLER = ROOT / "Resources/bridge/uninstall.sh"
+BRIDGE_SOURCE = ROOT / "Resources/bridge/feishu_codex_bridge.py"
+INSTALLER = ROOT / "Resources/bridge/install.sh"
+BUILD_SCRIPT = ROOT / "scripts/build-app.sh"
+README = ROOT / "README.md"
 
 
 class ProductOnboardingTests(unittest.TestCase):
@@ -149,6 +154,46 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(
             config["task_subscriptions_menu_event_key"], "task_subscriptions"
         )
+        self.assertNotIn("workflow_notifications", config)
+
+    def test_public_package_excludes_private_extension_components(self):
+        build = BUILD_SCRIPT.read_text(encoding="utf-8")
+        installer = INSTALLER.read_text(encoding="utf-8")
+        runtime_files = self.source.split("let runtimeFiles = [", 1)[1].split(
+            "]", 1
+        )[0]
+        for name in (
+            "workflow_notifications.py",
+            "workflow_notify.py",
+            "workflow_config.py",
+        ):
+            self.assertIn(f'"${{resources_dir}}/bridge/{name}"', build)
+            self.assertNotIn(f'"${{resource_dir}}/{name}"', installer)
+            self.assertNotIn(name, runtime_files)
+        readme = README.read_text(encoding="utf-8")
+        for private_name in ("Ori One", "ori-one-mind", "deepori.cn"):
+            self.assertNotIn(private_name, readme)
+
+    def test_bridge_starts_diagnostics_without_private_extension_module(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            bridge = home / "bridge.py"
+            config = home / "config.json"
+            bridge.write_bytes(BRIDGE_SOURCE.read_bytes())
+            config.write_text("{}\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(bridge), "--diagnose-json"],
+                env={
+                    **os.environ,
+                    "HOME": str(home),
+                    "CODEX_FEISHU_BRIDGE_CONFIG": str(config),
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn("ModuleNotFoundError", result.stderr)
 
     def test_keep_data_uninstall_removes_runtime_but_preserves_local_state(self):
         with tempfile.TemporaryDirectory() as directory:
