@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.9.14 (build 50)
+
+- Checks an existing lark-cli Profile when the first-connection assistant opens and reuses a healthy Keychain-backed Bot connection without asking for App ID or App Secret again.
+- Adds explicit “关闭向导” actions at the top and bottom of the setup assistant while preserving Escape as the cancel shortcut.
+- Registers the standard macOS Edit menu so Undo, Cut, Copy, Paste, and Select All work in App ID, App Secret, Profile, and authorization fields.
+
 ## 1.9.13 (build 49)
 
 - Refuses App and background-component updates while any Feishu-owned Task is still running, in addition to the existing queue and durable-delivery checks.

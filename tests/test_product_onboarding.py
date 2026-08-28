@@ -39,6 +39,30 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("if !model.hasConfiguredUsers", launch)
         self.assertIn("self?.model.prepareConnectionSetup()", launch)
 
+    def test_existing_profile_is_checked_before_requesting_credentials(self):
+        setup = self.source.split("func prepareConnectionSetup", 1)[1].split(
+            "func configureProfileAndCheck", 1
+        )[0]
+        self.assertIn("setupUsesExistingProfile = hasConfiguredUsers", setup)
+        self.assertIn("checkExistingProfile()", setup)
+        self.assertIn("现有连接", setup)
+
+    def test_setup_has_explicit_close_and_reconfigure_actions(self):
+        setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
+            "private struct ConfigurationChecklistView", 1
+        )[0]
+        self.assertIn('Button("关闭向导"', setup)
+        self.assertIn("现有连接已可用", setup)
+        self.assertIn('Button("重新配置凭证"', setup)
+
+    def test_app_registers_standard_edit_commands_for_copy_and_paste(self):
+        menu = self.source.split("private func buildApplicationMenu", 1)[1].split(
+            "private func buildStatusItem", 1
+        )[0]
+        for selector in ("undo:", "NSText.cut", "NSText.copy", "NSText.paste", "NSText.selectAll"):
+            self.assertIn(selector, menu)
+        self.assertIn("application.mainMenu = mainMenu", menu)
+
     def test_setup_shows_required_events_and_menu_keys(self):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
             "private struct ConfigurationView", 1

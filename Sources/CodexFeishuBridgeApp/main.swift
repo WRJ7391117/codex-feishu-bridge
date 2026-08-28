@@ -545,6 +545,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var setupAppSecret = ""
     @Published var setupResult = ""
     @Published var setupPassed = false
+    @Published var setupUsesExistingProfile = false
     @Published var isConfiguringProfile = false
     @Published var isDiscoveringUser = false
     @Published var discoveredOpenID = ""
@@ -692,11 +693,45 @@ private final class BridgeViewModel: ObservableObject {
         setupProfile = configuredProfile
         setupAppID = ""
         setupAppSecret = ""
-        setupResult = ""
+        setupUsesExistingProfile = hasConfiguredUsers
+        setupResult = setupUsesExistingProfile ? "正在检查现有连接…" : ""
         setupPassed = false
         discoveredOpenID = ""
         userDiscoveryResult = ""
         showConnectionSetup = true
+        if setupUsesExistingProfile {
+            checkExistingProfile()
+        }
+    }
+
+    func checkExistingProfile() {
+        guard !isConfiguringProfile else { return }
+        let profile = setupProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !profile.isEmpty else {
+            setupUsesExistingProfile = false
+            setupResult = "现有连接名称为空，请重新配置凭证。"
+            return
+        }
+        isConfiguringProfile = true
+        let controller = bridge
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let checked = controller.checkLarkProfile(profile)
+            Task { @MainActor in
+                guard let self else { return }
+                self.isConfiguringProfile = false
+                self.setupPassed = checked.status == 0
+                self.setupUsesExistingProfile = self.setupPassed
+                self.setupResult = self.setupPassed
+                    ? "现有连接已通过 Bot 身份与飞书网络检查，无需重新输入 App ID 或 App Secret。"
+                    : (checked.output.isEmpty ? "现有连接检查失败，请重新配置凭证。" : checked.output)
+            }
+        }
+    }
+
+    func startCredentialReconfiguration() {
+        setupUsesExistingProfile = false
+        setupPassed = false
+        setupResult = "请输入新的 App ID 和 App Secret。"
     }
 
     func configureProfileAndCheck() {
@@ -716,6 +751,7 @@ private final class BridgeViewModel: ObservableObject {
             presentError(title: "无法保存连接", message: "App Secret 不能为空。")
             return
         }
+        setupUsesExistingProfile = false
         isConfiguringProfile = true
         setupResult = "正在写入 macOS Keychain 并检查 Bot 连接…"
         setupPassed = false
@@ -1433,6 +1469,16 @@ private struct ConnectionSetupView: View {
                     .frame(width: 245)
                 Divider()
                 VStack(spacing: 0) {
+                    HStack {
+                        Spacer()
+                        Button("关闭向导", systemImage: "xmark") {
+                            model.showConnectionSetup = false
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                    Divider()
                     stepContent
                     Spacer(minLength: 0)
                     Divider()
@@ -1445,7 +1491,7 @@ private struct ConnectionSetupView: View {
             ConfigurationChecklistView(model: model)
         }
         .onChange(of: model.setupPassed) { passed in
-            if passed && currentStep == 2 {
+            if passed && currentStep == 2 && !model.setupUsesExistingProfile {
                 currentStep = 3
             }
         }
@@ -1513,57 +1559,82 @@ private struct ConnectionSetupView: View {
     private var credentialStep: some View {
         setupPage(
             title: "连接你的飞书应用",
-            subtitle: "输入飞书开放平台中的应用凭证，连接刚刚创建的自建应用。"
+            subtitle: "优先使用这台 Mac 已保存的连接；只有更换飞书应用时才需要重新输入凭证。"
         ) {
-            HStack {
-                Spacer()
-                Button("App ID 在哪里？", systemImage: "arrow.up.right.square") {
-                    model.openDeveloperConsole()
-                }
-                .buttonStyle(.link)
-            }
-
-            setupField("App ID", placeholder: "cli_...", text: $model.setupAppID)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("App Secret")
-                    .font(.callout.weight(.medium))
-                SecureField("请输入 App Secret", text: $model.setupAppSecret)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-                Label("App Secret 安全存入 macOS 钥匙串", systemImage: "lock.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider().padding(.vertical, 4)
-            DisclosureGroup("高级设置", isExpanded: $showAdvancedSettings) {
-                VStack(alignment: .leading, spacing: 6) {
-                    setupField(
-                        "本机连接名称",
-                        placeholder: "codex-notify",
-                        text: $model.setupProfile
+            if model.setupUsesExistingProfile {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label(
+                        model.isConfiguringProfile ? "正在检查现有连接" : "现有连接已可用",
+                        systemImage: model.isConfiguringProfile ? "clock" : "checkmark.circle.fill"
                     )
-                    Text("仅用于在这台 Mac 上区分多个飞书应用，通常无需修改。")
+                        .font(.headline)
+                        .foregroundStyle(model.isConfiguringProfile ? Color.secondary : Color.green)
+                    Text("本机连接“\(model.setupProfile)”已保存于 macOS 钥匙串，无需再次输入 App ID 或 App Secret。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("重新配置凭证") {
+                        model.startCredentialReconfiguration()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.green.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            } else {
+                HStack {
+                    Spacer()
+                    Button("App ID 在哪里？", systemImage: "arrow.up.right.square") {
+                        model.openDeveloperConsole()
+                    }
+                    .buttonStyle(.link)
+                }
+
+                setupField("App ID", placeholder: "cli_...", text: $model.setupAppID)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("App Secret")
+                        .font(.callout.weight(.medium))
+                    SecureField("请输入 App Secret", text: $model.setupAppSecret)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                    Label("App Secret 安全存入 macOS 钥匙串", systemImage: "lock.fill")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .padding(.top, 8)
+
+                Divider().padding(.vertical, 4)
+                DisclosureGroup("高级设置", isExpanded: $showAdvancedSettings) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        setupField(
+                            "本机连接名称",
+                            placeholder: "codex-notify",
+                            text: $model.setupProfile
+                        )
+                        Text("仅用于在这台 Mac 上区分多个飞书应用，通常无需修改。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 8)
+                }
             }
 
             connectionStatus
 
-            HStack {
-                Spacer()
-                if !model.setupResult.isEmpty && !model.setupPassed {
-                    Button("重新检查") { model.recheckProfile() }
-                        .disabled(model.isConfiguringProfile)
+            if !model.setupUsesExistingProfile {
+                HStack {
+                    Spacer()
+                    if !model.setupResult.isEmpty && !model.setupPassed {
+                        Button("重新检查") { model.recheckProfile() }
+                            .disabled(model.isConfiguringProfile)
+                    }
+                    Button(model.isConfiguringProfile ? "正在检查…" : "保存并检查连接") {
+                        model.configureProfileAndCheck()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(model.isConfiguringProfile)
                 }
-                Button(model.isConfiguringProfile ? "正在检查…" : "保存并检查连接") {
-                    model.configureProfileAndCheck()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(model.isConfiguringProfile)
             }
         }
     }
@@ -1648,7 +1719,7 @@ private struct ConnectionSetupView: View {
 
     private var footer: some View {
         HStack {
-            Button("稍后设置") { model.showConnectionSetup = false }
+            Button("关闭向导") { model.showConnectionSetup = false }
                 .keyboardShortcut(.cancelAction)
             Spacer()
             if currentStep > 1 {
@@ -2204,6 +2275,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        buildApplicationMenu()
         buildStatusItem()
         if !bridge.isInstalled {
             let installResult = bridge.install()
@@ -2261,6 +2333,66 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         model.refresh()
+    }
+
+    private func buildApplicationMenu() {
+        let application = NSApplication.shared
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu(title: "Codex 飞书桥接")
+        appMenu.addItem(
+            withTitle: "关于 Codex 飞书桥接",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: ""
+        )
+        appMenu.addItem(.separator())
+        appMenu.addItem(
+            withTitle: "退出 Codex 飞书桥接",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(
+            withTitle: "撤销",
+            action: Selector(("undo:")),
+            keyEquivalent: "z"
+        )
+        let redoItem = editMenu.addItem(
+            withTitle: "重做",
+            action: Selector(("redo:")),
+            keyEquivalent: "z"
+        )
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(
+            withTitle: "剪切",
+            action: #selector(NSText.cut(_:)),
+            keyEquivalent: "x"
+        )
+        editMenu.addItem(
+            withTitle: "复制",
+            action: #selector(NSText.copy(_:)),
+            keyEquivalent: "c"
+        )
+        editMenu.addItem(
+            withTitle: "粘贴",
+            action: #selector(NSText.paste(_:)),
+            keyEquivalent: "v"
+        )
+        editMenu.addItem(
+            withTitle: "全选",
+            action: #selector(NSText.selectAll(_:)),
+            keyEquivalent: "a"
+        )
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        application.mainMenu = mainMenu
     }
 
     private func buildStatusItem() {
