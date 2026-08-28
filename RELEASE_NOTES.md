@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.9.17 (build 53)
+
+- Reduces the subscribed-Task completion card to its Task identity, completion state, and one short pointer to the complete result below.
+- Removes the duplicated result preview, explanatory paragraph, and subscription-management button while preserving complete text, image, and file delivery.
+
 ## 1.9.16 (build 52)
 
 - Renames the Feishu Bot menu parent `TASK` to “Task 管理”.

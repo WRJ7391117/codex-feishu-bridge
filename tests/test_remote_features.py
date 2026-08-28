@@ -1005,6 +1005,24 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.queue_pending_image.assert_called_once()
         self.bridge.queue_pending_file.assert_called_once()
 
+    def test_subscription_result_card_is_compact_and_does_not_repeat_result(self):
+        task = self.tasks()[0]
+        result = "这段完整结果只应出现在卡片下方的回复里。" * 20
+
+        card = self.bridge.build_task_subscription_result_card(task, "completed")
+
+        self.assertEqual(
+            card["body"]["elements"],
+            [
+                {
+                    "tag": "markdown",
+                    "content": "<font color='grey'>完整结果见下方，可直接继续对话。</font>",
+                }
+            ],
+        )
+        self.assertNotIn(result, json.dumps(card, ensure_ascii=False))
+        self.assertNotIn("管理 Task 订阅", json.dumps(card, ensure_ascii=False))
+
     def test_complete_subscription_result_is_split_without_truncation(self):
         task = self.tasks()[0]
         result = "第一段结果。\n" + ("完整内容" * 40) + "\n最后一段。"

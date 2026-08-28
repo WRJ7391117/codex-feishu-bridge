@@ -5883,16 +5883,8 @@ def build_task_subscriptions_card(
 def build_task_subscription_result_card(
     task: dict[str, str],
     status: str,
-    message: str,
 ) -> dict[str, Any]:
     completed = status == "completed"
-    content = message.strip() or (
-        "Codex 已完成，但没有返回文字结果。"
-        if completed
-        else "Codex Desktop 没有完成这一轮运行。"
-    )
-    if len(content) > MAX_REPLY_CHARS:
-        content = content[:MAX_REPLY_CHARS].rstrip() + "…"
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
@@ -5916,26 +5908,16 @@ def build_task_subscription_result_card(
         },
         "body": {
             "direction": "vertical",
-            "padding": "12px 12px 20px 12px",
-            "vertical_spacing": "12px",
+            "padding": "12px",
+            "vertical_spacing": "4px",
             "elements": [
-                {"tag": "markdown", "content": card_markdown_escape(content)},
                 {
                     "tag": "markdown",
                     "content": (
-                        "<font color='grey'>完整文字结果将在本卡片下方发送；"
-                        "图片和文件会随结果附上。当前 Task 已跟随这条最新结果，"
-                        "可直接继续发送消息。</font>"
+                        "<font color='grey'>完整结果见下方，可直接继续对话。</font>"
+                        if completed
+                        else "<font color='grey'>运行详情见下方。</font>"
                     ),
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "管理 Task 订阅"},
-                    "type": "default",
-                    "width": "fill",
-                    "behaviors": [
-                        {"type": "callback", "value": {"action": "show_task_subscriptions"}}
-                    ],
                 },
             ],
         },
@@ -6693,7 +6675,6 @@ def deliver_task_subscription_result(
     card = build_task_subscription_result_card(
         task,
         str(snapshot.get("status") or "failed"),
-        clean_result,
     )
     kind = (
         "task-subscription-result-"
