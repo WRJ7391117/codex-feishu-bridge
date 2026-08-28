@@ -259,6 +259,9 @@ DESKTOP_SYNC_MENU_EVENT_KEY = str(
 DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY = str(
     CONFIG.get("desktop_sync_switch_menu_event_key") or "sync_desktop_switch"
 )
+TASK_SUBSCRIPTIONS_MENU_EVENT_KEY = str(
+    CONFIG.get("task_subscriptions_menu_event_key") or "task_subscriptions"
+)
 REPLY_RETRY_DELAYS = (1.0, 2.0)
 CARD_PATCH_RETRY_DELAYS: tuple[float, ...] = ()
 CARD_PATCH_TIMEOUT_SECONDS = 3
@@ -295,6 +298,8 @@ DESKTOP_UNAVAILABLE_RETRY_DELAYS = (0.3, 0.7)
 DESKTOP_TASK_ACTIVATION_SETTLE_SECONDS = 0.75
 ALLOW_ACCESS_REQUESTS = CONFIG.get("allow_access_requests", True) is not False
 TASKS_PER_PAGE = max(10, min(50, int(CONFIG.get("tasks_per_page", 50))))
+MAX_TASK_SUBSCRIPTIONS_PER_USER = 20
+TASK_SUBSCRIPTION_POLL_SECONDS = 2
 RECENT_TASK_LIMIT = 20
 TASK_SUMMARY_CHARS = 120
 
@@ -963,6 +968,84 @@ def advance_rollout_turn(
     except OSError:
         snapshot["status"] = "missing"
     return snapshot
+
+
+def scan_task_subscription_rollout(
+    path: Path | None,
+    cursor_offset: int,
+    active_turn_id: str = "",
+    existing_images: list[str] | None = None,
+) -> dict[str, Any]:
+    """Read only complete records appended after a subscription cursor."""
+    result: dict[str, Any] = {
+        "cursor_offset": max(0, int(cursor_offset)),
+        "active_turn_id": active_turn_id,
+        "images": list(existing_images or []),
+        "deliveries": [],
+        "available": False,
+    }
+    if path is None or not path.is_file():
+        return result
+    try:
+        with path.open("rb") as handle:
+            complete_size = complete_jsonl_size(handle, path.stat().st_size)
+            if result["cursor_offset"] > complete_size:
+                result["cursor_offset"] = complete_size
+                result["active_turn_id"] = ""
+                result["images"] = []
+                result["available"] = True
+                return result
+            handle.seek(result["cursor_offset"])
+            while handle.tell() < complete_size:
+                line = handle.readline()
+                if not line or handle.tell() > complete_size:
+                    break
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    result["cursor_offset"] = handle.tell()
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    result["cursor_offset"] = handle.tell()
+                    continue
+                event_type = str(payload.get("type") or "")
+                turn_id = str(payload.get("turn_id") or "")
+                if event_type == "task_started" and turn_id:
+                    result["active_turn_id"] = turn_id
+                    result["images"] = []
+                elif event_type == "image_generation_end" and result["active_turn_id"]:
+                    image = normalized_image_reference(
+                        str(payload.get("saved_path") or "")
+                    )
+                    if image is not None and image not in result["images"]:
+                        result["images"].append(image)
+                elif event_type in {"task_complete", "task_failed", "turn_aborted"} and turn_id:
+                    if not result["active_turn_id"] or result["active_turn_id"] == turn_id:
+                        status = "completed" if event_type == "task_complete" else "failed"
+                        message = (
+                            str(payload.get("last_agent_message") or "").strip()
+                            if status == "completed"
+                            else "Codex Desktop 没有完成这一轮运行。"
+                        )
+                        result["active_turn_id"] = ""
+                        result["deliveries"].append(
+                            {
+                                "status": status,
+                                "turn_id": turn_id,
+                                "message": message,
+                                "images": list(result["images"]),
+                                "cursor_offset": handle.tell(),
+                                "active_turn_id": "",
+                                "remaining_images": [],
+                            }
+                        )
+                        result["images"] = []
+                result["cursor_offset"] = handle.tell()
+            result["available"] = True
+    except OSError:
+        return result
+    return result
 
 
 def task_working_directory(thread_id: str) -> str:
@@ -5175,6 +5258,7 @@ def help_text() -> str:
         "机器人菜单 TASK →“归档当前 Task” —— 可取消或二次确认归档当前 Task\n"
         "机器人菜单 接续桌面 Task →“接续当前 Task” —— 接续桥接中的当前 Task\n"
         "机器人菜单 接续桌面 Task →“接续其他 Task” —— 先切换 Task 再接续\n"
+        "机器人菜单“订阅 Task” —— 多选需要自动接收 Desktop 新结果的 Task\n"
         "对话 —— 用文字打开 Task 选择卡片（备用）\n"
         "选择 N —— 文字选择 task（备用）\n"
         "搜索 关键词 —— 按标题搜索当前项目的 Task\n"
@@ -5556,6 +5640,265 @@ def build_task_card(
             "padding": "12px 12px 20px 12px",
             "vertical_spacing": "12px",
             "elements": elements,
+        },
+    }
+
+
+def build_task_subscriptions_card(
+    tasks: list[dict[str, str]],
+    subscriptions: dict[str, dict[str, Any]],
+    selected_id: str | None = None,
+    project_filter: str | None = None,
+    page: int = 0,
+    change: str = "",
+) -> dict[str, Any]:
+    subscribed_ids = set(subscriptions)
+    selected = next((task for task in tasks if task["id"] == selected_id), None)
+    projects = list(dict.fromkeys(task["project"] for task in tasks))
+    active_project = (
+        project_filter
+        if project_filter in projects
+        else selected["project"] if selected else projects[0] if projects else None
+    )
+    project_tasks = [task for task in tasks if task["project"] == active_project]
+    page_count = max(1, (len(project_tasks) + TASKS_PER_PAGE - 1) // TASKS_PER_PAGE)
+    active_page = min(max(page, 0), page_count - 1)
+    start = active_page * TASKS_PER_PAGE
+    visible_tasks = project_tasks[start : start + TASKS_PER_PAGE]
+    if selected not in visible_tasks:
+        selected = visible_tasks[0] if visible_tasks else None
+    subscribed_tasks = [task for task in tasks if task["id"] in subscribed_ids]
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "markdown",
+            "content": (
+                (f"✅ **{card_markdown_escape(change)}**\n\n" if change else "")
+                + "订阅后，这个 Task 在 Codex Desktop 完成新的运行时，结果会自动推送到你的飞书。"
+                "订阅不会改变当前 Task，也不会补发订阅前已经完成的结果。"
+            ),
+        }
+    ]
+    if projects:
+        elements.append(
+            {
+                "tag": "select_static",
+                "name": "subscription_project_selector",
+                "placeholder": {"tag": "plain_text", "content": "筛选项目"},
+                "options": [
+                    {
+                        "text": {"tag": "plain_text", "content": project},
+                        "value": project,
+                    }
+                    for project in projects
+                ],
+                "initial_option": active_project,
+                "width": "fill",
+            }
+        )
+    if visible_tasks:
+        selector: dict[str, Any] = {
+            "tag": "select_static",
+            "name": "subscription_task_selector",
+            "placeholder": {"tag": "plain_text", "content": "选择一个 Task"},
+            "options": [
+                {
+                    "text": {"tag": "plain_text", "content": option_text(task)},
+                    "value": task["id"],
+                }
+                for task in visible_tasks
+            ],
+            "initial_option": selected["id"] if selected else visible_tasks[0]["id"],
+            "width": "fill",
+        }
+        elements.append(selector)
+        elements.append(
+            {
+                "tag": "button",
+                "text": {
+                    "tag": "plain_text",
+                    "content": (
+                        "取消订阅这个 Task"
+                        if selected and selected["id"] in subscribed_ids
+                        else "订阅这个 Task"
+                    ),
+                },
+                "type": (
+                    "default"
+                    if selected and selected["id"] in subscribed_ids
+                    else "primary_filled"
+                ),
+                "width": "fill",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": {
+                            "action": "toggle_task_subscription",
+                            "task_id": selected["id"] if selected else "",
+                        },
+                    }
+                ],
+            }
+        )
+    else:
+        elements.append(
+            {"tag": "markdown", "content": "当前项目没有可订阅的 Task。"}
+        )
+    elements.append(
+        {
+            "tag": "markdown",
+            "content": f"<font color='grey'>第 {active_page + 1}/{page_count} 页 · {len(project_tasks)} 个 Task</font>",
+        }
+    )
+    if active_page > 0:
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "上一页"},
+                "type": "default",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": {"action": "task_subscription_page", "page": active_page - 1},
+                    }
+                ],
+            }
+        )
+    if active_page + 1 < page_count:
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "下一页"},
+                "type": "default",
+                "behaviors": [
+                    {
+                        "type": "callback",
+                        "value": {"action": "task_subscription_page", "page": active_page + 1},
+                    }
+                ],
+            }
+        )
+    elements.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "刷新订阅列表"},
+            "type": "default",
+            "behaviors": [
+                {"type": "callback", "value": {"action": "show_task_subscriptions"}}
+            ],
+        }
+    )
+    subscribed_text = (
+        "\n".join(
+            f"- ✅ {card_markdown_escape(option_text(task))}"
+            for task in subscribed_tasks
+        )
+        if subscribed_tasks
+        else "尚未订阅任何 Task。"
+    )
+    elements.append(
+        {
+            "tag": "markdown",
+            "content": f"**已订阅 {len(subscribed_tasks)} 个 Task**\n{subscribed_text}",
+        }
+    )
+    if subscribed_tasks:
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "取消全部订阅…"},
+                "type": "default",
+                "width": "fill",
+                "behaviors": [
+                    {"type": "callback", "value": {"action": "clear_task_subscriptions"}}
+                ],
+                "confirm": {
+                    "title": {"tag": "plain_text", "content": "取消全部 Task 订阅？"},
+                    "text": {"tag": "plain_text", "content": "之后不会再自动推送这些 Task 的桌面结果。"},
+                },
+            }
+        )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": "订阅 Task"},
+            "subtitle": {
+                "tag": "plain_text",
+                "content": f"已订阅 {len(subscribed_tasks)}/{MAX_TASK_SUBSCRIPTIONS_PER_USER} 个",
+            },
+            "template": "blue",
+            "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
+            "text_tag_list": [
+                {
+                    "tag": "text_tag",
+                    "text": {"tag": "plain_text", "content": "自动推送"},
+                    "color": "blue",
+                }
+            ],
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": elements,
+        },
+    }
+
+
+def build_task_subscription_result_card(
+    task: dict[str, str],
+    status: str,
+    message: str,
+) -> dict[str, Any]:
+    completed = status == "completed"
+    content = message.strip() or (
+        "Codex 已完成，但没有返回文字结果。"
+        if completed
+        else "Codex Desktop 没有完成这一轮运行。"
+    )
+    if len(content) > MAX_REPLY_CHARS:
+        content = content[:MAX_REPLY_CHARS].rstrip() + "…"
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": task_title_text(task)},
+            "subtitle": {"tag": "plain_text", "content": task_project_text(task)},
+            "template": "green" if completed else "grey",
+            "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
+            "text_tag_list": [
+                {
+                    "tag": "text_tag",
+                    "text": {"tag": "plain_text", "content": "订阅结果"},
+                    "color": "blue",
+                },
+                {
+                    "tag": "text_tag",
+                    "text": {"tag": "plain_text", "content": "已完成" if completed else "未完成"},
+                    "color": "green" if completed else "neutral",
+                },
+            ],
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": [
+                {"tag": "markdown", "content": card_markdown_escape(content)},
+                {
+                    "tag": "markdown",
+                    "content": "<font color='grey'>当前 Task 已跟随这条最新结果，可直接继续发送消息。</font>",
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "管理 Task 订阅"},
+                    "type": "default",
+                    "width": "fill",
+                    "behaviors": [
+                        {"type": "callback", "value": {"action": "show_task_subscriptions"}}
+                    ],
+                },
+            ],
         },
     }
 
@@ -6033,6 +6376,8 @@ def card_context_type(card: dict[str, Any]) -> str:
     }
     if "new_task_project_selector" in names:
         return "new_task"
+    if names & {"subscription_project_selector", "subscription_task_selector"}:
+        return "task_subscriptions"
     if names & {"archived_project_selector", "archived_task_selector"}:
         return "archived_tasks"
     if names & {"project_selector", "task_selector"}:
@@ -6066,6 +6411,15 @@ def card_active_project(card: dict[str, Any] | None, archived: bool = False) -> 
     expected_name = "archived_project_selector" if archived else "project_selector"
     for selector in card_selector_context(card)["selectors"]:
         if selector["name"] == expected_name:
+            return str(selector["initial_option"] or "")
+    return ""
+
+
+def subscription_card_active_project(card: dict[str, Any] | None) -> str:
+    if not isinstance(card, dict):
+        return ""
+    for selector in card_selector_context(card)["selectors"]:
+        if selector["name"] == "subscription_project_selector":
             return str(selector["initial_option"] or "")
     return ""
 
@@ -6107,7 +6461,11 @@ def remember_card_context(
         "user_id": user_id,
         "type": context_type,
         "revision": revision,
-        "project": card_active_project(card, context_type == "archived_tasks"),
+        "project": (
+            subscription_card_active_project(card)
+            if context_type == "task_subscriptions"
+            else card_active_project(card, context_type == "archived_tasks")
+        ),
         "selector_context": card_selector_context(card),
     }
     state["card_contexts"] = dict(list(contexts.items())[-100:])
@@ -6177,6 +6535,306 @@ def desktop_result_subscriptions(state: dict[str, Any]) -> dict[str, dict[str, A
         subscriptions = {}
         state["desktop_result_subscriptions"] = subscriptions
     return subscriptions
+
+
+def task_subscriptions(state: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]]:
+    subscriptions = state.setdefault("task_subscriptions", {})
+    if not isinstance(subscriptions, dict):
+        subscriptions = {}
+        state["task_subscriptions"] = subscriptions
+    return subscriptions
+
+
+def user_task_subscriptions(
+    state: dict[str, Any],
+    user_id: str,
+) -> dict[str, dict[str, Any]]:
+    subscriptions = task_subscriptions(state)
+    user_subscriptions = subscriptions.setdefault(user_id, {})
+    if not isinstance(user_subscriptions, dict):
+        user_subscriptions = {}
+        subscriptions[user_id] = user_subscriptions
+    return user_subscriptions
+
+
+def new_task_subscription(task: dict[str, str]) -> dict[str, Any]:
+    snapshot = latest_rollout_turn(rollout_path_for_task(str(task["id"])))
+    running = snapshot.get("status") == "running"
+    return {
+        "task_id": str(task["id"]),
+        "cursor_offset": int(snapshot.get("cursor_offset") or 0),
+        "active_turn_id": str(snapshot.get("turn_id") or "") if running else "",
+        "images": list(snapshot.get("images") or []) if running else [],
+        "created_at": time.time(),
+    }
+
+
+def task_subscriptions_card_for_state(
+    user_id: str,
+    state: dict[str, Any],
+    change: str = "",
+) -> dict[str, Any]:
+    with _state_lock:
+        tasks = recent_tasks(user_id)
+        subscriptions = user_task_subscriptions(state, user_id)
+        valid_ids = {task["id"] for task in tasks}
+        for task_id in list(subscriptions):
+            if task_id not in valid_ids:
+                subscriptions.pop(task_id, None)
+        selected_map = state.setdefault("subscription_selected_tasks", {})
+        selected_id = str(selected_map.get(user_id) or "")
+        if selected_id not in valid_ids:
+            selected_id = ""
+        project_map = state.setdefault("subscription_last_projects", {})
+        project_filter = str(project_map.get(user_id) or "")
+        projects = list(dict.fromkeys(task["project"] for task in tasks))
+        if project_filter not in projects:
+            project_filter = (
+                next(
+                    (task["project"] for task in tasks if task["id"] == selected_id),
+                    "",
+                )
+                or (projects[0] if projects else "")
+            )
+            if project_filter:
+                project_map[user_id] = project_filter
+        project_tasks = [task for task in tasks if task["project"] == project_filter]
+        if selected_id not in {task["id"] for task in project_tasks}:
+            selected_id = project_tasks[0]["id"] if project_tasks else ""
+            if selected_id:
+                selected_map[user_id] = selected_id
+        page = int(state.setdefault("subscription_task_pages", {}).get(user_id) or 0)
+        save_state(state)
+        return build_task_subscriptions_card(
+            tasks,
+            subscriptions,
+            selected_id,
+            project_filter,
+            page,
+            change,
+        )
+
+
+def toggle_task_subscription(
+    user_id: str,
+    task: dict[str, str],
+) -> tuple[bool, str]:
+    with _state_lock:
+        state = load_state()
+        subscriptions = user_task_subscriptions(state, user_id)
+        task_id = str(task["id"])
+        if task_id in subscriptions:
+            subscriptions.pop(task_id, None)
+            save_state(state)
+            return False, f"已取消订阅：{option_text(task)}"
+        if len(subscriptions) >= MAX_TASK_SUBSCRIPTIONS_PER_USER:
+            return False, f"每位用户最多订阅 {MAX_TASK_SUBSCRIPTIONS_PER_USER} 个 Task。"
+    entry = new_task_subscription(task)
+    with _state_lock:
+        state = load_state()
+        subscriptions = user_task_subscriptions(state, user_id)
+        if len(subscriptions) >= MAX_TASK_SUBSCRIPTIONS_PER_USER:
+            return False, f"每位用户最多订阅 {MAX_TASK_SUBSCRIPTIONS_PER_USER} 个 Task。"
+        subscriptions[str(task["id"])] = entry
+        save_state(state)
+    return True, f"已订阅：{option_text(task)}"
+
+
+def deliver_task_subscription_result(
+    user_id: str,
+    task: dict[str, str],
+    snapshot: dict[str, Any],
+) -> bool:
+    result = str(snapshot.get("message") or "").strip()
+    clean_result, images = prepare_result_images(
+        result,
+        [str(item) for item in snapshot.get("images", [])],
+    )
+    clean_result, files = prepare_result_files(clean_result)
+    card = build_task_subscription_result_card(
+        task,
+        str(snapshot.get("status") or "failed"),
+        clean_result,
+    )
+    kind = (
+        "task-subscription-result-"
+        f"{user_id}-{task['id']}-{str(snapshot.get('turn_id') or '')}"
+    )
+    delivered, chat_id, message_id = send_card(user_id, card, kind)
+    if not delivered or not message_id:
+        return False
+    with _state_lock:
+        state = load_state()
+        if chat_id:
+            authorize_chat(state, user_id, chat_id)
+    record_task_exchange(
+        user_id,
+        str(task["id"]),
+        answer=clean_result,
+        completed_at=time.time(),
+    )
+    with result_delivery_lock(user_id):
+        followed = follow_result_task(user_id, task)
+    if followed:
+        schedule_user_task_identity_refresh(
+            user_id,
+            "当前 Task 已跟随订阅结果",
+            task,
+        )
+    for index, image in enumerate(images, start=1):
+        if not reply_image(message_id, image, index):
+            queue_pending_image(
+                message_id,
+                image,
+                index,
+                current_reply_failure_reason() or "飞书 API 调用失败",
+            )
+    for index, file_path in enumerate(files, start=1):
+        if not reply_file(message_id, file_path, index):
+            queue_pending_file(
+                message_id,
+                file_path,
+                index,
+                current_reply_failure_reason() or "飞书 API 调用失败",
+            )
+    update_current_status_card(user_id, task=task)
+    log(
+        "task subscription result delivered "
+        f"status={snapshot.get('status')} images={len(images)} files={len(files)}"
+    )
+    return True
+
+
+def update_task_subscription_checkpoint(
+    user_id: str,
+    task_id: str,
+    cursor_offset: int,
+    active_turn_id: str,
+    images: list[str],
+) -> None:
+    with _state_lock:
+        state = load_state()
+        entry = user_task_subscriptions(state, user_id).get(task_id)
+        if not isinstance(entry, dict):
+            return
+        next_cursor = max(0, int(cursor_offset))
+        next_images = list(images)
+        if (
+            int(entry.get("cursor_offset") or 0) == next_cursor
+            and str(entry.get("active_turn_id") or "") == active_turn_id
+            and [str(item) for item in entry.get("images", [])] == next_images
+        ):
+            return
+        entry["cursor_offset"] = next_cursor
+        entry["active_turn_id"] = active_turn_id
+        entry["images"] = next_images
+        save_state(state)
+
+
+def poll_task_subscriptions() -> bool:
+    with _state_lock:
+        state = load_state()
+        subscriptions = task_subscriptions(state)
+        removed_users = [
+            user_id for user_id in subscriptions if not authorized_user(user_id)
+        ]
+        for user_id in removed_users:
+            subscriptions.pop(user_id, None)
+        if removed_users:
+            save_state(state)
+        pending = [
+            (user_id, task_id, dict(entry))
+            for user_id, values in subscriptions.items()
+            if isinstance(values, dict)
+            for task_id, entry in values.items()
+            if isinstance(entry, dict)
+        ]
+        turn_owners = dict(state.get("bridge_turn_owners", {}))
+    tasks_by_user: dict[str, dict[str, dict[str, str]]] = {}
+    unavailable_users: set[str] = set()
+    for user_id in dict.fromkeys(user_id for user_id, _task_id, _entry in pending):
+        try:
+            tasks_by_user[user_id] = {
+                task["id"]: task for task in recent_tasks(user_id)
+            }
+        except (OSError, sqlite3.Error) as exc:
+            unavailable_users.add(user_id)
+            log(f"task subscription catalog unavailable error={type(exc).__name__}")
+    rollout_paths: dict[str, Path | None] = {}
+    scan_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+    did_work = False
+    for user_id, task_id, entry in pending:
+        if user_id in unavailable_users:
+            continue
+        task = tasks_by_user.get(user_id, {}).get(task_id)
+        if task is None:
+            with _state_lock:
+                state = load_state()
+                user_task_subscriptions(state, user_id).pop(task_id, None)
+                save_state(state)
+            did_work = True
+            continue
+        if task_id not in rollout_paths:
+            try:
+                rollout_paths[task_id] = rollout_path_for_task(task_id)
+            except sqlite3.Error as exc:
+                log(f"task subscription rollout unavailable error={type(exc).__name__}")
+                continue
+        cursor_offset = int(entry.get("cursor_offset") or 0)
+        active_turn_id = str(entry.get("active_turn_id") or "")
+        existing_images = tuple(str(item) for item in entry.get("images", []))
+        checkpoint = (cursor_offset, active_turn_id, existing_images)
+        scan_key = (task_id, cursor_offset, active_turn_id, existing_images)
+        if scan_key not in scan_cache:
+            scan_cache[scan_key] = scan_task_subscription_rollout(
+                rollout_paths[task_id],
+                cursor_offset,
+                active_turn_id,
+                list(existing_images),
+            )
+        scan = scan_cache[scan_key]
+        if not scan.get("available"):
+            continue
+        delivery_failed = False
+        for delivery in scan.get("deliveries", []):
+            turn_id = str(delivery.get("turn_id") or "")
+            owner = str(turn_owners.get(turn_id) or "")
+            if owner != user_id and not deliver_task_subscription_result(
+                user_id,
+                task,
+                delivery,
+            ):
+                delivery_failed = True
+                break
+            update_task_subscription_checkpoint(
+                user_id,
+                task_id,
+                int(delivery.get("cursor_offset") or 0),
+                str(delivery.get("active_turn_id") or ""),
+                [str(item) for item in delivery.get("remaining_images", [])],
+            )
+            checkpoint = (
+                int(delivery.get("cursor_offset") or 0),
+                str(delivery.get("active_turn_id") or ""),
+                tuple(str(item) for item in delivery.get("remaining_images", [])),
+            )
+            did_work = True
+        if delivery_failed:
+            continue
+        final_checkpoint = (
+            int(scan.get("cursor_offset") or 0),
+            str(scan.get("active_turn_id") or ""),
+            tuple(str(item) for item in scan.get("images", [])),
+        )
+        if final_checkpoint != checkpoint:
+            update_task_subscription_checkpoint(
+                user_id,
+                task_id,
+                final_checkpoint[0],
+                final_checkpoint[1],
+                list(final_checkpoint[2]),
+            )
+    return did_work
 
 
 def desktop_sync_current_snapshot(
@@ -7880,13 +8538,21 @@ def handle_approval_action(
     )
 
 
-def remember_bridge_turn(turn_id: str) -> None:
+def remember_bridge_turn(turn_id: str, user_id: str = "") -> None:
     with _state_lock:
         state = load_state()
         turns = [str(item) for item in state.get("bridge_turns", [])]
         if turn_id not in turns:
             turns.append(turn_id)
         state["bridge_turns"] = turns[-200:]
+        owners = state.setdefault("bridge_turn_owners", {})
+        if not isinstance(owners, dict):
+            owners = {}
+        if user_id:
+            owners[turn_id] = user_id
+        state["bridge_turn_owners"] = {
+            key: value for key, value in owners.items() if key in state["bridge_turns"]
+        }
         save_state(state)
 
 
@@ -8435,6 +9101,7 @@ def mark_processed(state: dict[str, Any], key: str) -> bool:
 def set_run_turn_id(run: dict[str, Any], turn_id: str) -> None:
     with _active_runs_lock:
         run["turn_id"] = turn_id
+    remember_bridge_turn(turn_id, str(run.get("user_id") or ""))
     request_run_interrupt(run)
 
 
@@ -9013,6 +9680,65 @@ def handle_card_event(event: dict[str, Any]) -> None:
         action = str(payload.get("action") or "")
         if workflow_notifications_enabled() and handle_workflow_card_action(event, payload):
             return
+        if action in {
+            "show_task_subscriptions",
+            "toggle_task_subscription",
+            "clear_task_subscriptions",
+            "task_subscription_page",
+        }:
+            with _state_lock:
+                state = load_state()
+                if not mark_processed(state, f"card:{event_id}"):
+                    return
+            change = ""
+            if action == "toggle_task_subscription":
+                requested_task_id = str(payload.get("task_id") or "")
+                task = task_by_id(requested_task_id, user_id)
+                if task is None:
+                    change = "该 Task 已归档、删除或不再属于你的授权项目"
+                else:
+                    with _state_lock:
+                        state = load_state()
+                        state.setdefault("subscription_selected_tasks", {})[
+                            user_id
+                        ] = requested_task_id
+                        state.setdefault("subscription_last_projects", {})[
+                            user_id
+                        ] = task["project"]
+                        save_state(state)
+                    _subscribed, change = toggle_task_subscription(user_id, task)
+            elif action == "clear_task_subscriptions":
+                with _state_lock:
+                    state = load_state()
+                    user_task_subscriptions(state, user_id).clear()
+                    save_state(state)
+                change = "已取消全部 Task 订阅"
+            elif action == "task_subscription_page":
+                try:
+                    page = max(0, int(payload.get("page") or 0))
+                except (TypeError, ValueError):
+                    page = 0
+                with _state_lock:
+                    state = load_state()
+                    state.setdefault("subscription_task_pages", {})[user_id] = page
+                    save_state(state)
+            with _state_lock:
+                state = load_state()
+                card = task_subscriptions_card_for_state(user_id, state, change)
+                if message_id:
+                    remember_card_context(
+                        state,
+                        user_id,
+                        message_id,
+                        card,
+                        "task_subscriptions",
+                    )
+            token = str(event.get("token") or "")
+            if token and update_card(token, card):
+                return
+            if message_id:
+                patch_card(message_id, card)
+            return
         if action in {"confirm_desktop_sync", "cancel_desktop_sync"}:
             with _state_lock:
                 state = load_state()
@@ -9589,6 +10315,104 @@ def handle_card_event(event: dict[str, Any]) -> None:
         if isinstance(original_card, dict)
         else []
     )
+    recognized_subscription_card = any(
+        isinstance(element, dict)
+        and element.get("tag") == "select_static"
+        and element.get("name")
+        in {"subscription_project_selector", "subscription_task_selector"}
+        for element in elements
+    ) or context_type == "task_subscriptions"
+    if action_tag == "select_static" and (
+        action_name in {"subscription_project_selector", "subscription_task_selector"}
+        or (not action_name and recognized_subscription_card)
+    ):
+        tasks = recent_tasks(user_id)
+        projects = {task["project"] for task in tasks}
+        task_by_value = {task["id"]: task for task in tasks}
+        if not action_name:
+            if selected_value in projects:
+                action_name = "subscription_project_selector"
+            elif selected_value in task_by_value:
+                action_name = "subscription_task_selector"
+            else:
+                log("card ignored reason=unknown-subscription-selector")
+                return
+        stale_selection = False
+        with _state_lock:
+            state = load_state()
+            if chat_id and not is_authorized_chat(state, user_id, chat_id):
+                if not recognized_subscription_card:
+                    log("card ignored reason=unrecognized-chat-and-card")
+                    return
+                authorize_chat(state, user_id, chat_id)
+            if not mark_processed(state, f"card:{event_id}"):
+                return
+            if action_name == "subscription_project_selector":
+                if selected_value not in projects:
+                    return
+                state.setdefault("subscription_last_projects", {})[
+                    user_id
+                ] = selected_value
+                state.setdefault("subscription_task_pages", {})[user_id] = 0
+                first = next(
+                    (task for task in tasks if task["project"] == selected_value),
+                    None,
+                )
+                if first:
+                    state.setdefault("subscription_selected_tasks", {})[
+                        user_id
+                    ] = first["id"]
+            else:
+                task = task_by_value.get(selected_value)
+                latest_project = str(
+                    state.setdefault("subscription_last_projects", {}).get(user_id)
+                    or ""
+                )
+                source_project = (
+                    subscription_card_active_project(original_card)
+                    or str(context_details.get("project") or "")
+                )
+                if (
+                    task is None
+                    or (
+                        latest_project
+                        and (
+                            task["project"] != latest_project
+                            or (source_project and source_project != latest_project)
+                        )
+                    )
+                ):
+                    stale_selection = True
+                else:
+                    state.setdefault("subscription_selected_tasks", {})[
+                        user_id
+                    ] = task["id"]
+                    state.setdefault("subscription_last_projects", {})[
+                        user_id
+                    ] = task["project"]
+            save_state(state)
+            card = task_subscriptions_card_for_state(
+                user_id,
+                state,
+                "项目已经切换，请在新列表中重新选择" if stale_selection else "",
+            )
+            if message_id:
+                remember_card_context(
+                    state,
+                    user_id,
+                    message_id,
+                    card,
+                    "task_subscriptions",
+                )
+        if not ui_intent_is_current(event):
+            return
+        token = str(event.get("token") or "")
+        if token and update_card(token, card):
+            return
+        if message_id:
+            patch_card(message_id, card)
+        return
+
     recognized_new_task_card = any(
         isinstance(element, dict)
         and element.get("tag") == "select_static"
@@ -9871,6 +10695,7 @@ def handle_menu_event(event: dict[str, Any]) -> None:
         USAGE_MENU_EVENT_KEY,
         DESKTOP_SYNC_MENU_EVENT_KEY,
         DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY,
+        TASK_SUBSCRIPTIONS_MENU_EVENT_KEY,
     } or not authorized_user(user_id):
         return
     event_id = str(event.get("event_id") or "")
@@ -9919,6 +10744,16 @@ def handle_menu_event(event: dict[str, Any]) -> None:
             f"codex-usage-{event_id}",
         )
         log(f"menu handled key={event_key} result=usage-card")
+        return
+    if event_key == TASK_SUBSCRIPTIONS_MENU_EVENT_KEY:
+        send_menu_card(
+            user_id,
+            state,
+            task_subscriptions_card_for_state(user_id, state),
+            f"task-subscriptions-{event_id}",
+            "task_subscriptions",
+        )
+        log(f"menu handled key={event_key} result=task-subscriptions-card")
         return
     if event_key == DESKTOP_SYNC_MENU_EVENT_KEY:
         start_desktop_sync(user_id, state, event_id)
@@ -9988,6 +10823,8 @@ def ui_intent_key(event: dict[str, Any]) -> str:
         "new_task_project_selector",
         "archived_project_selector",
         "archived_task_selector",
+        "subscription_project_selector",
+        "subscription_task_selector",
     }:
         return f"{user_id}:{message_id}:{action_name}"
     if action_tag != "button":
@@ -10008,6 +10845,8 @@ def ui_intent_key(event: dict[str, Any]) -> str:
         "show_codex_usage",
         "show_daily_task_usage_analysis",
         "show_period_task_usage_analysis",
+        "show_task_subscriptions",
+        "task_subscription_page",
     }:
         return f"{user_id}:{message_id}:{action}"
     return ""
@@ -10239,6 +11078,7 @@ def maintenance_loop(events: queue.Queue[dict[str, Any]]) -> None:
     next_usage_refresh = 0.0
     next_cli_fallback_expiry = 0.0
     next_desktop_sync_retry = 0.0
+    next_task_subscription_poll = 0.0
     while not _shutdown_event.is_set():
         now = time.time()
         if now >= next_cli_fallback_expiry:
@@ -10271,6 +11111,12 @@ def maintenance_loop(events: queue.Queue[dict[str, Any]]) -> None:
             except Exception as exc:
                 log(f"desktop sync loop failed: {type(exc).__name__}: {exc}")
             next_desktop_sync_retry = now + 1
+        if now >= next_task_subscription_poll:
+            try:
+                poll_task_subscriptions()
+            except Exception as exc:
+                log(f"task subscription loop failed: {type(exc).__name__}: {exc}")
+            next_task_subscription_poll = now + TASK_SUBSCRIPTION_POLL_SECONDS
         if now >= next_workflow_retry:
             try:
                 if workflow_notifications_enabled():

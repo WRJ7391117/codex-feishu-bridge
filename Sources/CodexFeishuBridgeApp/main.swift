@@ -538,6 +538,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var draftUsageEventKey = "codex_usage"
     @Published var draftDesktopSyncEventKey = "sync_desktop"
     @Published var draftDesktopSyncSwitchEventKey = "sync_desktop_switch"
+    @Published var draftTaskSubscriptionsEventKey = "task_subscriptions"
     @Published var draftMaxConcurrentRuns = 2
     @Published var setupProfile = "codex-notify"
     @Published var setupAppID = ""
@@ -850,6 +851,9 @@ private final class BridgeViewModel: ObservableObject {
         draftDesktopSyncSwitchEventKey = String(
             describing: config["desktop_sync_switch_menu_event_key"] ?? "sync_desktop_switch"
         )
+        draftTaskSubscriptionsEventKey = String(
+            describing: config["task_subscriptions_menu_event_key"] ?? "task_subscriptions"
+        )
         draftMaxConcurrentRuns = min(
             8,
             max(1, (config["max_concurrent_runs"] as? NSNumber)?.intValue ?? 2)
@@ -866,6 +870,7 @@ private final class BridgeViewModel: ObservableObject {
         let usageEventKey = draftUsageEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let desktopSyncEventKey = draftDesktopSyncEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let desktopSyncSwitchEventKey = draftDesktopSyncSwitchEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let taskSubscriptionsEventKey = draftTaskSubscriptionsEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !profile.isEmpty else {
             presentError(title: "配置未保存", message: "lark-cli Profile 不能为空。")
             return
@@ -913,7 +918,8 @@ private final class BridgeViewModel: ObservableObject {
             archiveTaskEventKey: archiveTaskEventKey,
             usageEventKey: usageEventKey,
             desktopSyncEventKey: desktopSyncEventKey,
-            desktopSyncSwitchEventKey: desktopSyncSwitchEventKey
+            desktopSyncSwitchEventKey: desktopSyncSwitchEventKey,
+            taskSubscriptionsEventKey: taskSubscriptionsEventKey
         )
     }
 
@@ -926,7 +932,8 @@ private final class BridgeViewModel: ObservableObject {
         archiveTaskEventKey: String,
         usageEventKey: String,
         desktopSyncEventKey: String,
-        desktopSyncSwitchEventKey: String
+        desktopSyncSwitchEventKey: String,
+        taskSubscriptionsEventKey: String
     ) {
         let menuEventKeys = [
             currentTaskEventKey,
@@ -936,13 +943,14 @@ private final class BridgeViewModel: ObservableObject {
             usageEventKey,
             desktopSyncEventKey,
             desktopSyncSwitchEventKey,
+            taskSubscriptionsEventKey,
         ]
         guard menuEventKeys.allSatisfy({ !$0.isEmpty }) else {
-            presentError(title: "配置未保存", message: "七个机器人菜单 Event Key 都不能为空。")
+            presentError(title: "配置未保存", message: "八个机器人菜单 Event Key 都不能为空。")
             return
         }
         guard Set(menuEventKeys).count == menuEventKeys.count else {
-            presentError(title: "配置未保存", message: "七个机器人菜单 Event Key 不能重复。")
+            presentError(title: "配置未保存", message: "八个机器人菜单 Event Key 不能重复。")
             return
         }
 
@@ -967,6 +975,7 @@ private final class BridgeViewModel: ObservableObject {
         config["usage_menu_event_key"] = usageEventKey
         config["desktop_sync_menu_event_key"] = desktopSyncEventKey
         config["desktop_sync_switch_menu_event_key"] = desktopSyncSwitchEventKey
+        config["task_subscriptions_menu_event_key"] = taskSubscriptionsEventKey
         config["max_concurrent_runs"] = min(8, max(1, draftMaxConcurrentRuns))
         config["max_prompt_chars"] = config["max_prompt_chars"] ?? 12000
         config["max_reply_chars"] = config["max_reply_chars"] ?? 3000
@@ -1411,191 +1420,365 @@ private struct MainView: View {
 
 private struct ConnectionSetupView: View {
     @ObservedObject var model: BridgeViewModel
+    @State private var currentStep = 1
+    @State private var showAdvancedSettings = false
+    @State private var showConfigurationChecklist = false
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    tenantStep
-                    credentialStep
-                    consoleStep
-                    authorizationStep
+            HStack(spacing: 0) {
+                sidebar
+                    .frame(width: 245)
+                Divider()
+                VStack(spacing: 0) {
+                    stepContent
+                    Spacer(minLength: 0)
+                    Divider()
+                    footer
                 }
-                .padding(22)
             }
-            Divider()
-            footer
         }
-        .frame(width: 740, height: 650)
+        .frame(width: 900, height: 650)
+        .sheet(isPresented: $showConfigurationChecklist) {
+            ConfigurationChecklistView(model: model)
+        }
+        .onChange(of: model.setupPassed) { passed in
+            if passed && currentStep == 2 {
+                currentStep = 3
+            }
+        }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("连接你自己的飞书")
-                .font(.title2.weight(.semibold))
-            Text("桥接在这台 Mac 本机运行；Codex 内容不会经过 Roger 或 DeepOri 的服务器。")
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 48, height: 48)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("连接飞书")
+                        .font(.title3.weight(.semibold))
+                    Text("桥接仅在这台 Mac 上运行，Codex 内容不会经过第三方服务器。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.bottom, 34)
+
+            ForEach(1...4, id: \.self) { step in
+                sidebarStep(step)
+            }
+
+            Spacer()
+            Text("第 \(currentStep) 步，共 4 步")
+                .font(.caption)
                 .foregroundStyle(.secondary)
+                .padding(.bottom, 12)
+            Button("查看完整配置清单", systemImage: "list.bullet.clipboard") {
+                showConfigurationChecklist = true
+            }
+            .buttonStyle(.link)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 24)
-        .padding(.vertical, 18)
+        .padding(24)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
     }
 
     private var tenantStep: some View {
-        setupStep(number: 1, title: "准备自建应用") {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("在自己的飞书租户中创建或选择一个启用了机器人能力的自建应用。首版不使用共享机器人，每位 Mac 机主掌握自己的应用和权限。")
-                    .foregroundStyle(.secondary)
-                Button("打开开发者后台", systemImage: "safari") {
-                    model.openDeveloperConsole()
-                }
+        setupPage(
+            title: "创建飞书应用",
+            subtitle: "在飞书开放平台创建一个企业自建应用。它将作为你在飞书里使用 Codex 的机器人。"
+        ) {
+            instructionRow(
+                icon: "plus.app",
+                title: "创建企业自建应用",
+                detail: "应用名称和图标可按你的团队习惯设置。"
+            )
+            instructionRow(
+                icon: "person.crop.circle.badge.checkmark",
+                title: "确认你有管理权限",
+                detail: "后续需要为应用开启机器人能力并发布版本。"
+            )
+            Button("打开飞书开放平台", systemImage: "arrow.up.right.square") {
+                model.openDeveloperConsole()
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
         }
     }
 
     private var credentialStep: some View {
-        setupStep(number: 2, title: "安全保存连接凭据") {
-            VStack(alignment: .leading, spacing: 10) {
-                setupField(
-                    "Profile 名称",
-                    placeholder: "codex-notify",
-                    text: $model.setupProfile
-                )
-                setupField(
-                    "App ID",
-                    placeholder: "cli_...",
-                    text: $model.setupAppID
-                )
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("App Secret")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                    SecureField("只发送给本机 lark-cli", text: $model.setupAppSecret)
-                        .textFieldStyle(.roundedBorder)
+        setupPage(
+            title: "连接你的飞书应用",
+            subtitle: "输入飞书开放平台中的应用凭证，连接刚刚创建的自建应用。"
+        ) {
+            HStack {
+                Spacer()
+                Button("App ID 在哪里？", systemImage: "arrow.up.right.square") {
+                    model.openDeveloperConsole()
                 }
-                Text("App Secret 只通过 stdin 交给内置 lark-cli，并由 lark-cli 存入 macOS Keychain；桥接配置和日志不会保存它。")
+                .buttonStyle(.link)
+            }
+
+            setupField("App ID", placeholder: "cli_...", text: $model.setupAppID)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("App Secret")
+                    .font(.callout.weight(.medium))
+                SecureField("请输入 App Secret", text: $model.setupAppSecret)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                Label("App Secret 安全存入 macOS 钥匙串", systemImage: "lock.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 10) {
-                    Button(model.isConfiguringProfile ? "正在保存并检查…" : "保存并检查连接") {
-                        model.configureProfileAndCheck()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.isConfiguringProfile)
+            }
+
+            Divider().padding(.vertical, 4)
+            DisclosureGroup("高级设置", isExpanded: $showAdvancedSettings) {
+                VStack(alignment: .leading, spacing: 6) {
+                    setupField(
+                        "本机连接名称",
+                        placeholder: "codex-notify",
+                        text: $model.setupProfile
+                    )
+                    Text("仅用于在这台 Mac 上区分多个飞书应用，通常无需修改。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 8)
+            }
+
+            connectionStatus
+
+            HStack {
+                Spacer()
+                if !model.setupResult.isEmpty && !model.setupPassed {
                     Button("重新检查") { model.recheckProfile() }
                         .disabled(model.isConfiguringProfile)
-                    if !model.setupResult.isEmpty {
-                        Label(
-                            model.setupResult,
-                            systemImage: model.setupPassed
-                                ? "checkmark.circle.fill"
-                                : "exclamationmark.triangle.fill"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(model.setupPassed ? .green : .orange)
-                        .lineLimit(3)
-                    }
                 }
+                Button(model.isConfiguringProfile ? "正在检查…" : "保存并检查连接") {
+                    model.configureProfileAndCheck()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(model.isConfiguringProfile)
             }
         }
     }
 
     private var consoleStep: some View {
-        setupStep(number: 3, title: "完成飞书后台设置") {
-            VStack(alignment: .leading, spacing: 8) {
-                checklist("机器人权限：接收单聊消息、读取消息及消息资源、发送和更新消息、上传图片与文件（含 im:resource）")
-                checklist("长连接事件：im.message.receive_v1、application.bot.menu_v6")
-                checklist("卡片回调：card.action.trigger")
-                checklist("菜单 Event Key：current_task、select_task、new_task、archive_task、codex_usage、sync_desktop、sync_desktop_switch")
-                checklist("创建并发布应用版本；发布后菜单可能需要约 5 分钟生效")
-                Text("飞书要求应用管理员在开发者后台确认权限和发布版本；本机 App 不会替你扩大租户权限。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        setupPage(
+            title: "配置机器人",
+            subtitle: "回到飞书开放平台，完成三个设置，让机器人可以收发消息和响应菜单。"
+        ) {
+            instructionRow(
+                icon: "message",
+                title: "开启机器人能力",
+                detail: "在“添加应用能力”中添加机器人。"
+            )
+            instructionRow(
+                icon: "checkmark.shield",
+                title: "添加权限与事件",
+                detail: "按完整配置清单逐项添加，避免遗漏。"
+            )
+            instructionRow(
+                icon: "paperplane",
+                title: "创建并发布版本",
+                detail: "发布后，飞书菜单通常会在几分钟内生效。"
+            )
+            HStack(spacing: 10) {
+                Button("打开飞书开放平台", systemImage: "arrow.up.right.square") {
+                    model.openDeveloperConsole()
+                }
+                .buttonStyle(.borderedProminent)
+                Button("查看完整配置清单", systemImage: "list.bullet.clipboard") {
+                    showConfigurationChecklist = true
+                }
             }
+            Text("权限与版本发布需要由飞书应用管理员确认。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
     private var authorizationStep: some View {
-        setupStep(number: 4, title: "授权使用者和项目") {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("点击开始识别后，用机主飞书账号给 Bot 发送一条单聊消息。App 只读取该事件中的 open_id，不会把消息内容写入配置。")
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 10) {
-                    Button(model.isDiscoveringUser ? "等待飞书消息…" : "开始识别首位用户") {
-                        model.discoverFirstUser()
-                    }
-                    .disabled(!model.setupPassed || model.isDiscoveringUser)
-                    if !model.userDiscoveryResult.isEmpty {
-                        Label(
-                            model.userDiscoveryResult,
-                            systemImage: model.discoveredOpenID.isEmpty
-                                ? "hourglass"
-                                : "checkmark.circle.fill"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(
-                            model.discoveredOpenID.isEmpty ? Color.secondary : Color.green
-                        )
-                        .lineLimit(3)
-                    }
-                }
-                Text("识别成功后仍需由 Mac 机主明确指定该用户可访问的 Codex 项目；不会默认开放全部项目。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("继续配置授权用户", systemImage: "person.badge.key") {
-                    model.continueToUserAuthorization()
-                }
-                .disabled(
-                    !model.setupPassed
-                        || (!model.hasConfiguredUsers && model.discoveredOpenID.isEmpty)
-                )
+        setupPage(
+            title: "授权使用者",
+            subtitle: "用需要使用桥接的飞书账号给机器人发送一条单聊消息，然后在这里完成识别和项目授权。"
+        ) {
+            instructionRow(
+                icon: "1.circle",
+                title: "开始识别",
+                detail: "点击下方按钮后，App 会等待一条新的机器人单聊消息。"
+            )
+            instructionRow(
+                icon: "2.circle",
+                title: "在飞书发送消息",
+                detail: "打开机器人单聊，发送任意文字即可。"
+            )
+            Button(model.isDiscoveringUser ? "正在等待飞书消息…" : "开始识别使用者") {
+                model.discoverFirstUser()
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!model.setupPassed || model.isDiscoveringUser)
+
+            if !model.userDiscoveryResult.isEmpty {
+                Label(
+                    model.userDiscoveryResult,
+                    systemImage: model.discoveredOpenID.isEmpty
+                        ? "hourglass"
+                        : "checkmark.circle.fill"
+                )
+                .font(.callout)
+                .foregroundStyle(
+                    model.discoveredOpenID.isEmpty ? Color.secondary : Color.green
+                )
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("识别成功后，仍需由 Mac 机主明确选择该用户可以访问的 Codex 项目；不会默认开放全部项目。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var footer: some View {
         HStack {
-            Text("可以随时关闭向导；已写入 Keychain 的 Profile 会保留。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button("关闭") { model.showConnectionSetup = false }
+            Button("稍后设置") { model.showConnectionSetup = false }
                 .keyboardShortcut(.cancelAction)
+            Spacer()
+            if currentStep > 1 {
+                Button("上一步") { currentStep -= 1 }
+            }
+            Button(primaryFooterTitle) { advance() }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canAdvance)
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 14)
     }
 
-    private func setupStep<Content: View>(
-        number: Int,
-        title: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        GroupBox {
-            content()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 6)
-        } label: {
-            HStack(spacing: 8) {
-                Text("\(number)")
-                    .font(.caption.weight(.bold))
-                    .frame(width: 22, height: 22)
-                    .background(Circle().fill(Color.accentColor.opacity(0.15)))
-                Text(title)
-            }
+    @ViewBuilder
+    private var stepContent: some View {
+        switch currentStep {
+        case 1: tenantStep
+        case 2: credentialStep
+        case 3: consoleStep
+        default: authorizationStep
         }
     }
 
-    private func checklist(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "checkmark.circle")
-                .foregroundStyle(.secondary)
-                .padding(.top, 1)
-            Text(text)
-                .fixedSize(horizontal: false, vertical: true)
+    private var primaryFooterTitle: String {
+        currentStep == 4 ? "配置授权" : "继续"
+    }
+
+    private var canAdvance: Bool {
+        switch currentStep {
+        case 2:
+            return model.setupPassed
+        case 4:
+            return model.setupPassed
+                && (model.hasConfiguredUsers || !model.discoveredOpenID.isEmpty)
+        default:
+            return true
+        }
+    }
+
+    private func advance() {
+        if currentStep == 4 {
+            model.continueToUserAuthorization()
+        } else {
+            currentStep += 1
+        }
+    }
+
+    private func sidebarStep(_ step: Int) -> some View {
+        let titles = ["创建飞书应用", "连接应用", "配置机器人", "授权使用者"]
+        let isCurrent = currentStep == step
+        let isComplete = step < currentStep || (step == 2 && model.setupPassed)
+        let isLocked = step > 2 && !model.setupPassed
+
+        return Button {
+            currentStep = step
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: isComplete ? "checkmark.circle.fill" : (isLocked ? "lock.circle" : "\(step).circle.fill"))
+                    .font(.title2)
+                    .foregroundStyle(isComplete ? Color.green : (isCurrent ? Color.accentColor : Color.secondary))
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(titles[step - 1])
+                        .font(.body.weight(isCurrent ? .semibold : .regular))
+                        .foregroundStyle(isCurrent ? Color.primary : Color.secondary)
+                    Text(isComplete ? "已完成" : (isCurrent ? "进行中" : "等待中"))
+                        .font(.caption)
+                        .foregroundStyle(isCurrent ? Color.accentColor : Color.secondary)
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+            .padding(.vertical, 10)
+        }
+        .buttonStyle(.plain)
+        .disabled(isLocked)
+    }
+
+    private func setupPage<Content: View>(
+        title: String,
+        subtitle: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text(title)
+                    .font(.largeTitle.weight(.semibold))
+                Text(subtitle)
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(36)
+        }
+    }
+
+    private var connectionStatus: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: model.isConfiguringProfile ? "clock" : (model.setupPassed ? "checkmark.circle.fill" : "bolt.horizontal.circle"))
+                .font(.title3)
+                .foregroundStyle(model.setupPassed ? Color.green : Color.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(model.setupPassed ? "连接检查通过" : (model.isConfiguringProfile ? "正在检查连接" : "等待检查"))
+                    .font(.callout.weight(.semibold))
+                Text(model.setupResult.isEmpty ? "保存后，App 会自动验证连接是否可用。" : model.setupResult)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func instructionRow(icon: String, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -1606,11 +1789,77 @@ private struct ConnectionSetupView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
+                .font(.callout.weight(.medium))
             TextField(placeholder, text: text)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.body, design: .monospaced))
+        }
+    }
+}
+
+private struct ConfigurationChecklistView: View {
+    @ObservedObject var model: BridgeViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("完整配置清单")
+                        .font(.title2.weight(.semibold))
+                    Text("在飞书开放平台逐项核对；完成后创建并发布应用版本。")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(24)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    checklistSection("机器人权限", items: [
+                        "接收单聊消息、读取消息及消息资源",
+                        "发送和更新消息、上传图片与文件（含 im:resource）",
+                    ])
+                    checklistSection("长连接事件与卡片回调", items: [
+                        "im.message.receive_v1",
+                        "application.bot.menu_v6",
+                        "card.action.trigger",
+                    ])
+                    checklistSection("机器人菜单 Event Key", items: [
+                        "current_task · 当前 Task",
+                        "select_task · 切换 Task",
+                        "new_task · 新建 Task",
+                        "archive_task · 归档当前 Task",
+                        "codex_usage · 额度用量",
+                        "sync_desktop · 接续当前 Task",
+                        "sync_desktop_switch · 接续其他 Task",
+                        "task_subscriptions · 订阅 Task",
+                    ])
+                    Divider()
+                    Button("打开飞书开放平台", systemImage: "arrow.up.right.square") {
+                        model.openDeveloperConsole()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(24)
+            }
+        }
+        .frame(width: 620, height: 560)
+    }
+
+    private func checklistSection(_ title: String, items: [String]) -> some View {
+        GroupBox(title) {
+            VStack(alignment: .leading, spacing: 9) {
+                ForEach(items, id: \.self) { item in
+                    Label(item, systemImage: "circle")
+                        .font(.callout)
+                        .textSelection(.enabled)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 6)
         }
     }
 }
@@ -1727,6 +1976,12 @@ private struct ConfigurationView: View {
                         "接续其他 Task",
                         placeholder: "sync_desktop_switch",
                         text: $model.draftDesktopSyncSwitchEventKey,
+                        monospaced: true
+                    )
+                    configurationField(
+                        "订阅 Task",
+                        placeholder: "task_subscriptions",
+                        text: $model.draftTaskSubscriptionsEventKey,
                         monospaced: true
                     )
                 }

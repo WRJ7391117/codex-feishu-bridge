@@ -724,7 +724,7 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.bridge.send_task_card.assert_called_once()
 
-    def test_task_menu_event_keys_have_seven_distinct_defaults(self):
+    def test_task_menu_event_keys_have_eight_distinct_defaults(self):
         event_keys = (
             self.bridge.CURRENT_TASK_MENU_EVENT_KEY,
             self.bridge.TASK_MENU_EVENT_KEY,
@@ -733,6 +733,7 @@ class RemoteFeatureTests(unittest.TestCase):
             self.bridge.USAGE_MENU_EVENT_KEY,
             self.bridge.DESKTOP_SYNC_MENU_EVENT_KEY,
             self.bridge.DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY,
+            self.bridge.TASK_SUBSCRIPTIONS_MENU_EVENT_KEY,
         )
 
         self.assertEqual(
@@ -745,9 +746,270 @@ class RemoteFeatureTests(unittest.TestCase):
                 "codex_usage",
                 "sync_desktop",
                 "sync_desktop_switch",
+                "task_subscriptions",
             ),
         )
-        self.assertEqual(len(set(event_keys)), 7)
+        self.assertEqual(len(set(event_keys)), 8)
+
+    def test_user_can_subscribe_to_three_home_tasks_without_changing_current_task(self):
+        tasks = [
+            {"id": f"home-{index}", "title": title, "project": "Home"}
+            for index, title in enumerate(("总控与集成", "目标平台验证", "产品开发主线"), 1)
+        ]
+        self.bridge.recent_tasks = lambda user_id: tasks
+        self.bridge.latest_rollout_turn = lambda path: {
+            "status": "completed",
+            "turn_id": "old-turn",
+            "message": "old",
+            "images": [],
+            "cursor_offset": 123,
+        }
+        self.bridge.rollout_path_for_task = lambda task_id: None
+        state = {"selected": {"ou_admin": "home-1"}}
+        self.bridge.save_state(state)
+
+        for task in tasks:
+            subscribed, _message = self.bridge.toggle_task_subscription(
+                "ou_admin", task
+            )
+            self.assertTrue(subscribed)
+
+        state = self.bridge.load_state()
+        self.assertEqual(state["selected"]["ou_admin"], "home-1")
+        self.assertEqual(
+            set(state["task_subscriptions"]["ou_admin"]),
+            {"home-1", "home-2", "home-3"},
+        )
+
+    def test_task_subscriptions_are_isolated_per_user(self):
+        self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
+        self.bridge.latest_rollout_turn = lambda path: {
+            "status": "none",
+            "turn_id": "",
+            "message": "",
+            "images": [],
+            "cursor_offset": 0,
+        }
+        self.bridge.rollout_path_for_task = lambda task_id: None
+
+        self.bridge.toggle_task_subscription("ou_admin", self.tasks()[0])
+        self.bridge.toggle_task_subscription("ou_miller", self.tasks()[1])
+
+        subscriptions = self.bridge.load_state()["task_subscriptions"]
+        self.assertEqual(set(subscriptions["ou_admin"]), {"task-a"})
+        self.assertEqual(set(subscriptions["ou_miller"]), {"task-b"})
+
+    def test_new_subscription_starts_after_existing_result_and_survives_reload(self):
+        task = self.tasks()[0]
+        rollout = Path(self.temporary.name) / "subscription-rollout.jsonl"
+        old_records = [
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "old"}},
+            {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "old", "last_agent_message": "旧结果"}},
+        ]
+        rollout.write_text(
+            "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in old_records),
+            encoding="utf-8",
+        )
+        self.bridge.rollout_path_for_task = mock.Mock(return_value=rollout)
+
+        subscribed, _message = self.bridge.toggle_task_subscription("ou_admin", task)
+
+        self.assertTrue(subscribed)
+        entry = self.bridge.load_state()["task_subscriptions"]["ou_admin"]["task-a"]
+        self.assertEqual(entry["cursor_offset"], rollout.stat().st_size)
+        self.assertEqual(
+            self.bridge.scan_task_subscription_rollout(
+                rollout,
+                entry["cursor_offset"],
+                entry["active_turn_id"],
+                entry["images"],
+            )["deliveries"],
+            [],
+        )
+
+        new_records = [
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "new"}},
+            {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "new", "last_agent_message": "新结果"}},
+        ]
+        with rollout.open("a", encoding="utf-8") as handle:
+            for record in new_records:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        reloaded = self.bridge.load_state()["task_subscriptions"]["ou_admin"]["task-a"]
+        scan = self.bridge.scan_task_subscription_rollout(
+            rollout,
+            reloaded["cursor_offset"],
+            reloaded["active_turn_id"],
+            reloaded["images"],
+        )
+        self.assertEqual([item["message"] for item in scan["deliveries"]], ["新结果"])
+
+    def test_desktop_result_pushes_to_other_subscriber_but_not_originating_user_twice(self):
+        task = self.tasks()[0]
+        self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
+        rollout = Path(self.temporary.name) / "shared-subscription.jsonl"
+        started = {
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "turn-owned"},
+        }
+        rollout.write_text(json.dumps(started) + "\n", encoding="utf-8")
+        cursor = rollout.stat().st_size
+        self.bridge.recent_tasks = lambda user_id: [task]
+        self.bridge.rollout_path_for_task = mock.Mock(return_value=rollout)
+        self.bridge.deliver_task_subscription_result = mock.Mock(return_value=True)
+        state = {
+            "task_subscriptions": {
+                "ou_admin": {
+                    "task-a": {
+                        "task_id": "task-a",
+                        "cursor_offset": cursor,
+                        "active_turn_id": "turn-owned",
+                        "images": [],
+                    }
+                },
+                "ou_miller": {
+                    "task-a": {
+                        "task_id": "task-a",
+                        "cursor_offset": cursor,
+                        "active_turn_id": "turn-owned",
+                        "images": [],
+                    }
+                },
+            },
+            "bridge_turn_owners": {"turn-owned": "ou_admin"},
+        }
+        self.bridge.save_state(state)
+        completed = {
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-owned",
+                "last_agent_message": "完成",
+            },
+        }
+        with rollout.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(completed, ensure_ascii=False) + "\n")
+
+        self.assertTrue(self.bridge.poll_task_subscriptions())
+
+        self.bridge.deliver_task_subscription_result.assert_called_once()
+        self.bridge.rollout_path_for_task.assert_called_once_with("task-a")
+        self.assertEqual(
+            self.bridge.deliver_task_subscription_result.call_args.args[0],
+            "ou_miller",
+        )
+        subscriptions = self.bridge.load_state()["task_subscriptions"]
+        self.assertEqual(
+            subscriptions["ou_admin"]["task-a"]["cursor_offset"],
+            rollout.stat().st_size,
+        )
+        self.assertEqual(
+            subscriptions["ou_miller"]["task-a"]["cursor_offset"],
+            rollout.stat().st_size,
+        )
+
+    def test_failed_subscription_send_keeps_cursor_and_reuses_idempotency_kind(self):
+        task = self.tasks()[0]
+        rollout = Path(self.temporary.name) / "retry-subscription.jsonl"
+        records = [
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "retry-turn"}},
+            {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "retry-turn", "last_agent_message": "结果"}},
+        ]
+        rollout.write_text(
+            "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        first_record_size = len((json.dumps(records[0], ensure_ascii=False) + "\n").encode("utf-8"))
+        self.bridge.recent_tasks = lambda user_id: [task]
+        self.bridge.rollout_path_for_task = lambda task_id: rollout
+        self.bridge.send_card = mock.Mock(
+            side_effect=[
+                (False, None, None),
+                (True, "oc_test", "om_subscription"),
+            ]
+        )
+        self.bridge.prepare_result_images = lambda message, images: (message, [])
+        self.bridge.prepare_result_files = lambda message: (message, [])
+        self.bridge.record_task_exchange = mock.Mock()
+        self.bridge.follow_result_task = mock.Mock(return_value=False)
+        self.bridge.update_current_status_card = mock.Mock(return_value=True)
+        state = {
+            "task_subscriptions": {
+                "ou_admin": {
+                    "task-a": {
+                        "task_id": "task-a",
+                        "cursor_offset": first_record_size,
+                        "active_turn_id": "retry-turn",
+                        "images": [],
+                    }
+                }
+            }
+        }
+        self.bridge.save_state(state)
+
+        self.assertFalse(self.bridge.poll_task_subscriptions())
+        after_failure = self.bridge.load_state()["task_subscriptions"]["ou_admin"]["task-a"]
+        self.assertEqual(after_failure["cursor_offset"], first_record_size)
+        self.assertTrue(self.bridge.poll_task_subscriptions())
+
+        kinds = [call.args[2] for call in self.bridge.send_card.call_args_list]
+        self.assertEqual(kinds[0], kinds[1])
+        after_success = self.bridge.load_state()["task_subscriptions"]["ou_admin"]["task-a"]
+        self.assertEqual(after_success["cursor_offset"], rollout.stat().st_size)
+
+    def test_subscription_delivery_reuses_durable_image_and_file_paths(self):
+        task = self.tasks()[0]
+        self.bridge.send_card = mock.Mock(
+            return_value=(True, "oc_test", "om_subscription")
+        )
+        self.bridge.prepare_result_images = mock.Mock(
+            return_value=("完成", ["/tmp/result.png"])
+        )
+        self.bridge.prepare_result_files = mock.Mock(
+            return_value=("完成", [Path("/tmp/result.pdf")])
+        )
+        self.bridge.reply_image = mock.Mock(return_value=False)
+        self.bridge.reply_file = mock.Mock(return_value=False)
+        self.bridge.queue_pending_image = mock.Mock()
+        self.bridge.queue_pending_file = mock.Mock()
+        self.bridge.record_task_exchange = mock.Mock()
+        self.bridge.follow_result_task = mock.Mock(return_value=False)
+        self.bridge.update_current_status_card = mock.Mock(return_value=True)
+
+        delivered = self.bridge.deliver_task_subscription_result(
+            "ou_admin",
+            task,
+            {
+                "status": "completed",
+                "turn_id": "asset-turn",
+                "message": "完成",
+                "images": ["/tmp/result.png"],
+            },
+        )
+
+        self.assertTrue(delivered)
+        self.bridge.queue_pending_image.assert_called_once()
+        self.bridge.queue_pending_file.assert_called_once()
+
+    def test_revoked_user_or_archived_task_removes_subscription(self):
+        task = self.tasks()[0]
+        self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
+        state = {
+            "task_subscriptions": {
+                "ou_admin": {"archived": {"task_id": "archived"}},
+                "ou_miller": {"task-a": {"task_id": "task-a"}},
+            }
+        }
+        self.bridge.save_state(state)
+        self.bridge.ALLOWED_USERS.pop("ou_miller")
+        self.bridge.recent_tasks = lambda user_id: []
+        self.bridge.rollout_path_for_task = lambda task_id: None
+
+        self.assertTrue(self.bridge.poll_task_subscriptions())
+
+        subscriptions = self.bridge.load_state()["task_subscriptions"]
+        self.assertNotIn("ou_miller", subscriptions)
+        self.assertEqual(subscriptions["ou_admin"], {})
 
     def test_latest_rollout_turn_reads_completed_desktop_result(self):
         rollout = Path(self.temporary.name) / "rollout.jsonl"

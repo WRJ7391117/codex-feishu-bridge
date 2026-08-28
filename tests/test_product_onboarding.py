@@ -58,6 +58,31 @@ class ProductOnboardingTests(unittest.TestCase):
             self.assertIn(value, setup)
         self.assertIn("不会默认开放全部项目", setup)
 
+    def test_setup_is_a_generic_four_step_wizard(self):
+        setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
+            "private struct ConfigurationView", 1
+        )[0]
+        for title in ("创建飞书应用", "连接应用", "配置机器人", "授权使用者"):
+            self.assertIn(title, setup)
+        self.assertIn("switch currentStep", setup)
+        self.assertIn("查看完整配置清单", setup)
+        self.assertIn("桥接仅在这台 Mac 上运行，Codex 内容不会经过第三方服务器。", setup)
+        for private_name in ("Roger", "DeepOri", "Ori One"):
+            self.assertNotIn(private_name, setup)
+
+    def test_setup_keeps_technical_connection_details_out_of_the_main_path(self):
+        setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
+            "private struct ConfigurationChecklistView", 1
+        )[0]
+        checklist = self.source.split("private struct ConfigurationChecklistView", 1)[1].split(
+            "private struct ConfigurationView", 1
+        )[0]
+        self.assertIn("高级设置", setup)
+        self.assertIn("本机连接名称", setup)
+        for detail in ("stdin", "lark-cli", "open_id", "card.action.trigger"):
+            self.assertNotIn(detail, setup)
+        self.assertIn("card.action.trigger", checklist)
+
     def test_first_user_discovery_is_bounded_and_does_not_grant_projects(self):
         discovery = self.source.split("func discoverFeishuUser", 1)[1].split(
             "func isRunning", 1
@@ -87,6 +112,9 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(config["allowed_users"][0]["allowed_projects"], [])
         self.assertEqual(
             config["desktop_sync_switch_menu_event_key"], "sync_desktop_switch"
+        )
+        self.assertEqual(
+            config["task_subscriptions_menu_event_key"], "task_subscriptions"
         )
 
     def test_keep_data_uninstall_removes_runtime_but_preserves_local_state(self):

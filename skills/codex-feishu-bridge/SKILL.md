@@ -42,7 +42,8 @@ Use this skill for the local macOS bridge published at `WRJ7391117/codex-feishu-
    - for attachment changes, text, image, file, and audio round trips plus the Bot's message-resource permissions
    - for remote-control changes, a real progress-card patch, stop confirmation, and one-time approval callback
    - for workflow changes, dry-run, safe status, durable retry, one-time decision consumption, card completion patch, and recovery into the configured dedicated Task
-   - for Task-management changes, verify all seven Bot menu Event Keys, including `current_task`, `sync_desktop`, `sync_desktop_switch`, and `codex_usage`, then use a disposable authorized-project Task for create/search/archive acceptance; restore archived test data afterward
+   - for Task-management changes, verify all eight Bot menu Event Keys, including `current_task`, `sync_desktop`, `sync_desktop_switch`, `task_subscriptions`, and `codex_usage`, then use a disposable authorized-project Task for create/search/archive acceptance; restore archived test data afterward
+   - for Task-subscription changes, verify subscribe/cancel, multiple Tasks, restart recovery, multi-user isolation, permission revocation, no historical backfill, durable attachment delivery, and no duplicate final reply for a bridge-owned turn
    - for Desktop handoff changes, verify an already-completed Desktop turn, a running Desktop turn that finishes after subscription, restart recovery, multi-user isolation, and no duplicate final reply for a bridge-owned turn
 
 ## Standard commands

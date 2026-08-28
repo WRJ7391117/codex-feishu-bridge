@@ -1,5 +1,18 @@
 # Release Notes
 
+## 1.9.12 (build 48)
+
+- Adds the top-level Feishu “订阅 Task” menu so each authorized user can independently subscribe to up to twenty Tasks across permitted projects.
+- Persists per-user rollout cursors across restarts, skips historical results, retries failed sends with the same idempotency identity, and removes subscriptions when user, project, or Task access disappears.
+- Delivers new Desktop results, images, and linked files to every subscriber while suppressing only the originating user's duplicate bridge-owned reply.
+- Adds the eighth Event Key to first connection, advanced configuration, migration, documentation, and release validation.
+
+## 1.9.11 (build 47, unreleased)
+
+- Rebuilds first connection as a focused four-step wizard that shows one task at a time, keeps progress and back navigation visible, and advances after a successful connection check.
+- Keeps App ID and App Secret in the primary path while moving the local connection name and raw permission, callback, and Event Key values into Advanced Settings and a complete configuration checklist.
+- Replaces deployment-specific onboarding copy with a generic local-processing promise and keeps customer, project, user, Chat, private-server, and private-workflow details out of the public setup UI.
+
 ## 1.9.10 (build 46)
 
 - Renames the Desktop handoff submenu from “切换 Task 接续” to the clearer “接续其他 Task” while keeping the compatible `sync_desktop_switch` Event Key unchanged.

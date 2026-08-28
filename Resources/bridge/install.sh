@@ -148,6 +148,8 @@ def validate_config(payload) -> None:
         "archive_task_menu_event_key",
         "usage_menu_event_key",
         "desktop_sync_menu_event_key",
+        "desktop_sync_switch_menu_event_key",
+        "task_subscriptions_menu_event_key",
         "lark_cli_path",
         "codex_cli_path",
     )
@@ -378,6 +380,8 @@ defaults = {
     "archive_task_menu_event_key": "archive_task",
     "usage_menu_event_key": "codex_usage",
     "desktop_sync_menu_event_key": "sync_desktop",
+    "desktop_sync_switch_menu_event_key": "sync_desktop_switch",
+    "task_subscriptions_menu_event_key": "task_subscriptions",
 }
 before = path.lstat()
 descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
