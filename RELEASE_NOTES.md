@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.9.13 (build 49)
+
+- Refuses App and background-component updates while any Feishu-owned Task is still running, in addition to the existing queue and durable-delivery checks.
+- Enforces the same active-run gate inside the installer so command-line or automated updates cannot bypass the App safety check.
+
 ## 1.9.12 (build 48)
 
 - Adds the top-level Feishu “订阅 Task” menu so each authorized user can independently subscribe to up to twenty Tasks across permitted projects.

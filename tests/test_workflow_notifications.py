@@ -842,6 +842,25 @@ class InstallerSafetyTests(unittest.TestCase):
             self.assertIn("pending Feishu work", result.stderr)
             self.assertEqual(runtime.read_bytes(), original_runtime)
 
+    def test_installer_refuses_to_interrupt_active_feishu_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package, home, _config_path, _workflow_path, runtime = (
+                self._installer_fixture(Path(directory))
+            )
+            runtime_status = home / ".codex/feishu-bridge/runtime-status.json"
+            runtime_status.write_text(
+                json.dumps({"active_runs": 1}),
+                encoding="utf-8",
+            )
+            runtime_status.chmod(0o600)
+            original_runtime = runtime.read_bytes()
+
+            result = self._run_installer(package, home)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("active Feishu runs", result.stderr)
+            self.assertEqual(runtime.read_bytes(), original_runtime)
+
     def test_installer_adds_missing_menu_keys_without_overwriting_config(self):
         with tempfile.TemporaryDirectory() as directory:
             package, home, config_path, _workflow_path, _runtime = (
@@ -2165,12 +2184,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.9.12")
-        self.assertEqual(info["CFBundleVersion"], "48")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.9.13")
+        self.assertEqual(info["CFBundleVersion"], "49")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.9.12 (build 48)", readme)
-        self.assertIn("1.9.12 (build 48", release_notes)
+        self.assertIn("1.9.13 (build 49)", readme)
+        self.assertIn("1.9.13 (build 49", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):
@@ -2208,6 +2227,7 @@ class AppUpdaterSafetyTests(unittest.TestCase):
     def test_app_checks_destination_and_all_pending_queues_before_update(self):
         source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(encoding="utf-8")
         self.assertIn('URL(fileURLWithPath: "/Applications/Codex 飞书桥接.app")', source)
+        self.assertGreaterEqual(source.count("health.activeRuns == 0"), 2)
         self.assertIn("health.pendingInputs == 0", source)
         self.assertIn("health.pendingDeliveries == 0", source)
         self.assertIn("health.pendingTaskCreations == 0", source)

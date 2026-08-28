@@ -270,6 +270,23 @@ if state_path is not None:
             raise SystemExit(
                 "bridge has pending Feishu work; wait for all queues to clear before updating"
             )
+
+runtime_path = next(
+    (path for path in sections["files"] if path.name == "runtime-status.json"),
+    None,
+)
+if runtime_path is not None:
+    runtime_status = read_json(runtime_path, "existing runtime status is invalid")
+    if runtime_status is not None:
+        if not isinstance(runtime_status, dict):
+            raise SystemExit("existing runtime status is invalid")
+        active_runs = runtime_status.get("active_runs", 0)
+        if not isinstance(active_runs, int) or isinstance(active_runs, bool):
+            raise SystemExit("existing runtime status is invalid")
+        if active_runs > 0:
+            raise SystemExit(
+                "bridge has active Feishu runs; wait for them to finish before updating"
+            )
 PY
 
 if /bin/launchctl print "${domain}/${label}" >/dev/null 2>&1 || \

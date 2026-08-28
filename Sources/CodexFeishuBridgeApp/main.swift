@@ -619,12 +619,13 @@ private final class BridgeViewModel: ObservableObject {
     func installUpdate() {
         guard !isUpdating else { return }
         health = bridge.healthSnapshot()
-        guard health.pendingInputs == 0,
+        guard health.activeRuns == 0,
+              health.pendingInputs == 0,
               health.pendingDeliveries == 0,
               health.pendingTaskCreations == 0 else {
             presentError(
                 title: "暂不能更新",
-                message: "仍有排队消息、待补发结果或新建 Task 请求。全部处理完成后再更新，避免打断飞书任务。"
+                message: "仍有运行中的 Task、排队消息、待补发结果或新建 Task 请求。全部处理完成后再更新，避免打断飞书任务。"
             )
             return
         }
@@ -1008,12 +1009,13 @@ private final class BridgeViewModel: ObservableObject {
 
     func installComponents() {
         health = bridge.healthSnapshot()
-        guard health.pendingInputs == 0,
+        guard health.activeRuns == 0,
+              health.pendingInputs == 0,
               health.pendingDeliveries == 0,
               health.pendingTaskCreations == 0 else {
             presentError(
                 title: "暂不能更新后台组件",
-                message: "仍有飞书工作等待处理。队列清零后再更新，现有消息不会被打断。"
+                message: "仍有运行中的 Task 或飞书工作等待处理。全部完成后再更新，现有消息不会被打断。"
             )
             return
         }
