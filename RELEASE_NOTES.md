@@ -1,5 +1,14 @@
 # Release Notes
 
+## 1.9.30 (build 68)
+
+- Opens Codex through its registered `codex://` launch URL after copying the setup prompt, so DeepOri Bridge no longer accesses the ChatGPT application bundle and does not trigger macOS App Management protection.
+
+## 1.9.29 (build 67)
+
+- Makes the first-connection choice page more compact, replaces ambiguous repeated actions with explicit Codex and manual setup buttons, and removes the inactive-looking footer label.
+- Replaces the focused text-style close control with a standard close icon while preserving its tooltip and accessibility label.
+
 ## 1.9.28 (build 64)
 
 - Adds two first-connection paths: Codex-assisted setup with a bundled local Skill and the existing manual four-step assistant.

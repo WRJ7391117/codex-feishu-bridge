@@ -61,7 +61,10 @@ class ProductOnboardingTests(unittest.TestCase):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
             "private struct ConfigurationChecklistView", 1
         )[0]
-        self.assertIn('Button("关闭向导"', setup)
+        self.assertIn('.accessibilityLabel("关闭向导")', setup)
+        self.assertIn('.help("关闭向导")', setup)
+        self.assertIn('Image(systemName: "xmark.circle.fill")', setup)
+        self.assertIn(".focusable(false)", setup)
         self.assertIn("现有连接已可用", setup)
         self.assertIn('Button("重新配置凭证"', setup)
 
@@ -142,11 +145,22 @@ class ProductOnboardingTests(unittest.TestCase):
             "已复制，可在 Codex 粘贴",
             "改用手动配置",
             "不需要安装飞书插件",
+            "使用 Codex 配置",
+            "使用手动向导",
+            "推荐 · 无需额外安装",
         ):
             self.assertIn(text, setup)
+        self.assertNotIn("选择此方式", setup)
         self.assertIn("$deepori-bridge-setup", self.source)
         self.assertIn("prepareCodexAssistedSetup", self.source)
         self.assertIn("installCodexSetupSkill", self.source)
+
+    def test_copy_prompt_opens_codex_through_registered_url(self):
+        open_codex = self.source.split("func openCodexDesktop", 1)[1].split(
+            "func control", 1
+        )[0]
+        self.assertIn('URL(string: "codex://")', open_codex)
+        self.assertNotIn("urlForApplication", open_codex)
 
     def test_manual_user_step_uses_plain_user_language(self):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(

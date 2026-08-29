@@ -227,9 +227,8 @@ private final class BridgeController: @unchecked Sendable {
     }
 
     func openCodexDesktop() -> CommandResult {
-        guard let appURL = NSWorkspace.shared.urlForApplication(
-            withBundleIdentifier: "com.openai.codex"
-        ), NSWorkspace.shared.open(appURL) else {
+        guard let launchURL = URL(string: "codex://"),
+              NSWorkspace.shared.open(launchURL) else {
             return CommandResult(status: 1, output: "没有找到 Codex Desktop，请先安装或手动打开。")
         }
         return CommandResult(status: 0, output: "Codex Desktop 已打开。")
@@ -1707,7 +1706,8 @@ private struct ConnectionSetupView: View {
                         icon: "sparkles",
                         title: "让 Codex 帮我配置",
                         detail: "安装本地配置 Skill，复制一段指令到你自己的 Codex Task。Codex 会尽可能自动操作，只在必要时请你确认。",
-                        note: "推荐 · 不需要安装飞书插件"
+                        note: "推荐 · 无需额外安装",
+                        buttonTitle: "使用 Codex 配置"
                     ) {
                         if model.prepareCodexAssistedSetup() {
                             setupPath = .codex
@@ -1717,7 +1717,8 @@ private struct ConnectionSetupView: View {
                         icon: "hand.tap",
                         title: "我自己手动配置",
                         detail: "按照四步向导创建飞书应用、连接凭证、配置机器人，并添加可以使用的飞书账号。",
-                        note: "适合希望逐项核对的用户"
+                        note: "适合希望逐项核对的用户",
+                        buttonTitle: "使用手动向导"
                     ) {
                         setupPath = .manual
                     }
@@ -1807,61 +1808,61 @@ private struct ConnectionSetupView: View {
         title: String,
         detail: String,
         note: String,
+        buttonTitle: String,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 16) {
-                Image(systemName: icon)
-                    .font(.system(size: 34, weight: .medium))
-                    .foregroundStyle(Color.accentColor)
-                Text(title)
-                    .font(.title2.weight(.semibold))
-                Text(detail)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer()
-                Text(note)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(Color.accentColor)
+        VStack(alignment: .leading, spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 34, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+            Text(title)
+                .font(.title2.weight(.semibold))
+            Text(detail)
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(note)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Color.accentColor)
+            Button(action: action) {
                 HStack {
-                    Text("选择此方式")
+                    Text(buttonTitle)
                         .font(.callout.weight(.semibold))
                     Spacer()
                     Image(systemName: "arrow.right.circle.fill")
                 }
-                .foregroundStyle(Color.accentColor)
             }
-            .padding(24)
-            .frame(maxWidth: .infinity, minHeight: 300, alignment: .topLeading)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.55))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .buttonStyle(.bordered)
+            .controlSize(.large)
         }
-        .buttonStyle(.plain)
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+        }
     }
 
     private var setupPathFooter: some View {
         HStack {
-            Button(setupPath == .codex ? "返回选择" : "稍后设置") {
-                if setupPath == .codex {
-                    setupPath = .choice
-                } else {
-                    model.showConnectionSetup = false
-                }
-            }
-            Spacer()
-            Text(setupPath == .codex ? "Codex 自动配置" : "选择配置方式")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Spacer()
             if setupPath == .codex {
+                Button("返回选择") {
+                    setupPath = .choice
+                }
+                Spacer()
+                Text("Codex 自动配置")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer()
                 Button("改用手动配置") { setupPath = .manual }
                     .buttonStyle(.bordered)
+            } else {
+                Button("稍后设置") {
+                    model.showConnectionSetup = false
+                }
+                Spacer()
             }
         }
         .padding(.horizontal, 28)
@@ -1894,10 +1895,20 @@ private struct ConnectionSetupView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("关闭向导", systemImage: "xmark") {
+            Button {
                 model.showConnectionSetup = false
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 22, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
+                    .padding(4)
+                    .contentShape(Circle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
+            .focusable(false)
+            .help("关闭向导")
+            .accessibilityLabel("关闭向导")
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 18)
