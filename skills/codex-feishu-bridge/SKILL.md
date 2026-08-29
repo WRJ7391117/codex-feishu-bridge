@@ -1,9 +1,9 @@
 ---
 name: codex-feishu-bridge
-description: Install, configure, operate, upgrade, or diagnose the Codex Feishu Bridge macOS app that connects Feishu Bot messages to Codex Desktop tasks.
+description: Install, configure, operate, upgrade, or diagnose the DeepOri Bridge macOS app that connects Feishu Bot messages to Codex Desktop tasks.
 ---
 
-# Codex Feishu Bridge
+# DeepOri Bridge
 
 Use this skill for the local macOS bridge published at `WRJ7391117/codex-feishu-bridge`. The bridge lets approved Feishu users select, continue, create, search, and archive permitted Codex Desktop Tasks from Feishu.
 

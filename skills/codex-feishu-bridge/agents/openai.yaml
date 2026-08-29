@@ -1,4 +1,4 @@
 interface:
-  display_name: "Codex 飞书桥接"
+  display_name: "DeepOri Bridge"
   short_description: "安装、配置并诊断飞书与 Codex Desktop 双向桥接"
   default_prompt: "Use $codex-feishu-bridge to inspect and configure the Codex Feishu Bridge on this Mac."

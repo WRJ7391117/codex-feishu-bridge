@@ -10,7 +10,7 @@ support_dir="${HOME}/Library/Application Support/Codex Feishu Bridge"
 config="${support_dir}/config.json"
 bridge="${support_dir}/bridge.py"
 
-print "Codex 飞书桥接诊断"
+print "DeepOri Bridge 诊断"
 print "=================="
 
 if [[ -x "${support_dir}/lark-cli" ]]; then

@@ -3,6 +3,15 @@ import Combine
 import Foundation
 import SwiftUI
 
+private enum ProductBrand {
+    static let name = "DeepOri Bridge"
+    static let edition = "for macOS"
+    static let systemRequirement = "macOS 13+"
+    static let purpose = "连接 Codex 与飞书"
+    static let tagline = "通过飞书继续 Mac 上已有的 Codex Task"
+    static let localPromise = "仅在这台 Mac 上运行，Codex 内容不会经过第三方服务器。"
+}
+
 private struct CommandResult {
     let status: Int32
     let output: String
@@ -1263,9 +1272,9 @@ private struct MainView: View {
                 .frame(width: 64, height: 64)
                 .cornerRadius(14)
             VStack(alignment: .leading, spacing: 5) {
-                Text("Codex 飞书桥接")
+                Text(ProductBrand.name)
                     .font(.system(size: 26, weight: .semibold))
-                Text("通过飞书继续 Mac 上已有的 Codex Task")
+                Text("\(ProductBrand.tagline) · \(ProductBrand.edition)")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
             }
@@ -1287,7 +1296,7 @@ private struct MainView: View {
                     .foregroundStyle(model.isRunning ? .green : .secondary)
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text(model.isRunning ? "桥接已开启" : "桥接已关闭")
+                Text(model.isRunning ? "\(ProductBrand.name) 已开启" : "\(ProductBrand.name) 已关闭")
                     .font(.title3.weight(.semibold))
                 Text(model.isRunning
                      ? "事件监听 \(model.health.activeConsumers)/3 · 运行 \(model.health.activeRuns)/\(model.health.maxConcurrentRuns)"
@@ -1494,106 +1503,168 @@ private struct ConnectionSetupView: View {
     @State private var currentStep = 1
     @State private var showAdvancedSettings = false
     @State private var showConfigurationChecklist = false
+    @State private var confirmedSteps = Set<Int>()
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                sidebar
-                    .frame(width: 245)
-                Divider()
-                VStack(spacing: 0) {
-                    HStack {
-                        Spacer()
-                        Button("关闭向导", systemImage: "xmark") {
-                            model.showConnectionSetup = false
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 12)
-                    Divider()
-                    stepContent
-                    Spacer(minLength: 0)
-                    Divider()
-                    footer
-                }
-            }
+            header
+            Divider()
+            progressBar
+                .padding(.horizontal, 34)
+                .padding(.vertical, 22)
+            workspace
+                .padding(.horizontal, 28)
+                .padding(.bottom, 22)
+            Divider()
+            footer
         }
-        .frame(width: 900, height: 650)
+        .frame(width: 1120, height: 760)
+        .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $showConfigurationChecklist) {
             ConfigurationChecklistView(model: model)
         }
-        .onChange(of: model.setupPassed) { passed in
-            if passed && currentStep == 2 && !model.setupUsesExistingProfile {
-                currentStep = 3
-            }
-        }
     }
 
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 48, height: 48)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("连接飞书")
+    private var header: some View {
+        HStack(spacing: 14) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 48, height: 48)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(ProductBrand.name)
                         .font(.title3.weight(.semibold))
-                    Text("桥接仅在这台 Mac 上运行，Codex 内容不会经过第三方服务器。")
+                    Text(ProductBrand.edition)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.accentColor.opacity(0.10))
+                        .clipShape(Capsule())
+                    Text(ProductBrand.systemRequirement)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("\(ProductBrand.purpose) · \(ProductBrand.localPromise)")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("关闭向导", systemImage: "xmark") {
+                model.showConnectionSetup = false
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 18)
+    }
+
+    private var progressBar: some View {
+        HStack(spacing: 0) {
+            ForEach(1...4, id: \.self) { step in
+                progressStep(step)
+                if step < 4 {
+                    Rectangle()
+                        .fill(step < currentStep ? Color.green.opacity(0.55) : Color.secondary.opacity(0.22))
+                        .frame(height: 1)
+                        .padding(.horizontal, 14)
                 }
             }
-            .padding(.bottom, 34)
+        }
+    }
 
-            ForEach(1...4, id: \.self) { step in
-                sidebarStep(step)
+    private func progressStep(_ step: Int) -> some View {
+        let titles = ["创建应用", "连接应用", "配置机器人", "授权用户"]
+        let complete = step < currentStep || (step == 2 && model.setupPassed && currentStep > 2)
+        let current = step == currentStep
+        let available = step <= currentStep || step == 2
+
+        return Button {
+            currentStep = step
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: complete ? "checkmark.circle.fill" : "\(step).circle")
+                    .font(.system(size: 27, weight: .medium))
+                    .foregroundStyle(complete ? Color.green : (current ? Color.accentColor : Color.secondary))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(titles[step - 1])
+                        .font(.callout.weight(current ? .semibold : .medium))
+                        .foregroundStyle(current ? Color.primary : Color.secondary)
+                    Text(complete ? "已完成" : (current ? "进行中" : "待开始"))
+                        .font(.caption)
+                        .foregroundStyle(current ? Color.accentColor : Color.secondary)
+                }
             }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!available)
+    }
 
-            Spacer()
-            Text("第 \(currentStep) 步，共 4 步")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 12)
-            Button("查看完整配置清单", systemImage: "list.bullet.clipboard") {
-                showConfigurationChecklist = true
+    private var workspace: some View {
+        HStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    mainPanel
+                }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(30)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 18) {
+                statusPanel
+            }
+                .frame(width: 330)
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .padding(28)
+        }
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.34))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var mainPanel: some View {
+        switch currentStep {
+        case 1:
+            sectionHeader(
+                "现在去飞书完成 2 项准备",
+                "\(ProductBrand.name) 需要一个由你管理的企业自建应用。"
+            )
+            instructionRow(
+                icon: "plus.app.fill",
+                title: "创建企业自建应用",
+                detail: "应用名称和图标可以按团队习惯设置。"
+            )
+            Divider()
+            instructionRow(
+                icon: "person.badge.shield.checkmark.fill",
+                title: "确认你有应用管理权限",
+                detail: "后续需要开启机器人、添加事件并发布版本。"
+            )
+            Divider()
+            HStack(spacing: 18) {
+                Button("打开飞书开发者后台", systemImage: "arrow.up.right.square") {
+                    model.openDeveloperConsole()
+                }
+                Button("查看完整配置清单", systemImage: "list.bullet.clipboard") {
+                    showConfigurationChecklist = true
+                }
             }
             .buttonStyle(.link)
-        }
-        .padding(24)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
-    }
 
-    private var tenantStep: some View {
-        setupPage(
-            title: "创建飞书应用",
-            subtitle: "在飞书开放平台创建一个企业自建应用。它将作为你在飞书里使用 Codex 的机器人。"
-        ) {
-            instructionRow(
-                icon: "plus.app",
-                title: "创建企业自建应用",
-                detail: "应用名称和图标可按你的团队习惯设置。"
+        case 2:
+            sectionHeader(
+                "连接你的飞书应用",
+                "优先使用本机已保存的连接；只有更换应用时才需要重新输入凭证。"
             )
-            instructionRow(
-                icon: "person.crop.circle.badge.checkmark",
-                title: "确认你有管理权限",
-                detail: "后续需要为应用开启机器人能力并发布版本。"
-            )
-            Button("打开飞书开放平台", systemImage: "arrow.up.right.square") {
-                model.openDeveloperConsole()
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-        }
-    }
-
-    private var credentialStep: some View {
-        setupPage(
-            title: "连接你的飞书应用",
-            subtitle: "优先使用这台 Mac 已保存的连接；只有更换飞书应用时才需要重新输入凭证。"
-        ) {
             if model.setupUsesExistingProfile {
                 VStack(alignment: .leading, spacing: 12) {
                     Label(
@@ -1614,7 +1685,7 @@ private struct ConnectionSetupView: View {
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.green.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
             } else {
                 HStack {
                     Spacer()
@@ -1652,128 +1723,201 @@ private struct ConnectionSetupView: View {
                 }
             }
 
-            connectionStatus
-
-            if !model.setupUsesExistingProfile {
-                HStack {
-                    Spacer()
-                    if !model.setupResult.isEmpty && !model.setupPassed {
-                        Button("重新检查") { model.recheckProfile() }
-                            .disabled(model.isConfiguringProfile)
-                    }
-                    Button(model.isConfiguringProfile ? "正在检查…" : "保存并检查连接") {
-                        model.configureProfileAndCheck()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(model.isConfiguringProfile)
-                }
-            }
-        }
-    }
-
-    private var consoleStep: some View {
-        setupPage(
-            title: "配置机器人",
-            subtitle: "回到飞书开放平台，完成三个设置，让机器人可以收发消息和响应菜单。"
-        ) {
+        case 3:
+            sectionHeader(
+                "现在去飞书完成 3 项设置",
+                "这三项共同决定机器人能否收发消息、响应卡片和显示菜单。"
+            )
             instructionRow(
-                icon: "message",
-                title: "开启机器人能力",
+                icon: "message.fill",
+                title: "1. 开启机器人能力",
                 detail: "在“添加应用能力”中添加机器人。"
             )
+            Divider()
             instructionRow(
-                icon: "checkmark.shield",
-                title: "添加权限与事件",
-                detail: "按完整配置清单逐项添加，避免遗漏。"
+                icon: "bubble.left.and.bubble.right.fill",
+                title: "2. 添加消息、卡片与菜单事件",
+                detail: "按完整配置清单添加三个事件消费者和菜单 Event Key。"
             )
+            Divider()
             instructionRow(
-                icon: "paperplane",
-                title: "创建并发布版本",
-                detail: "发布后，飞书菜单通常会在几分钟内生效。"
+                icon: "square.and.arrow.up.fill",
+                title: "3. 创建并发布应用版本",
+                detail: "发布后设置才会生效，菜单通常会在几分钟内刷新。"
             )
+            Divider()
             HStack(spacing: 10) {
-                Button("打开飞书开放平台", systemImage: "arrow.up.right.square") {
+                Button("打开飞书开发者后台", systemImage: "arrow.up.right.square") {
                     model.openDeveloperConsole()
                 }
-                .buttonStyle(.borderedProminent)
                 Button("查看完整配置清单", systemImage: "list.bullet.clipboard") {
                     showConfigurationChecklist = true
                 }
             }
-            Text("权限与版本发布需要由飞书应用管理员确认。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .buttonStyle(.link)
+
+        default:
+            sectionHeader(
+                "授权首位使用者",
+                "用需要使用 \(ProductBrand.name) 的飞书账号单聊机器人，再完成项目授权。"
+            )
+            instructionRow(
+                icon: "person.crop.circle.badge.plus",
+                title: "1. 启动两分钟识别",
+                detail: "\(ProductBrand.name) 会生成一次性验证码并等待一条新的机器人单聊消息。"
+            )
+            Divider()
+            instructionRow(
+                icon: "ellipsis.message.fill",
+                title: "2. 在飞书发送验证码",
+                detail: "只接受这次显示的验证码，不会把普通历史消息识别为授权请求。"
+            )
         }
     }
 
-    private var authorizationStep: some View {
-        setupPage(
-            title: "授权使用者",
-            subtitle: "用需要使用桥接的飞书账号单聊机器人，并发送 App 显示的六位验证码，然后完成项目授权。"
-        ) {
-            instructionRow(
-                icon: "1.circle",
-                title: "开始识别",
-                detail: "点击下方按钮后，App 会等待一条新的机器人单聊消息。"
+    @ViewBuilder
+    private var statusPanel: some View {
+        switch currentStep {
+        case 1:
+            sidePanelHeader(
+                icon: confirmedSteps.contains(1) ? "checkmark.shield.fill" : "shield",
+                title: confirmedSteps.contains(1) ? "准备已确认" : "完成后继续",
+                detail: confirmedSteps.contains(1)
+                    ? "可以进入下一步，连接刚刚创建的飞书应用。"
+                    : "完成左侧两项准备后，在这里确认。"
             )
-            instructionRow(
-                icon: "2.circle",
-                title: "在飞书发送消息",
-                detail: "打开机器人单聊，发送任意文字即可。"
+            Spacer()
+            Button(confirmedSteps.contains(1) ? "已完成" : "我已完成") {
+                confirmedSteps.insert(1)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(confirmedSteps.contains(1))
+
+        case 2:
+            connectionStatusPanel
+            Spacer()
+            if !model.setupUsesExistingProfile {
+                if !model.setupResult.isEmpty && !model.setupPassed {
+                    Button("重新检查") { model.recheckProfile() }
+                        .disabled(model.isConfiguringProfile)
+                }
+                Button(model.isConfiguringProfile ? "正在检查…" : "保存并检查连接") {
+                    model.configureProfileAndCheck()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(model.isConfiguringProfile)
+            }
+
+        case 3:
+            sidePanelHeader(
+                icon: consoleCheckPassed ? "checkmark.shield.fill" : "checkmark.shield",
+                title: consoleCheckPassed ? "基础连接检查通过" : "完成后检查",
+                detail: consoleCheckPassed
+                    ? "\(ProductBrand.name) 已确认 Bot 身份和飞书网络可用。权限、事件与版本仍以开放平台显示为准。"
+                    : "检查 Bot 身份和飞书网络，并保留一份清晰的人工核对边界。"
             )
-            Button(model.isDiscoveringUser ? "正在等待飞书消息…" : "开始识别使用者") {
+            Spacer()
+            Button(
+                model.isConfiguringProfile
+                    ? "正在检查…"
+                    : (consoleCheckPassed ? "重新检查" : "我已完成，开始检查")
+            ) {
+                confirmedSteps.insert(3)
+                model.recheckProfile()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(model.isConfiguringProfile)
+
+        default:
+            sidePanelHeader(
+                icon: authorizationStatusIcon,
+                title: authorizationStatusTitle,
+                detail: authorizationStatusDetail
+            )
+            Spacer()
+            Button(
+                model.isDiscoveringUser
+                    ? "正在等待飞书消息…"
+                    : (model.hasConfiguredUsers ? "识别新使用者" : "开始识别使用者")
+            ) {
                 model.discoverFirstUser()
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .disabled(!model.setupPassed || model.isDiscoveringUser)
 
-            if !model.userDiscoveryResult.isEmpty {
-                Label(
-                    model.userDiscoveryResult,
-                    systemImage: model.discoveredOpenID.isEmpty
-                        ? "hourglass"
-                        : "checkmark.circle.fill"
-                )
-                .font(.callout)
-                .foregroundStyle(
-                    model.discoveredOpenID.isEmpty ? Color.secondary : Color.green
-                )
-                .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Text("识别成功后，仍需由 Mac 机主明确选择该用户可以访问的 Codex 项目；不会默认开放全部项目。")
+            Text("识别成功后仍需明确选择可访问的 Codex 项目，不会默认开放全部项目。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
+    private var connectionStatusPanel: some View {
+        let icon = model.isConfiguringProfile
+            ? "clock"
+            : (model.setupPassed ? "checkmark.shield.fill" : "bolt.horizontal.circle")
+        let title = model.setupPassed
+            ? "连接检查通过"
+            : (model.isConfiguringProfile ? "正在检查连接" : "等待检查")
+        let detail = model.setupResult.isEmpty
+            ? "保存后，\(ProductBrand.name) 会自动验证 Bot 身份和飞书网络。"
+            : model.setupResult
+
+        return sidePanelHeader(icon: icon, title: title, detail: detail)
+    }
+
+    private var consoleCheckPassed: Bool {
+        confirmedSteps.contains(3) && model.setupPassed && !model.isConfiguringProfile
+    }
+
+    private var authorizationStatusIcon: String {
+        if !model.discoveredOpenID.isEmpty || model.hasConfiguredUsers {
+            return "person.crop.circle.badge.checkmark"
+        }
+        return "person.badge.clock"
+    }
+
+    private var authorizationStatusTitle: String {
+        if !model.discoveredOpenID.isEmpty {
+            return "使用者已识别"
+        }
+        return model.hasConfiguredUsers ? "已有授权用户" : "等待识别"
+    }
+
+    private var authorizationStatusDetail: String {
+        if !model.userDiscoveryResult.isEmpty {
+            return model.userDiscoveryResult
+        }
+        if model.hasConfiguredUsers {
+            return "可以直接打开授权设置；需要添加其他用户时，再启动一次识别。"
+        }
+        return "启动识别后，请按这里显示的提示到飞书发送验证码。"
+    }
+
     private var footer: some View {
         HStack {
-            Button("关闭向导") { model.showConnectionSetup = false }
-                .keyboardShortcut(.cancelAction)
-            Spacer()
             if currentStep > 1 {
-                Button("上一步") { currentStep -= 1 }
+                Button("返回") { currentStep -= 1 }
+            } else {
+                Button("稍后设置") { model.showConnectionSetup = false }
+                    .keyboardShortcut(.cancelAction)
             }
+            Spacer()
+            Text("第 \(currentStep) 步，共 4 步")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
             Button(primaryFooterTitle) { advance() }
                 .buttonStyle(.borderedProminent)
                 .disabled(!canAdvance)
+                .frame(minWidth: 110)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 14)
-    }
-
-    @ViewBuilder
-    private var stepContent: some View {
-        switch currentStep {
-        case 1: tenantStep
-        case 2: credentialStep
-        case 3: consoleStep
-        default: authorizationStep
-        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 16)
     }
 
     private var primaryFooterTitle: String {
@@ -1782,13 +1926,17 @@ private struct ConnectionSetupView: View {
 
     private var canAdvance: Bool {
         switch currentStep {
+        case 1:
+            return confirmedSteps.contains(1)
         case 2:
             return model.setupPassed
+        case 3:
+            return consoleCheckPassed
         case 4:
             return model.setupPassed
                 && (model.hasConfiguredUsers || !model.discoveredOpenID.isEmpty)
         default:
-            return true
+            return false
         }
     }
 
@@ -1800,83 +1948,48 @@ private struct ConnectionSetupView: View {
         }
     }
 
-    private func sidebarStep(_ step: Int) -> some View {
-        let titles = ["创建飞书应用", "连接应用", "配置机器人", "授权使用者"]
-        let isCurrent = currentStep == step
-        let isComplete = step < currentStep || (step == 2 && model.setupPassed)
-        let isLocked = step > 2 && !model.setupPassed
-
-        return Button {
-            currentStep = step
-        } label: {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: isComplete ? "checkmark.circle.fill" : (isLocked ? "lock.circle" : "\(step).circle.fill"))
-                    .font(.title2)
-                    .foregroundStyle(isComplete ? Color.green : (isCurrent ? Color.accentColor : Color.secondary))
-                    .frame(width: 28)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(titles[step - 1])
-                        .font(.body.weight(isCurrent ? .semibold : .regular))
-                        .foregroundStyle(isCurrent ? Color.primary : Color.secondary)
-                    Text(isComplete ? "已完成" : (isCurrent ? "进行中" : "等待中"))
-                        .font(.caption)
-                        .foregroundStyle(isCurrent ? Color.accentColor : Color.secondary)
-                }
-                Spacer()
-            }
-            .contentShape(Rectangle())
-            .padding(.vertical, 10)
+    private func sectionHeader(_ title: String, _ subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.title2.weight(.semibold))
+            Text(subtitle)
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .buttonStyle(.plain)
-        .disabled(isLocked)
+        .padding(.bottom, 6)
     }
 
-    private func setupPage<Content: View>(
-        title: String,
-        subtitle: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Text(title)
-                    .font(.largeTitle.weight(.semibold))
-                Text(subtitle)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                content()
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(36)
-        }
-    }
-
-    private var connectionStatus: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: model.isConfiguringProfile ? "clock" : (model.setupPassed ? "checkmark.circle.fill" : "bolt.horizontal.circle"))
-                .font(.title3)
-                .foregroundStyle(model.setupPassed ? Color.green : Color.secondary)
+    private func sidePanelHeader(icon: String, title: String, detail: String) -> some View {
+        VStack(alignment: .center, spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 52, weight: .light))
+                .foregroundStyle(title.contains("通过") || title.contains("已") ? Color.green : Color.accentColor)
+                .frame(height: 64)
             VStack(alignment: .leading, spacing: 4) {
-                Text(model.setupPassed ? "连接检查通过" : (model.isConfiguringProfile ? "正在检查连接" : "等待检查"))
-                    .font(.callout.weight(.semibold))
-                Text(model.setupResult.isEmpty ? "保存后，App 会自动验证连接是否可用。" : model.setupResult)
-                    .font(.caption)
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .frame(maxWidth: .infinity, alignment: .center)
+                Text(detail)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer()
         }
-        .padding(14)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .frame(maxWidth: .infinity)
     }
 
     private func instructionRow(icon: String, title: String, detail: String) -> some View {
         HStack(alignment: .top, spacing: 14) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 28)
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.10))
+                    .frame(width: 46, height: 46)
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundStyle(Color.accentColor)
+            }
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(.headline)
@@ -1886,6 +1999,7 @@ private struct ConnectionSetupView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .padding(.vertical, 8)
     }
 
     private func setupField(
@@ -2368,7 +2482,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        newWindow.title = "Codex 飞书桥接"
+        newWindow.title = ProductBrand.name
         newWindow.titlebarAppearsTransparent = true
         newWindow.isReleasedWhenClosed = false
         newWindow.minSize = NSSize(width: 700, height: 500)
@@ -2390,15 +2504,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
-        let appMenu = NSMenu(title: "Codex 飞书桥接")
+        let appMenu = NSMenu(title: ProductBrand.name)
         appMenu.addItem(
-            withTitle: "关于 Codex 飞书桥接",
+            withTitle: "关于 \(ProductBrand.name)",
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
         )
         appMenu.addItem(.separator())
         appMenu.addItem(
-            withTitle: "退出 Codex 飞书桥接",
+            withTitle: "退出 \(ProductBrand.name)",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
@@ -2449,14 +2563,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let image = NSImage(
             systemSymbolName: "arrow.left.arrow.right.circle",
-            accessibilityDescription: "Codex 飞书桥接"
+            accessibilityDescription: ProductBrand.name
         ) {
             image.isTemplate = true
             statusItem.button?.image = image
         } else {
             statusItem.button?.title = "↔"
         }
-        statusItem.button?.toolTip = "Codex 飞书桥接"
+        statusItem.button?.toolTip = ProductBrand.name
 
         let menu = NSMenu()
         let open = NSMenuItem(title: "打开控制中心", action: #selector(showMainWindow), keyEquivalent: "o")

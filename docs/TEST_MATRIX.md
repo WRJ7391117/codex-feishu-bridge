@@ -1,4 +1,4 @@
-# Codex Feishu Bridge 2.0 test matrix
+# DeepOri Bridge 2.0 test matrix
 
 Status: Working Draft
 

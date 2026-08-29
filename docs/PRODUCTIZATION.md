@@ -1,4 +1,4 @@
-# Codex Feishu Bridge 2.0 product boundary
+# DeepOri Bridge 2.0 product boundary
 
 Status: Working Draft
 

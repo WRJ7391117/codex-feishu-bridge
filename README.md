@@ -1,8 +1,10 @@
-# Codex 飞书桥接
+# DeepOri Bridge for macOS
 
-把飞书 Bot 变成 Codex Desktop 的移动入口：在飞书里按项目选择桌面版左侧栏中的 Task，发送文字、图片、文件或音频，并接收可更新的运行状态和最终结果。
+连接 Codex 与飞书，把飞书 Bot 变成 Codex Desktop 的移动入口：在飞书里按项目选择桌面版左侧栏中的 Task，发送文字、图片、文件或音频，并接收可更新的运行状态和最终结果。
 
-版本说明：当前源码和本机构建为 `1.9.25 (build 61)`。不得用旧版本或同版本不同构建覆盖。
+DeepOri Bridge 是独立开源工具，并非 OpenAI、飞书或 Lark 官方产品。
+
+版本说明：当前源码和本机构建为 `1.9.26 (build 62)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
 
 面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
@@ -94,7 +96,7 @@ App 已内置桥接所需的专用 `lark-cli`；普通用户无需先安装命�
 
 ### 3. 使用首次连接向导
 
-首次打开 App 后点击“首次连接向导”，填写自己的飞书 App ID 和 App Secret。Secret 只通过 stdin 交给内置 `lark-cli`，由它存入 macOS Keychain，不会进入进程参数、桥接 `config.json` 或日志。
+首次打开 DeepOri Bridge 后点击“首次连接向导”，填写自己的飞书 App ID 和 App Secret。Secret 只通过 stdin 交给内置 `lark-cli`，由它存入 macOS Keychain，不会进入进程参数、桥接 `config.json` 或日志。
 
 需要用终端维护时，才使用系统 `lark-cli`：
 

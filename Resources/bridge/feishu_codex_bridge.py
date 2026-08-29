@@ -1433,7 +1433,7 @@ def codex_app_server_requests(
                 "params": {
                     "clientInfo": {
                         "name": "codex-feishu-bridge",
-                        "title": "Codex Feishu Bridge",
+                        "title": "DeepOri Bridge",
                         "version": "1",
                     }
                 },
@@ -8233,7 +8233,7 @@ def build_access_request_card(already_pending: bool = False) -> dict[str, Any]:
         },
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 访问申请"},
-            "subtitle": {"tag": "plain_text", "content": "Codex 飞书桥接"},
+            "subtitle": {"tag": "plain_text", "content": "DeepOri Bridge"},
             "template": "yellow",
             "icon": {"tag": "standard_icon", "token": "approval_colorful"},
             "text_tag_list": [

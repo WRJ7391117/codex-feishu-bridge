@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
-    <string>Codex 飞书桥接</string>
+    <string>DeepOri Bridge</string>
     <key>CFBundleExecutable</key>
     <string>CodexFeishuBridge</string>
     <key>CFBundleIconFile</key>
@@ -15,13 +15,13 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Codex Feishu Bridge</string>
+    <string>DeepOri Bridge</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-	<string>1.9.25</string>
+	<string>1.9.26</string>
     <key>CFBundleVersion</key>
-	<string>61</string>
+	<string>62</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

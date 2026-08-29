@@ -1,5 +1,12 @@
 # Release Notes
 
+## 1.9.26 (build 62)
+
+- Introduces the public product name “DeepOri Bridge” while preserving the existing bundle identifier, local data directory, and installed App path for upgrade compatibility.
+- Labels this distribution as “for macOS” and shows the macOS 13+ requirement in the product and onboarding surfaces.
+- Rebuilds the first-connection assistant around the selected horizontal four-step layout, with one clear work area and a separate status/check panel.
+- Keeps automatic checks honest: the App verifies Bot identity and Feishu connectivity, while permissions, events, and version publication remain explicit administrator checks.
+
 ## 1.9.25 (build 61)
 
 - Reorganizes the Bot menu under “模型设置”, separates Task model controls from context compaction, and keeps Codex quota as an account-level submenu.

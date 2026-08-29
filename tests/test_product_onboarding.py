@@ -18,6 +18,7 @@ BUILD_SCRIPT = ROOT / "scripts/build-app.sh"
 LOCAL_INSTALLER = ROOT / "scripts/install-local.sh"
 PUBLIC_INSTALLER = ROOT / "skills/codex-feishu-bridge/scripts/install-latest.sh"
 README = ROOT / "README.md"
+INFO_PLIST = ROOT / "Resources/Info.plist"
 
 
 class ProductOnboardingTests(unittest.TestCase):
@@ -102,13 +103,30 @@ class ProductOnboardingTests(unittest.TestCase):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
             "private struct ConfigurationView", 1
         )[0]
-        for title in ("创建飞书应用", "连接应用", "配置机器人", "授权使用者"):
+        for title in ("创建应用", "连接应用", "配置机器人", "授权用户"):
             self.assertIn(title, setup)
         self.assertIn("switch currentStep", setup)
         self.assertIn("查看完整配置清单", setup)
-        self.assertIn("桥接仅在这台 Mac 上运行，Codex 内容不会经过第三方服务器。", setup)
+        self.assertIn("ProductBrand.localPromise", setup)
         for private_name in ("Roger", "DeepOri", "Ori One"):
-            self.assertNotIn(private_name, setup)
+            if private_name != "DeepOri":
+                self.assertNotIn(private_name, setup)
+
+    def test_public_product_name_and_selected_layout_are_visible(self):
+        setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
+            "private struct ConfigurationChecklistView", 1
+        )[0]
+        self.assertIn('static let name = "DeepOri Bridge"', self.source)
+        self.assertIn('static let edition = "for macOS"', self.source)
+        self.assertIn('static let systemRequirement = "macOS 13+"', self.source)
+        self.assertIn("ProductBrand.name", setup)
+        self.assertIn("progressBar", setup)
+        self.assertIn("workspace", setup)
+        self.assertIn("statusPanel", setup)
+        self.assertIn("现在去飞书完成 3 项设置", setup)
+        self.assertIn("我已完成，开始检查", setup)
+        info = INFO_PLIST.read_text(encoding="utf-8")
+        self.assertGreaterEqual(info.count("DeepOri Bridge"), 2)
 
     def test_setup_keeps_technical_connection_details_out_of_the_main_path(self):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
