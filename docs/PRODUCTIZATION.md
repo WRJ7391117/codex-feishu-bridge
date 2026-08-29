@@ -57,3 +57,5 @@ Optional automation-extension source remains visible in this repository for exis
 - `2.0`: public documentation, version/release automation, signed and notarized package when an Apple Developer identity is available.
 
 Until notarization is available, Releases must say that the App is ad-hoc signed and requires Finder -> right-click -> Open on first launch. The product must never tell users to disable Gatekeeper or remove quarantine attributes.
+
+The version tag workflow is the single GitHub Release publisher. Operators push the matching tag and let that workflow create the Release; its publish step is idempotent and replaces verified assets when the same Release already exists.

@@ -21,6 +21,7 @@ README = ROOT / "README.md"
 INFO_PLIST = ROOT / "Resources/Info.plist"
 SETUP_SKILL = ROOT / "skills/deepori-bridge-setup/SKILL.md"
 SETUP_SKILL_AGENT = ROOT / "skills/deepori-bridge-setup/agents/openai.yaml"
+RELEASE_WORKFLOW = ROOT / ".github/workflows/release.yml"
 
 
 class ProductOnboardingTests(unittest.TestCase):
@@ -189,6 +190,14 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("$deepori-bridge-setup", agent)
         self.assertIn('"${project_dir}/skills/deepori-bridge-setup"', build)
         self.assertIn('"${resources_dir}/CodexSkills/deepori-bridge-setup"', build)
+
+    def test_release_workflow_is_the_idempotent_release_owner(self):
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn('gh release view "$GITHUB_REF_NAME"', workflow)
+        self.assertIn('gh release upload "$GITHUB_REF_NAME"', workflow)
+        self.assertIn("--clobber", workflow)
+        self.assertIn('gh release create "$GITHUB_REF_NAME"', workflow)
+        self.assertIn('title="DeepOri Bridge ${GITHUB_REF_NAME#v} for macOS"', workflow)
 
     def test_app_update_and_local_repair_are_clearly_separated(self):
         management = self.source.split("private var actionsCard", 1)[1].split(

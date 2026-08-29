@@ -236,6 +236,8 @@ NOTARY_PROFILE="codex-feishu-notary" \
 
 没有这两个凭证时构建脚本只生成 ad-hoc 包，不会伪装成已公证。每次构建同时生成 `.sha256` 和 `update.json`。
 
+发布时由版本标签触发 `.github/workflows/release.yml`，该工作流是 GitHub Release 的唯一发布入口。发布者只提交并推送版本代码，再推送与 App 版本一致的 `vX.Y.Z` 标签；不要提前手动执行 `gh release create`。若同名 Release 已存在，工作流会用重新构建并校验过的 ZIP、SHA-256 和 `update.json` 覆盖资产并更新发布说明，不会重复创建或直接失败。
+
 构建产物：
 
 - `build/Codex 飞书桥接.app`
