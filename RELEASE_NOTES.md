@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.9.27 (build 63)
+
+- Keeps GitHub-based App updates in the main management flow and explains when a VPN may be required to reach GitHub.
+- Moves local background-service repair into Advanced Maintenance and clarifies that repair uses components bundled in the current App without accessing GitHub.
+
 ## 1.9.26 (build 62)
 
 - Introduces the public product name “DeepOri Bridge” while preserving the existing bundle identifier, local data directory, and installed App path for upgrade compatibility.

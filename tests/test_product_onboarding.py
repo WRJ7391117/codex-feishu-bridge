@@ -128,6 +128,24 @@ class ProductOnboardingTests(unittest.TestCase):
         info = INFO_PLIST.read_text(encoding="utf-8")
         self.assertGreaterEqual(info.count("DeepOri Bridge"), 2)
 
+    def test_app_update_and_local_repair_are_clearly_separated(self):
+        management = self.source.split("private var actionsCard", 1)[1].split(
+            "private func infoRow", 1
+        )[0]
+        self.assertIn("检查 App 更新", management)
+        self.assertIn("更新包从 GitHub 获取", management)
+        self.assertIn("请先连接 VPN", management)
+        self.assertIn("高级维护", management)
+        self.assertIn("修复后台服务", management)
+        self.assertIn("不访问 GitHub", management)
+        self.assertNotIn("安装/更新后台组件", management)
+
+        update_check = self.source.split("func checkForUpdates", 1)[1].split(
+            "func installUpdate", 1
+        )[0]
+        self.assertIn("无法访问 GitHub Releases", update_check)
+        self.assertIn("连接 VPN 后重试", update_check)
+
     def test_setup_keeps_technical_connection_details_out_of_the_main_path(self):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
             "private struct ConfigurationChecklistView", 1

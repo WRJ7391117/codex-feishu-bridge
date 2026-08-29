@@ -607,7 +607,7 @@ private final class BridgeViewModel: ObservableObject {
                     Task { @MainActor in
                         self.presentError(
                             title: "检查更新失败",
-                            message: "无法读取 GitHub Releases，请稍后重试。"
+                            message: "无法访问 GitHub Releases。请检查网络；如当前网络无法访问 GitHub，请先连接 VPN 后重试。"
                         )
                     }
                 }
@@ -668,7 +668,10 @@ private final class BridgeViewModel: ObservableObject {
             guard error == nil, let temporaryURL else {
                 Task { @MainActor in
                     self.isUpdating = false
-                    self.presentError(title: "更新失败", message: "下载安装包失败，请稍后重试。")
+                    self.presentError(
+                        title: "更新失败",
+                        message: "无法从 GitHub 下载安装包。请检查网络；如当前网络无法访问 GitHub，请先连接 VPN 后重试。"
+                    )
                 }
                 return
             }
@@ -1092,17 +1095,17 @@ private final class BridgeViewModel: ObservableObject {
               health.pendingDeliveries == 0,
               health.pendingTaskCreations == 0 else {
             presentError(
-                title: "暂不能更新后台组件",
-                message: "仍有运行中的 Task 或飞书工作等待处理。全部完成后再更新，现有消息不会被打断。"
+                title: "暂不能修复后台服务",
+                message: "仍有运行中的 Task 或飞书工作等待处理。全部完成后再修复，现有消息不会被打断。"
             )
             return
         }
         let result = bridge.install()
         if result.status == 0 {
-            alertTitle = "后台组件已更新"
+            alertTitle = "后台服务已修复"
             alertMessage = "原有配置和当前 Task 状态均已保留。"
         } else {
-            presentError(title: "更新失败", message: result.output)
+            presentError(title: "修复失败", message: result.output)
         }
         refresh()
     }
@@ -1434,9 +1437,6 @@ private struct MainView: View {
                 }
                 actionButton("配置桥接", icon: "gearshape") { model.prepareConfiguration() }
                 actionButton("运行诊断", icon: "stethoscope") { model.runDiagnosis() }
-                actionButton("安装/更新后台组件", icon: "arrow.triangle.2.circlepath") {
-                    model.installComponents()
-                }
                 actionButton(
                     model.isUpdating
                         ? "正在下载并验证更新…"
@@ -1451,16 +1451,34 @@ private struct MainView: View {
                         model.installUpdate()
                     }
                 }
+                Text("更新包从 GitHub 获取。若当前网络无法访问 GitHub，请先连接 VPN。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 10) {
                     Button("打开日志") { model.openLog() }
                     Button("数据目录") { model.openSupportDirectory() }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Divider()
-                Button("移除后台服务…", role: .destructive) {
-                    model.prepareUninstall()
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("修复使用当前 App 内置的组件，不访问 GitHub；原有配置和 Task 状态会保留。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        actionButton("修复后台服务", icon: "wrench.and.screwdriver") {
+                            model.installComponents()
+                        }
+                        Divider()
+                        Button("移除后台服务…", role: .destructive) {
+                            model.prepareUninstall()
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Label("高级维护", systemImage: "gearshape.2")
                 }
-                .buttonStyle(.plain)
             }
             .padding(.top, 6)
         }
