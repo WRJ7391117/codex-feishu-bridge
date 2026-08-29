@@ -4,7 +4,7 @@
 
 DeepOri Bridge 是独立开源工具，并非 OpenAI、飞书或 Lark 官方产品。
 
-版本说明：当前源码和本机构建为 `1.9.27 (build 63)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.9.28 (build 64)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
 
 面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
@@ -96,7 +96,9 @@ App 已内置桥接所需的专用 `lark-cli`；普通用户无需先安装命�
 
 ### 3. 使用首次连接向导
 
-首次打开 DeepOri Bridge 后点击“首次连接向导”，填写自己的飞书 App ID 和 App Secret。Secret 只通过 stdin 交给内置 `lark-cli`，由它存入 macOS Keychain，不会进入进程参数、桥接 `config.json` 或日志。
+首次打开 DeepOri Bridge 后点击“首次连接向导”，可以选择“让 Codex 帮我配置”或“我自己手动配置”。Codex 路线会从 App 内本地安装专用配置 Skill，并生成一段可复制到任意 Codex Task 的指令；不需要安装飞书插件。手动路线继续使用四步向导。
+
+两种路线都要求 App Secret 只在 DeepOri Bridge 的安全输入框中填写。Secret 只通过 stdin 交给内置 `lark-cli`，由它存入 macOS Keychain，不会进入 Codex 对话、进程参数、桥接 `config.json` 或日志。
 
 需要用终端维护时，才使用系统 `lark-cli`：
 

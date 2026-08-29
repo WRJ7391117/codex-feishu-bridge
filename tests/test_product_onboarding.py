@@ -19,6 +19,8 @@ LOCAL_INSTALLER = ROOT / "scripts/install-local.sh"
 PUBLIC_INSTALLER = ROOT / "skills/codex-feishu-bridge/scripts/install-latest.sh"
 README = ROOT / "README.md"
 INFO_PLIST = ROOT / "Resources/Info.plist"
+SETUP_SKILL = ROOT / "skills/deepori-bridge-setup/SKILL.md"
+SETUP_SKILL_AGENT = ROOT / "skills/deepori-bridge-setup/agents/openai.yaml"
 
 
 class ProductOnboardingTests(unittest.TestCase):
@@ -103,7 +105,7 @@ class ProductOnboardingTests(unittest.TestCase):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
             "private struct ConfigurationView", 1
         )[0]
-        for title in ("创建应用", "连接应用", "配置机器人", "授权用户"):
+        for title in ("创建应用", "连接应用", "配置机器人", "添加使用者"):
             self.assertIn(title, setup)
         self.assertIn("switch currentStep", setup)
         self.assertIn("查看完整配置清单", setup)
@@ -127,6 +129,52 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("我已完成，开始检查", setup)
         info = INFO_PLIST.read_text(encoding="utf-8")
         self.assertGreaterEqual(info.count("DeepOri Bridge"), 2)
+
+    def test_first_connection_offers_codex_and_manual_paths(self):
+        setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
+            "private struct ConfigurationChecklistView", 1
+        )[0]
+        for text in (
+            "选择配置方式",
+            "让 Codex 帮我配置",
+            "我自己手动配置",
+            "复制指令并打开 Codex",
+            "已复制，可在 Codex 粘贴",
+            "改用手动配置",
+            "不需要安装飞书插件",
+        ):
+            self.assertIn(text, setup)
+        self.assertIn("$deepori-bridge-setup", self.source)
+        self.assertIn("prepareCodexAssistedSetup", self.source)
+        self.assertIn("installCodexSetupSkill", self.source)
+
+    def test_manual_user_step_uses_plain_user_language(self):
+        setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
+            "private struct ConfigurationChecklistView", 1
+        )[0]
+        for text in (
+            "选择谁可以使用",
+            "添加第一个飞书用户",
+            "添加飞书用户",
+            "管理用户与项目",
+            "设置可访问项目",
+            "完成设置",
+        ):
+            self.assertIn(text, setup)
+        for old_text in ("授权首位使用者", "启动两分钟识别", "识别新使用者"):
+            self.assertNotIn(old_text, setup)
+
+    def test_setup_skill_is_bundled_and_keeps_secrets_out_of_codex(self):
+        skill = SETUP_SKILL.read_text(encoding="utf-8")
+        agent = SETUP_SKILL_AGENT.read_text(encoding="utf-8")
+        build = BUILD_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("name: deepori-bridge-setup", skill)
+        self.assertIn("Do not install a Feishu or Lark plugin", skill)
+        self.assertIn("Never ask the user to paste an App Secret", skill)
+        self.assertIn("Never grant `*` project access", skill)
+        self.assertIn("$deepori-bridge-setup", agent)
+        self.assertIn('"${project_dir}/skills/deepori-bridge-setup"', build)
+        self.assertIn('"${resources_dir}/CodexSkills/deepori-bridge-setup"', build)
 
     def test_app_update_and_local_repair_are_clearly_separated(self):
         management = self.source.split("private var actionsCard", 1)[1].split(

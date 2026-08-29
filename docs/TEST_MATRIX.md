@@ -13,6 +13,7 @@ Updated: 2026-08-28
 | Event durability | message/card/menu dispatch | failed dispatch is not acknowledged; processed-event history retains seven days/up to 10,000 IDs | Pass locally |
 | Public installer | GitHub latest Release | source tests cover digest, identity, signature, Universal architecture, downgrade, and rollback requirements | Pass locally; real clean-Mac install pending |
 | App compiler | macOS 13 deployment target | Swift build passes | Pass |
+| Codex-assisted setup | bundled local Skill, copyable prompt, no Feishu plugin or secret in Task | source, Skill, and package tests pass | Pass |
 | Package | arm64 + x86_64 | Universal Mach-O verified by `lipo` | Pass |
 | Package integrity | ZIP | generated SHA-256 manifest verifies from `dist/` | Pass |
 | Code signature | local build | deep/strict verification passes; signature is ad-hoc | Pass with limitation |

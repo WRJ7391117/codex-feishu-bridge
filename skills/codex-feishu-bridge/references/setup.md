@@ -8,9 +8,11 @@
 
 The App bundles its patched runtime CLI. Use the first-connection assistant to configure a dedicated Profile. It passes App Secret through stdin to `lark-cli`, which stores it in macOS Keychain; never pass an App Secret in process arguments. A system `lark-cli` is optional and only needed for terminal maintenance.
 
+The first-connection assistant offers two paths. “让 Codex 帮我配置” installs the App-bundled `deepori-bridge-setup` Skill locally and provides a prompt to paste into the user's own Codex Task. It does not require a Feishu or Lark plugin. “我自己手动配置” keeps the four-step App flow. In both paths, App Secret must be entered only in the App secure field and must never be pasted into a Codex Task.
+
 The installed bridge prefers its bundled `lark-cli 1.0.89-codex-feishu.3`. It registers `card.action.trigger` with the SDK's card-action handler and returns a visible processing toast. The system CLI and bundled CLI share the same Profile and Keychain credentials.
 
-Source package `1.9.25 (build 61)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
+Source package `1.9.28 (build 64)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
 
 ## Feishu console
 

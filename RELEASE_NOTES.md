@@ -1,5 +1,12 @@
 # Release Notes
 
+## 1.9.28 (build 64)
+
+- Adds two first-connection paths: Codex-assisted setup with a bundled local Skill and the existing manual four-step assistant.
+- Generates a copyable Codex setup prompt, opens Codex Desktop, and keeps App Secret entry out of Codex Tasks, process arguments, files, and logs.
+- Rewrites the manual user step around “add a Feishu user” and “choose accessible projects”, with a direct finish path when users are already configured.
+- Clarifies that Codex does not need a Feishu plugin; the App continues to bundle its required `lark-cli` runtime.
+
 ## 1.9.27 (build 63)
 
 - Keeps GitHub-based App updates in the main management flow and explains when a VPN may be required to reach GitHub.

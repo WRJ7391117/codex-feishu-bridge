@@ -10,6 +10,19 @@ private enum ProductBrand {
     static let purpose = "连接 Codex 与飞书"
     static let tagline = "通过飞书继续 Mac 上已有的 Codex Task"
     static let localPromise = "仅在这台 Mac 上运行，Codex 内容不会经过第三方服务器。"
+    static let codexSetupPrompt = """
+    请使用 $deepori-bridge-setup 配置这台 Mac 上的 DeepOri Bridge。
+
+    请先只读检查，再尽可能自动完成配置。不要让我把 App Secret 发到 Codex 对话、终端参数、文件或日志中；需要凭证时，请让我只在 DeepOri Bridge 的安全输入框中填写。
+
+    仅在真正需要人工确认时暂停，并明确告诉我现在要做什么：
+    1. 飞书登录、验证码或二次验证；
+    2. 在 DeepOri Bridge 中输入 App ID 和 App Secret；
+    3. 批准权限或发布飞书应用版本；
+    4. 选择每位用户可以访问的具体 Codex 项目。
+
+    不要默认开放全部项目。完成后请验证 DeepOri Bridge 已开启、三个飞书事件消费者正常，并引导我完成一次飞书文字往返测试。
+    """
 }
 
 private struct CommandResult {
@@ -104,6 +117,12 @@ private final class BridgeController: @unchecked Sendable {
         Bundle.main.resourceURL?.appendingPathComponent("bridge", isDirectory: true)
     }
 
+    private var bundledCodexSetupSkillDirectory: URL? {
+        Bundle.main.resourceURL?
+            .appendingPathComponent("CodexSkills", isDirectory: true)
+            .appendingPathComponent("deepori-bridge-setup", isDirectory: true)
+    }
+
     var isInstalled: Bool {
         guard FileManager.default.fileExists(atPath: configURL.path),
               let bundledBridgeDirectory else {
@@ -133,6 +152,87 @@ private final class BridgeController: @unchecked Sendable {
             return CommandResult(status: 1, output: "安装资源不存在")
         }
         return run(script.path, [])
+    }
+
+    func installCodexSetupSkill() -> CommandResult {
+        let fileManager = FileManager.default
+        guard let source = bundledCodexSetupSkillDirectory,
+              fileManager.fileExists(
+                atPath: source.appendingPathComponent(".deepori-bridge-managed").path
+              ) else {
+            return CommandResult(status: 1, output: "App 内置的 Codex 配置助手不存在。")
+        }
+
+        let codexDirectory = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex", isDirectory: true)
+        let skillsDirectory = codexDirectory.appendingPathComponent("skills", isDirectory: true)
+        let destination = skillsDirectory.appendingPathComponent(
+            "deepori-bridge-setup",
+            isDirectory: true
+        )
+        for path in [codexDirectory, skillsDirectory, destination]
+        where fileManager.fileExists(atPath: path.path) {
+            let values = try? path.resourceValues(forKeys: [.isSymbolicLinkKey])
+            if values?.isSymbolicLink == true {
+                return CommandResult(status: 1, output: "Codex Skill 目录是符号链接，已停止自动安装。")
+            }
+        }
+        if fileManager.fileExists(atPath: destination.path),
+           !fileManager.fileExists(
+            atPath: destination.appendingPathComponent(".deepori-bridge-managed").path
+           ) {
+            return CommandResult(
+                status: 1,
+                output: "检测到非 DeepOri Bridge 管理的同名 Skill，未自动覆盖。"
+            )
+        }
+
+        let identifier = UUID().uuidString
+        let staging = skillsDirectory.appendingPathComponent(
+            ".deepori-bridge-setup-install-\(identifier)",
+            isDirectory: true
+        )
+        let backup = skillsDirectory.appendingPathComponent(
+            ".deepori-bridge-setup-backup-\(identifier)",
+            isDirectory: true
+        )
+        do {
+            try fileManager.createDirectory(
+                at: skillsDirectory,
+                withIntermediateDirectories: true
+            )
+            try fileManager.copyItem(at: source, to: staging)
+            let hadExisting = fileManager.fileExists(atPath: destination.path)
+            if hadExisting {
+                try fileManager.moveItem(at: destination, to: backup)
+            }
+            do {
+                try fileManager.moveItem(at: staging, to: destination)
+            } catch {
+                if hadExisting, fileManager.fileExists(atPath: backup.path) {
+                    try? fileManager.moveItem(at: backup, to: destination)
+                }
+                throw error
+            }
+            if fileManager.fileExists(atPath: backup.path) {
+                try? fileManager.removeItem(at: backup)
+            }
+            return CommandResult(status: 0, output: "Codex 配置助手已安装。")
+        } catch {
+            if fileManager.fileExists(atPath: staging.path) {
+                try? fileManager.removeItem(at: staging)
+            }
+            return CommandResult(status: 1, output: "安装 Codex 配置助手失败：\(error.localizedDescription)")
+        }
+    }
+
+    func openCodexDesktop() -> CommandResult {
+        guard let appURL = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.openai.codex"
+        ), NSWorkspace.shared.open(appURL) else {
+            return CommandResult(status: 1, output: "没有找到 Codex Desktop，请先安装或手动打开。")
+        }
+        return CommandResult(status: 0, output: "Codex Desktop 已打开。")
     }
 
     func control(_ action: String) -> CommandResult {
@@ -576,6 +676,8 @@ private final class BridgeViewModel: ObservableObject {
     @Published var discoveredOpenID = ""
     @Published var userDiscoveryResult = ""
     @Published var availableProjects: [String] = []
+    @Published var codexSetupSkillReady = false
+    @Published var codexSetupStatus = ""
 
     init(bridge: BridgeController) {
         self.bridge = bridge
@@ -732,6 +834,37 @@ private final class BridgeViewModel: ObservableObject {
         }
     }
 
+    func prepareCodexAssistedSetup() -> Bool {
+        let result = bridge.installCodexSetupSkill()
+        codexSetupSkillReady = result.status == 0
+        codexSetupStatus = result.output
+        if result.status != 0 {
+            presentError(title: "配置助手准备失败", message: result.output)
+        }
+        return result.status == 0
+    }
+
+    @discardableResult
+    func copyCodexSetupPrompt(openCodex: Bool) -> Bool {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setString(ProductBrand.codexSetupPrompt, forType: .string) else {
+            presentError(title: "复制失败", message: "无法写入系统剪贴板，请稍后重试。")
+            return false
+        }
+        if openCodex {
+            let result = bridge.openCodexDesktop()
+            if result.status != 0 {
+                codexSetupStatus = "指令已复制。没有找到 Codex Desktop，请手动打开后粘贴并发送。"
+                return true
+            }
+        }
+        codexSetupStatus = openCodex
+            ? "指令已复制，Codex 已打开。请在任意 Task 中粘贴并发送。"
+            : "配置指令已复制。请在任意 Codex Task 中粘贴并发送。"
+        return true
+    }
+
     func checkExistingProfile() {
         guard !isConfiguringProfile else { return }
         let profile = setupProfile.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -849,13 +982,13 @@ private final class BridgeViewModel: ObservableObject {
         guard !isDiscoveringUser else { return }
         let profile = setupProfile.trimmingCharacters(in: .whitespacesAndNewlines)
         guard setupPassed, !profile.isEmpty else {
-            presentError(title: "暂不能识别用户", message: "请先保存并通过飞书连接检查。")
+            presentError(title: "暂不能添加用户", message: "请先保存并通过飞书连接检查。")
             return
         }
         isDiscoveringUser = true
         discoveredOpenID = ""
         let challenge = String(format: "%06d", Int.random(in: 0...999_999))
-        userDiscoveryResult = "监听已启动。请在两分钟内用机主飞书账号单聊 Bot，并发送验证码：\(challenge)"
+        userDiscoveryResult = "请在两分钟内用需要添加的飞书账号单聊机器人，并发送验证码：\(challenge)"
         let controller = bridge
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = controller.discoverFeishuUser(profile, challenge: challenge)
@@ -864,10 +997,10 @@ private final class BridgeViewModel: ObservableObject {
                 self.isDiscoveringUser = false
                 if result.status == 0, result.output.hasPrefix("ou_") {
                     self.discoveredOpenID = result.output
-                    self.userDiscoveryResult = "已识别首位用户。继续后仍需明确选择可访问项目。"
+                    self.userDiscoveryResult = "已找到飞书用户。下一步请选择他可以访问的 Codex 项目。"
                 } else {
                     self.userDiscoveryResult = result.output.isEmpty
-                        ? "未识别到飞书用户，请检查事件订阅后重试。"
+                        ? "没有收到验证码，请检查事件订阅后重试。"
                         : result.output
                 }
             }
@@ -1516,31 +1649,223 @@ private struct MainView: View {
     }
 }
 
+private enum ConnectionSetupPath {
+    case choice
+    case codex
+    case manual
+}
+
 private struct ConnectionSetupView: View {
     @ObservedObject var model: BridgeViewModel
+    @State private var setupPath = ConnectionSetupPath.choice
     @State private var currentStep = 1
     @State private var showAdvancedSettings = false
     @State private var showConfigurationChecklist = false
     @State private var confirmedSteps = Set<Int>()
+    @State private var codexPromptCopied = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            progressBar
-                .padding(.horizontal, 34)
-                .padding(.vertical, 22)
-            workspace
-                .padding(.horizontal, 28)
-                .padding(.bottom, 22)
+            if setupPath == .manual {
+                progressBar
+                    .padding(.horizontal, 34)
+                    .padding(.vertical, 22)
+                workspace
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 22)
+            } else {
+                setupPathWorkspace
+                    .padding(28)
+            }
             Divider()
-            footer
+            if setupPath == .manual {
+                footer
+            } else {
+                setupPathFooter
+            }
         }
         .frame(width: 1120, height: 760)
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $showConfigurationChecklist) {
             ConfigurationChecklistView(model: model)
         }
+    }
+
+    @ViewBuilder
+    private var setupPathWorkspace: some View {
+        switch setupPath {
+        case .choice:
+            VStack(alignment: .leading, spacing: 24) {
+                sectionHeader(
+                    "选择配置方式",
+                    "你可以让 Codex 协助完成大部分设置，也可以按向导自己操作。两种方式使用相同的安全规则。"
+                )
+                HStack(spacing: 20) {
+                    setupPathCard(
+                        icon: "sparkles",
+                        title: "让 Codex 帮我配置",
+                        detail: "安装本地配置 Skill，复制一段指令到你自己的 Codex Task。Codex 会尽可能自动操作，只在必要时请你确认。",
+                        note: "推荐 · 不需要安装飞书插件"
+                    ) {
+                        if model.prepareCodexAssistedSetup() {
+                            setupPath = .codex
+                        }
+                    }
+                    setupPathCard(
+                        icon: "hand.tap",
+                        title: "我自己手动配置",
+                        detail: "按照四步向导创建飞书应用、连接凭证、配置机器人，并添加可以使用的飞书账号。",
+                        note: "适合希望逐项核对的用户"
+                    ) {
+                        setupPath = .manual
+                    }
+                }
+                Spacer()
+                Label(
+                    "无论选择哪种方式，App Secret 都只在 DeepOri Bridge 中输入并存入 macOS 钥匙串。",
+                    systemImage: "lock.shield.fill"
+                )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+        case .codex:
+            HStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        sectionHeader(
+                            "把这段指令发给你的 Codex",
+                            "配置助手已经安装到本机。打开任意 Codex Task，粘贴并发送下面的指令。"
+                        )
+                        Text(ProductBrand.codexSetupPrompt)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
+                            .background(Color(nsColor: .textBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                            }
+                    }
+                    .padding(30)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 18) {
+                    sidePanelHeader(
+                        icon: model.codexSetupSkillReady
+                            ? "checkmark.circle.fill"
+                            : "exclamationmark.triangle",
+                        title: model.codexSetupSkillReady
+                            ? "Codex 配置助手已就绪"
+                            : "配置助手未就绪",
+                        detail: model.codexSetupStatus
+                    )
+                    Divider()
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Codex 会自动完成可安全自动化的步骤", systemImage: "checkmark.circle")
+                        Label("登录、Secret、发布和项目权限仍需你确认", systemImage: "person.crop.circle.badge.checkmark")
+                        Label("不需要安装飞书插件", systemImage: "puzzlepiece.extension")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(codexPromptCopied ? "已复制，可在 Codex 粘贴" : "复制指令并打开 Codex") {
+                        codexPromptCopied = model.copyCodexSetupPrompt(openCodex: true)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    Button("仅复制指令") {
+                        codexPromptCopied = model.copyCodexSetupPrompt(openCodex: false)
+                    }
+                }
+                .frame(width: 330)
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .padding(28)
+            }
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.34))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            }
+
+        case .manual:
+            EmptyView()
+        }
+    }
+
+    private func setupPathCard(
+        icon: String,
+        title: String,
+        detail: String,
+        note: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 16) {
+                Image(systemName: icon)
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                Text(title)
+                    .font(.title2.weight(.semibold))
+                Text(detail)
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Text(note)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Color.accentColor)
+                HStack {
+                    Text("选择此方式")
+                        .font(.callout.weight(.semibold))
+                    Spacer()
+                    Image(systemName: "arrow.right.circle.fill")
+                }
+                .foregroundStyle(Color.accentColor)
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, minHeight: 300, alignment: .topLeading)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var setupPathFooter: some View {
+        HStack {
+            Button(setupPath == .codex ? "返回选择" : "稍后设置") {
+                if setupPath == .codex {
+                    setupPath = .choice
+                } else {
+                    model.showConnectionSetup = false
+                }
+            }
+            Spacer()
+            Text(setupPath == .codex ? "Codex 自动配置" : "选择配置方式")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+            if setupPath == .codex {
+                Button("改用手动配置") { setupPath = .manual }
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 16)
     }
 
     private var header: some View {
@@ -1593,7 +1918,7 @@ private struct ConnectionSetupView: View {
     }
 
     private func progressStep(_ step: Int) -> some View {
-        let titles = ["创建应用", "连接应用", "配置机器人", "授权用户"]
+        let titles = ["创建应用", "连接应用", "配置机器人", "添加使用者"]
         let complete = step < currentStep || (step == 2 && model.setupPassed && currentStep > 2)
         let current = step == currentStep
         let available = step <= currentStep || step == 2
@@ -1775,21 +2100,51 @@ private struct ConnectionSetupView: View {
             .buttonStyle(.link)
 
         default:
-            sectionHeader(
-                "授权首位使用者",
-                "用需要使用 \(ProductBrand.name) 的飞书账号单聊机器人，再完成项目授权。"
-            )
-            instructionRow(
-                icon: "person.crop.circle.badge.plus",
-                title: "1. 启动两分钟识别",
-                detail: "\(ProductBrand.name) 会生成一次性验证码并等待一条新的机器人单聊消息。"
-            )
-            Divider()
-            instructionRow(
-                icon: "ellipsis.message.fill",
-                title: "2. 在飞书发送验证码",
-                detail: "只接受这次显示的验证码，不会把普通历史消息识别为授权请求。"
-            )
+            if model.hasConfiguredUsers {
+                sectionHeader(
+                    "选择谁可以使用",
+                    "已有用户无需重新添加；需要添加其他人时，再用他的飞书账号完成验证码确认。"
+                )
+                instructionRow(
+                    icon: "person.crop.circle.badge.checkmark",
+                    title: "1. 已有用户可以继续使用",
+                    detail: "如果不需要调整人员或项目权限，可以直接完成设置。"
+                )
+                Divider()
+                instructionRow(
+                    icon: "person.crop.circle.badge.plus",
+                    title: "2. 需要时添加飞书用户",
+                    detail: "点击右侧“添加飞书用户”，再用该账号向机器人发送屏幕显示的验证码。"
+                )
+                Divider()
+                instructionRow(
+                    icon: "folder.badge.gearshape",
+                    title: "3. 管理用户与项目",
+                    detail: "为每位用户选择可以访问的 Codex 项目，不会默认开放全部项目。"
+                )
+            } else {
+                sectionHeader(
+                    "添加第一个飞书用户",
+                    "添加后，这个账号才能通过飞书使用 \(ProductBrand.name)。"
+                )
+                instructionRow(
+                    icon: "person.crop.circle.badge.plus",
+                    title: "1. 点击“添加飞书用户”",
+                    detail: "\(ProductBrand.name) 会显示一个只使用一次的验证码。"
+                )
+                Divider()
+                instructionRow(
+                    icon: "ellipsis.message.fill",
+                    title: "2. 在飞书发送验证码",
+                    detail: "用需要添加的账号单聊机器人，并发送屏幕显示的验证码。"
+                )
+                Divider()
+                instructionRow(
+                    icon: "folder.badge.plus",
+                    title: "3. 选择可访问项目",
+                    detail: "添加成功后，为这个用户选择可以访问的 Codex 项目并保存。"
+                )
+            }
         }
     }
 
@@ -1859,7 +2214,7 @@ private struct ConnectionSetupView: View {
             Button(
                 model.isDiscoveringUser
                     ? "正在等待飞书消息…"
-                    : (model.hasConfiguredUsers ? "识别新使用者" : "开始识别使用者")
+                    : "添加飞书用户"
             ) {
                 model.discoverFirstUser()
             }
@@ -1867,7 +2222,14 @@ private struct ConnectionSetupView: View {
             .controlSize(.large)
             .disabled(!model.setupPassed || model.isDiscoveringUser)
 
-            Text("识别成功后仍需明确选择可访问的 Codex 项目，不会默认开放全部项目。")
+            if model.hasConfiguredUsers && model.discoveredOpenID.isEmpty {
+                Button("管理用户与项目") {
+                    model.continueToUserAuthorization()
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Text("添加成功后仍需选择可访问的 Codex 项目，不会默认开放全部项目。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1901,9 +2263,9 @@ private struct ConnectionSetupView: View {
 
     private var authorizationStatusTitle: String {
         if !model.discoveredOpenID.isEmpty {
-            return "使用者已识别"
+            return "飞书用户已添加"
         }
-        return model.hasConfiguredUsers ? "已有授权用户" : "等待识别"
+        return model.hasConfiguredUsers ? "已有 \(model.authorizedUserCount) 位使用者" : "等待添加用户"
     }
 
     private var authorizationStatusDetail: String {
@@ -1911,9 +2273,9 @@ private struct ConnectionSetupView: View {
             return model.userDiscoveryResult
         }
         if model.hasConfiguredUsers {
-            return "可以直接打开授权设置；需要添加其他用户时，再启动一次识别。"
+            return "可以直接完成设置；需要添加其他人时，再点击“添加飞书用户”。"
         }
-        return "启动识别后，请按这里显示的提示到飞书发送验证码。"
+        return "点击“添加飞书用户”后，按这里显示的提示到飞书发送验证码。"
     }
 
     private var footer: some View {
@@ -1939,7 +2301,12 @@ private struct ConnectionSetupView: View {
     }
 
     private var primaryFooterTitle: String {
-        currentStep == 4 ? "配置授权" : "继续"
+        if currentStep == 4 {
+            return model.hasConfiguredUsers && model.discoveredOpenID.isEmpty
+                ? "完成设置"
+                : "设置可访问项目"
+        }
+        return "继续"
     }
 
     private var canAdvance: Bool {
@@ -1960,7 +2327,11 @@ private struct ConnectionSetupView: View {
 
     private func advance() {
         if currentStep == 4 {
-            model.continueToUserAuthorization()
+            if model.hasConfiguredUsers && model.discoveredOpenID.isEmpty {
+                model.showConnectionSetup = false
+            } else {
+                model.continueToUserAuthorization()
+            }
         } else {
             currentStep += 1
         }

@@ -33,6 +33,10 @@ source_file="${project_dir}/Sources/CodexFeishuBridgeApp/main.swift"
 /bin/cp "${project_dir}/Resources/Info.plist" "${contents}/Info.plist"
 /bin/cp "${project_dir}/THIRD_PARTY_NOTICES.md" "${resources_dir}/THIRD_PARTY_NOTICES.md"
 /bin/cp -R "${project_dir}/Resources/bridge" "${resources_dir}/bridge"
+/bin/mkdir -p "${resources_dir}/CodexSkills"
+/bin/cp -R \
+    "${project_dir}/skills/deepori-bridge-setup" \
+    "${resources_dir}/CodexSkills/deepori-bridge-setup"
 /bin/rm -rf "${resources_dir}/bridge/__pycache__"
 /bin/rm -f \
     "${resources_dir}/bridge/workflow_notifications.py" \
