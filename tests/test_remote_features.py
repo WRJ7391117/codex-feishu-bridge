@@ -736,7 +736,7 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.bridge.send_task_card.assert_called_once()
 
-    def test_task_menu_event_keys_have_nine_distinct_defaults(self):
+    def test_task_menu_event_keys_have_ten_distinct_defaults(self):
         event_keys = (
             self.bridge.CURRENT_TASK_MENU_EVENT_KEY,
             self.bridge.TASK_MENU_EVENT_KEY,
@@ -747,6 +747,7 @@ class RemoteFeatureTests(unittest.TestCase):
             self.bridge.DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY,
             self.bridge.TASK_SUBSCRIPTIONS_MENU_EVENT_KEY,
             self.bridge.TASK_SETTINGS_MENU_EVENT_KEY,
+            self.bridge.COMPACT_CONTEXT_MENU_EVENT_KEY,
         )
 
         self.assertEqual(
@@ -761,9 +762,10 @@ class RemoteFeatureTests(unittest.TestCase):
                 "sync_desktop_switch",
                 "task_subscriptions",
                 "task_settings",
+                "compact_task_context",
             ),
         )
-        self.assertEqual(len(set(event_keys)), 9)
+        self.assertEqual(len(set(event_keys)), 10)
 
     def test_codex_task_settings_normalizes_visible_models_and_efforts(self):
         self.bridge.codex_app_server_requests = mock.Mock(
@@ -778,6 +780,13 @@ class RemoteFeatureTests(unittest.TestCase):
                                 {"reasoningEffort": "low"},
                                 {"reasoningEffort": "high"},
                             ],
+                            "serviceTiers": [
+                                {
+                                    "id": "priority",
+                                    "name": "Fast",
+                                    "description": "1.5x speed, increased usage",
+                                }
+                            ],
                         },
                         {"model": "hidden-model", "hidden": True},
                     ]
@@ -788,7 +797,7 @@ class RemoteFeatureTests(unittest.TestCase):
             return_value={
                 "latestModel": "gpt-5.6-sol",
                 "latestReasoningEffort": "high",
-                "latestThreadSettings": {},
+                "latestThreadSettings": {"serviceTier": "priority"},
             }
         )
 
@@ -796,8 +805,19 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.assertEqual(settings["model"], "gpt-5.6-sol")
         self.assertEqual(settings["effort"], "high")
+        self.assertEqual(settings["service_tier"], "priority")
         self.assertEqual([item["model"] for item in settings["models"]], ["gpt-5.6-sol"])
         self.assertEqual(settings["models"][0]["efforts"], ["low", "high"])
+        self.assertEqual(
+            settings["models"][0]["service_tiers"],
+            [
+                {
+                    "id": "priority",
+                    "name": "Fast",
+                    "description": "1.5x speed, increased usage",
+                }
+            ],
+        )
         self.bridge.codex_app_server_requests.assert_called_once_with(
             [("model/list", {"includeHidden": False, "limit": 100})],
             timeout=10,
@@ -845,18 +865,22 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.assertEqual(result[0]["resultType"], "success")
 
-    def test_task_settings_card_binds_task_and_confirms_compaction(self):
+    def test_task_settings_card_binds_task_and_shows_model_effort_and_speed(self):
         task = self.tasks()[0]
         card = self.bridge.build_task_settings_card(
             task,
             {
                 "model": "gpt-5.6-sol",
                 "effort": "high",
+                "service_tier": "priority",
                 "models": [
                     {
                         "model": "gpt-5.6-sol",
                         "display_name": "GPT-5.6 Sol",
                         "efforts": ["low", "high"],
+                        "service_tiers": [
+                            {"id": "priority", "name": "Fast", "description": ""}
+                        ],
                     }
                 ],
             },
@@ -871,12 +895,18 @@ class RemoteFeatureTests(unittest.TestCase):
         }
         self.assertEqual(selectors["task_model_selector"]["initial_option"], "gpt-5.6-sol")
         self.assertEqual(selectors["task_effort_selector"]["initial_option"], "high")
-        compact = next(
-            item
-            for item in card["body"]["elements"]
-            if item.get("text", {}).get("content") == "压缩当前 Task 上下文…"
+        self.assertEqual(selectors["task_speed_selector"]["initial_option"], "priority")
+        self.assertNotIn("压缩当前 Task 上下文", json.dumps(card, ensure_ascii=False))
+
+    def test_compact_task_context_card_is_separate_and_requires_confirmation(self):
+        card = self.bridge.build_compact_task_context_card(self.tasks()[0])
+
+        button = next(
+            item for item in card["body"]["elements"] if item.get("tag") == "button"
         )
-        self.assertIn("confirm", compact)
+        self.assertEqual(button["behaviors"][0]["value"]["action"], "compact_current_task")
+        self.assertEqual(button["behaviors"][0]["value"]["task_id"], "task-a")
+        self.assertIn("confirm", button)
 
     def test_task_settings_menu_replies_immediately_then_reads_in_background(self):
         task = self.tasks()[0]
@@ -897,6 +927,22 @@ class RemoteFeatureTests(unittest.TestCase):
             thread_factory.call_args.kwargs["args"],
             ("ou_admin", "om_current_status", "task-a"),
         )
+
+    def test_compact_context_menu_opens_a_separate_confirmation_card(self):
+        task = self.tasks()[0]
+        self.bridge.selected_task = mock.Mock(return_value=task)
+
+        self.bridge.handle_menu_event(
+            {
+                "event_id": "evt-compact-context",
+                "event_key": "compact_task_context",
+                "operator_id": "ou_admin",
+            }
+        )
+
+        card = self.bridge.send_card.call_args.args[1]
+        self.assertIn("压缩当前 Task 上下文", card["config"]["summary"]["content"])
+        self.assertNotIn("task_model_selector", json.dumps(card, ensure_ascii=False))
 
     def test_old_task_settings_card_cannot_modify_new_current_task(self):
         old_task, new_task = self.tasks()[:2]
@@ -938,7 +984,11 @@ class RemoteFeatureTests(unittest.TestCase):
     def test_task_setting_desktop_protocol_methods_are_versioned(self):
         self.bridge.desktop_task_request = mock.Mock(return_value={"resultType": "success"})
 
-        self.bridge.update_desktop_task_settings("task-a", model="gpt-5.6-sol")
+        self.bridge.update_desktop_task_settings(
+            "task-a",
+            model="gpt-5.6-sol",
+            service_tier="priority",
+        )
         self.bridge.compact_desktop_task("task-a")
 
         self.assertEqual(
@@ -946,7 +996,12 @@ class RemoteFeatureTests(unittest.TestCase):
             mock.call(
                 "task-a",
                 "thread-follower-update-thread-settings",
-                {"threadSettings": {"model": "gpt-5.6-sol"}},
+                {
+                    "threadSettings": {
+                        "model": "gpt-5.6-sol",
+                        "serviceTier": "priority",
+                    }
+                },
                 version=1,
             ),
         )
@@ -960,6 +1015,108 @@ class RemoteFeatureTests(unittest.TestCase):
                 timeout_ms=60000,
             ),
         )
+
+    def test_running_task_accepts_settings_for_the_next_unstarted_message(self):
+        task = self.tasks()[0]
+        run = self.bridge.new_run("ou_admin", "oc_test", "om_run", task, [], [])
+        self.assertTrue(self.bridge.claim_active_run(run))
+        self.bridge.selected_task = mock.Mock(return_value=task)
+        self.bridge.codex_task_settings = mock.Mock(
+            return_value={
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "service_tier": "default",
+                "models": [
+                    {
+                        "model": "gpt-5.6-sol",
+                        "efforts": ["high"],
+                        "service_tiers": [{"id": "priority", "name": "Fast"}],
+                    }
+                ],
+            }
+        )
+        self.bridge.update_desktop_task_settings = mock.Mock()
+        self.bridge.refresh_task_settings_card = mock.Mock()
+
+        self.bridge.complete_task_settings_operation(
+            "ou_admin",
+            "om_settings",
+            "task-a",
+            service_tier="priority",
+        )
+
+        self.bridge.update_desktop_task_settings.assert_called_once_with(
+            "task-a",
+            model=None,
+            effort=None,
+            service_tier="priority",
+        )
+        status = self.bridge.refresh_task_settings_card.call_args.args[3]
+        self.assertIn("下一条尚未开始的消息生效", status)
+
+    def test_running_task_speed_selector_starts_a_settings_update(self):
+        task = self.tasks()[0]
+        run = self.bridge.new_run("ou_admin", "oc_test", "om_run", task, [], [])
+        self.assertTrue(self.bridge.claim_active_run(run))
+        self.bridge.selected_task = mock.Mock(return_value=task)
+        card = self.bridge.build_task_settings_card(
+            task,
+            {
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "service_tier": "default",
+                "models": [
+                    {
+                        "model": "gpt-5.6-sol",
+                        "display_name": "GPT-5.6 Sol",
+                        "efforts": ["high"],
+                        "service_tiers": [{"id": "priority", "name": "Fast"}],
+                    }
+                ],
+            },
+        )
+
+        with mock.patch.object(self.bridge.threading, "Thread") as thread_factory:
+            self.bridge.handle_card_event(
+                {
+                    "event_id": "evt-running-speed",
+                    "operator_id": "ou_admin",
+                    "chat_id": "oc_test",
+                    "message_id": "om_settings",
+                    "action_tag": "select_static",
+                    "action_name": "task_speed_selector",
+                    "option": "priority",
+                    "card_content": json.dumps(card),
+                }
+            )
+
+        self.assertIs(
+            thread_factory.call_args.kwargs["target"],
+            self.bridge.complete_task_settings_operation,
+        )
+        self.assertEqual(
+            thread_factory.call_args.kwargs["kwargs"],
+            {"service_tier": "priority"},
+        )
+
+    def test_running_task_rejects_context_compaction(self):
+        task = self.tasks()[0]
+        run = self.bridge.new_run("ou_admin", "oc_test", "om_run", task, [], [])
+        self.assertTrue(self.bridge.claim_active_run(run))
+        self.bridge.selected_task = mock.Mock(return_value=task)
+        self.bridge.task_by_id = mock.Mock(return_value=task)
+        self.bridge.patch_card = mock.Mock(return_value=True)
+        self.bridge.compact_desktop_task = mock.Mock()
+
+        self.bridge.complete_task_context_compaction(
+            "ou_admin",
+            "om_compact",
+            "task-a",
+        )
+
+        self.bridge.compact_desktop_task.assert_not_called()
+        card = self.bridge.patch_card.call_args.args[1]
+        self.assertIn("完成或停止后才能压缩上下文", card["body"]["elements"][0]["content"])
 
     def test_run_timeline_deduplicates_and_renders_safe_stage_names(self):
         run = self.bridge.new_run(

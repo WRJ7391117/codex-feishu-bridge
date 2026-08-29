@@ -10,11 +10,11 @@ The App bundles its patched runtime CLI. Use the first-connection assistant to c
 
 The installed bridge prefers its bundled `lark-cli 1.0.89-codex-feishu.3`. It registers `card.action.trigger` with the SDK's card-action handler and returns a visible processing toast. The system CLI and bundled CLI share the same Profile and Keychain credentials.
 
-Source package `1.9.24 (build 60)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
+Source package `1.9.25 (build 61)` supersedes all earlier builds. Do not downgrade it or overwrite it with a different build carrying the same version.
 
 ## Feishu console
 
-Enable long-connection delivery and subscribe to `im.message.receive_v1` and `application.bot.menu_v6`. Enable callback configuration for `card.action.trigger`. Configure a “Task 管理” main menu with five push-event submenus: “当前 Task” with Event Key `current_task`, “切换 Task” with `select_task`, “新建 Task” with `new_task`, “归档当前 Task” with `archive_task`, and “Task 运行设置” with `task_settings`. Configure a “管理桌面 Task” main menu with three push-event submenus in this order: “订阅桌面 Task” with `task_subscriptions`, “接续当前 Task” with `sync_desktop`, and “接续其他 Task” with `sync_desktop_switch`. Add top-level “Codex 额度用量” with `codex_usage`. Keep the same nine values in the Mac App configuration, publish a new Feishu app version, and allow about five minutes for the menu to appear. Bot menus are available only in P2P chats with the Bot.
+Enable long-connection delivery and subscribe to `im.message.receive_v1` and `application.bot.menu_v6`. Enable callback configuration for `card.action.trigger`. Configure a “Task 管理” main menu with four push-event submenus: “当前 Task” with Event Key `current_task`, “切换 Task” with `select_task`, “新建 Task” with `new_task`, and “归档当前 Task” with `archive_task`. Configure a “管理桌面 Task” main menu with three push-event submenus in this order: “订阅桌面 Task” with `task_subscriptions`, “接续当前 Task” with `sync_desktop`, and “接续其他 Task” with `sync_desktop_switch`. Configure a “模型设置” main menu with three push-event submenus: “修改当前 Task 模型” with `task_settings`, “压缩当前 Task 上下文” with `compact_task_context`, and “Codex 额度用量” with `codex_usage`. Keep the same ten values in the Mac App configuration, publish a new Feishu app version, and allow about five minutes for the menu to appear. Bot menus are available only in P2P chats with the Bot.
 
 The bot needs message receive/read/send permissions. Incoming image support also requires permission to read the matching message resource; `im:resource` is needed to upload result images. Follow `missing_scopes` from lark-cli rather than guessing broader permissions.
 

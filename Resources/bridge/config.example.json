@@ -19,6 +19,7 @@
   "desktop_sync_switch_menu_event_key": "sync_desktop_switch",
   "task_subscriptions_menu_event_key": "task_subscriptions",
   "task_settings_menu_event_key": "task_settings",
+  "compact_context_menu_event_key": "compact_task_context",
   "max_prompt_chars": 12000,
   "max_reply_chars": 3000,
   "max_result_images": 8,

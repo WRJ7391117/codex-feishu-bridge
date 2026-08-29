@@ -291,6 +291,9 @@ TASK_SUBSCRIPTIONS_MENU_EVENT_KEY = str(
 TASK_SETTINGS_MENU_EVENT_KEY = str(
     CONFIG.get("task_settings_menu_event_key") or "task_settings"
 )
+COMPACT_CONTEXT_MENU_EVENT_KEY = str(
+    CONFIG.get("compact_context_menu_event_key") or "compact_task_context"
+)
 REPLY_RETRY_DELAYS = (1.0, 2.0)
 CARD_PATCH_RETRY_DELAYS: tuple[float, ...] = ()
 CARD_PATCH_TIMEOUT_SECONDS = 3
@@ -1475,12 +1478,40 @@ def codex_task_settings(thread_id: str) -> dict[str, Any]:
             effort = str(option.get("reasoningEffort") or "").strip()
             if effort and effort not in efforts:
                 efforts.append(effort)
+        service_tiers: list[dict[str, str]] = []
+        for option in raw.get("serviceTiers", []):
+            if not isinstance(option, dict):
+                continue
+            tier_id = str(option.get("id") or "").strip()
+            if not tier_id or any(item["id"] == tier_id for item in service_tiers):
+                continue
+            service_tiers.append(
+                {
+                    "id": tier_id,
+                    "name": str(option.get("name") or tier_id).strip()[:80],
+                    "description": str(option.get("description") or "").strip()[:160],
+                }
+            )
+        if not service_tiers:
+            for legacy_tier in raw.get("additionalSpeedTiers", []):
+                tier_id = str(legacy_tier or "").strip()
+                if tier_id and not any(
+                    item["id"] == tier_id for item in service_tiers
+                ):
+                    service_tiers.append(
+                        {
+                            "id": tier_id,
+                            "name": "快速" if tier_id == "fast" else tier_id,
+                            "description": "",
+                        }
+                    )
         models.append(
             {
                 "model": model,
                 "display_name": str(raw.get("displayName") or model).strip()[:80],
                 "default_effort": str(raw.get("defaultReasoningEffort") or "").strip(),
                 "efforts": efforts,
+                "service_tiers": service_tiers,
             }
         )
 
@@ -1495,6 +1526,11 @@ def codex_task_settings(thread_id: str) -> dict[str, Any]:
     current_effort = str(
         thread_settings.get("effort") or thread.get("latestReasoningEffort") or ""
     ).strip()
+    current_service_tier = str(
+        thread_settings.get("serviceTier")
+        or thread.get("latestServiceTier")
+        or "default"
+    ).strip()
     if current_model and not any(item["model"] == current_model for item in models):
         models.insert(
             0,
@@ -1503,6 +1539,7 @@ def codex_task_settings(thread_id: str) -> dict[str, Any]:
                 "display_name": current_model,
                 "default_effort": current_effort,
                 "efforts": [current_effort] if current_effort else [],
+                "service_tiers": [],
             },
         )
     if not current_effort:
@@ -1512,9 +1549,23 @@ def codex_task_settings(thread_id: str) -> dict[str, Any]:
         )
         if current_entry is not None:
             current_effort = str(current_entry.get("default_effort") or "")
+    current_entry = next(
+        (item for item in models if item["model"] == current_model),
+        None,
+    )
+    supported_tiers = {
+        str(item.get("id") or "")
+        for item in (current_entry or {}).get("service_tiers", [])
+        if isinstance(item, dict)
+    }
+    if current_service_tier == "fast" and "priority" in supported_tiers:
+        current_service_tier = "priority"
+    if current_service_tier not in supported_tiers | {"default"}:
+        current_service_tier = "default"
     return {
         "model": current_model,
         "effort": current_effort,
+        "service_tier": current_service_tier,
         "models": models,
     }
 
@@ -5427,6 +5478,12 @@ def reasoning_effort_label(effort: str) -> str:
     return f"{labels.get(effort, effort)} · {effort}"
 
 
+def service_tier_label(service_tier: str) -> str:
+    if service_tier == "default":
+        return "标准"
+    return "快速" if service_tier in {"fast", "priority"} else service_tier
+
+
 def build_task_settings_card(
     task: dict[str, str],
     settings: dict[str, Any] | None = None,
@@ -5436,6 +5493,7 @@ def build_task_settings_card(
     snapshot = settings if isinstance(settings, dict) else {}
     current_model = str(snapshot.get("model") or "").strip()
     current_effort = str(snapshot.get("effort") or "").strip()
+    current_service_tier = str(snapshot.get("service_tier") or "default").strip()
     models = [item for item in snapshot.get("models", []) if isinstance(item, dict)]
     current_entry = next(
         (item for item in models if str(item.get("model") or "") == current_model),
@@ -5444,10 +5502,20 @@ def build_task_settings_card(
     efforts = list(current_entry.get("efforts", [])) if current_entry else []
     if current_effort and current_effort not in efforts:
         efforts.insert(0, current_effort)
+    service_tiers = (
+        [item for item in current_entry.get("service_tiers", []) if isinstance(item, dict)]
+        if current_entry
+        else []
+    )
+    service_tier_ids = {
+        str(item.get("id") or "") for item in service_tiers if item.get("id")
+    }
+    if current_service_tier not in service_tier_ids | {"default"}:
+        current_service_tier = "default"
 
     lines = [
-        "模型和推理强度会写入 Codex Desktop 的这个 Task，作用于后续轮次。",
-        "不会改变项目权限、沙箱或授权方式。",
+        "模型、分析强度和速度仅作用于这个 Task，从下一条尚未开始的消息生效。",
+        "正在运行的这一轮不会改变；不会改变项目权限、沙箱或授权方式。",
     ]
     if current_model:
         lines.append(
@@ -5457,6 +5525,7 @@ def build_task_settings_card(
                 if current_effort
                 else ""
             )
+            + f"\n速度：`{service_tier_label(current_service_tier)}`"
         )
     if status:
         failed_status = any(
@@ -5516,44 +5585,58 @@ def build_task_settings_card(
         if current_effort in efforts:
             effort_selector["initial_option"] = current_effort
         elements.append(effort_selector)
-    elements.extend(
-        [
+    if current_entry:
+        speed_options = [
             {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "刷新当前设置"},
-                "type": "default",
-                "behaviors": [
-                    {
-                        "type": "callback",
-                        "value": {
-                            "action": "refresh_task_settings",
-                            "task_id": str(task["id"]),
-                        },
-                    }
-                ],
-            },
+                "text": {"tag": "plain_text", "content": "标准"},
+                "value": "default",
+            }
+        ] + [
             {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "压缩当前 Task 上下文…"},
-                "type": "default",
-                "behaviors": [
-                    {
-                        "type": "callback",
-                        "value": {
-                            "action": "compact_current_task",
-                            "task_id": str(task["id"]),
-                        },
-                    }
-                ],
-                "confirm": {
-                    "title": {"tag": "plain_text", "content": "压缩当前 Task 上下文？"},
-                    "text": {
-                        "tag": "plain_text",
-                        "content": "Codex 会总结较早内容以释放上下文空间。Task 正在运行时不会执行。",
-                    },
+                "text": {
+                    "tag": "plain_text",
+                    "content": (
+                        "快速 · 约 1.5 倍速度，额度消耗更高"
+                        if str(item.get("name") or "").lower() == "fast"
+                        else str(item.get("name") or item.get("id") or "")[:80]
+                    ),
                 },
-            },
+                "value": str(item.get("id") or ""),
+            }
+            for item in service_tiers
+            if str(item.get("id") or "")
         ]
+        speed_selector: dict[str, Any] = {
+            "tag": "select_static",
+            "name": "task_speed_selector",
+            "placeholder": {"tag": "plain_text", "content": "选择速度"},
+            "options": speed_options,
+            "initial_option": current_service_tier,
+            "width": "fill",
+        }
+        elements.append(speed_selector)
+        if not service_tiers:
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": "<font color='grey'>当前模型不支持快速模式。</font>",
+                }
+            )
+    elements.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "刷新当前设置"},
+            "type": "default",
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {
+                        "action": "refresh_task_settings",
+                        "task_id": str(task["id"]),
+                    },
+                }
+            ],
+        }
     )
     return {
         "schema": "2.0",
@@ -5561,7 +5644,7 @@ def build_task_settings_card(
             "update_multi": True,
             "width_mode": "default",
             "enable_forward": False,
-            "summary": {"content": f"Task 运行设置：{task['title']}"},
+            "summary": {"content": f"修改当前 Task 模型：{task['title']}"},
         },
         "header": {
             "title": {"tag": "plain_text", "content": task_title_text(task)},
@@ -5572,7 +5655,7 @@ def build_task_settings_card(
                 current_task_tag(),
                 {
                     "tag": "text_tag",
-                    "text": {"tag": "plain_text", "content": "运行设置"},
+                    "text": {"tag": "plain_text", "content": "模型设置"},
                     "color": "blue",
                 },
             ],
@@ -5582,6 +5665,78 @@ def build_task_settings_card(
             "padding": "12px 12px 20px 12px",
             "vertical_spacing": "12px",
             "elements": elements,
+        },
+    }
+
+
+def build_compact_task_context_card(
+    task: dict[str, str],
+    status: str = "",
+    loading: bool = False,
+) -> dict[str, Any]:
+    lines = [
+        "Codex 会总结较早内容并保留关键上下文，让当前 Task 可以继续交流。",
+        "此操作不能撤销；Task 正在运行时不能执行。",
+    ]
+    if status:
+        failed_status = any(
+            marker in status for marker in ("失败", "变化", "运行", "未接受", "没有")
+        )
+        lines.insert(
+            0,
+            f"{'⏳' if loading else '⚠️' if failed_status else '✅'} "
+            f"**{card_markdown_escape(status)}**",
+        )
+    return {
+        "schema": "2.0",
+        "config": {
+            "update_multi": True,
+            "width_mode": "default",
+            "enable_forward": False,
+            "summary": {"content": f"压缩当前 Task 上下文：{task['title']}"},
+        },
+        "header": {
+            "title": {"tag": "plain_text", "content": task_title_text(task)},
+            "subtitle": {"tag": "plain_text", "content": task_project_text(task)},
+            "template": "blue",
+            "icon": {"tag": "standard_icon", "token": "ai-common_colorful"},
+            "text_tag_list": [
+                current_task_tag(),
+                {
+                    "tag": "text_tag",
+                    "text": {"tag": "plain_text", "content": "上下文压缩"},
+                    "color": "blue",
+                },
+            ],
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": [
+                {"tag": "markdown", "content": "\n\n".join(lines)},
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "确认压缩当前 Task 上下文…"},
+                    "type": "default",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action": "compact_current_task",
+                                "task_id": str(task["id"]),
+                            },
+                        }
+                    ],
+                    "confirm": {
+                        "title": {"tag": "plain_text", "content": "确认压缩当前 Task 上下文？"},
+                        "text": {
+                            "tag": "plain_text",
+                            "content": "Codex 会总结较早内容。只有确认后才会执行，取消不会改变当前 Task。",
+                        },
+                    },
+                },
+            ],
         },
     }
 
@@ -5612,9 +5767,9 @@ def task_settings_for_current_user(
     if task is None:
         return None, "当前没有选中的 Task，请先切换 Task"
     if str(task["id"]) != task_id:
-        return None, "当前 Task 已变化，请从菜单重新打开运行设置"
+        return None, "当前 Task 已变化，请从菜单重新打开对应设置"
     if require_idle and active_run_for_task(task_id) is not None:
-        return None, "当前 Task 正在运行，完成后再修改设置或压缩上下文"
+        return None, "当前 Task 正在运行，完成或停止后才能压缩上下文"
     return task, ""
 
 
@@ -5658,40 +5813,77 @@ def complete_task_settings_operation(
     *,
     model: str | None = None,
     effort: str | None = None,
-    compact: bool = False,
+    service_tier: str | None = None,
 ) -> None:
-    task, error = task_settings_for_current_user(user_id, task_id, require_idle=True)
+    task, error = task_settings_for_current_user(user_id, task_id)
     if task is None:
         fallback = task_by_id(task_id, user_id)
         if fallback is not None and message_id:
             patch_card(message_id, build_task_settings_card(fallback, status=error))
         return
     try:
-        if compact:
-            compact_desktop_task(task_id)
-            status = "上下文压缩已启动"
-        else:
-            current = codex_task_settings(task_id)
-            models = {
-                str(item.get("model") or ""): item
-                for item in current.get("models", [])
+        current = codex_task_settings(task_id)
+        models = {
+            str(item.get("model") or ""): item
+            for item in current.get("models", [])
+            if isinstance(item, dict)
+        }
+        if model is not None and model not in models:
+            raise ValueError("unknown model")
+        current_model = str(current.get("model") or "")
+        if effort is not None:
+            supported = list(models.get(current_model, {}).get("efforts", []))
+            if effort not in supported:
+                raise ValueError("unsupported reasoning effort")
+        if service_tier is not None:
+            supported_tiers = {
+                str(item.get("id") or "")
+                for item in models.get(current_model, {}).get("service_tiers", [])
                 if isinstance(item, dict)
             }
-            if model is not None and model not in models:
-                raise ValueError("unknown model")
-            if effort is not None:
-                current_model = str(current.get("model") or "")
-                supported = list(models.get(current_model, {}).get("efforts", []))
-                if effort not in supported:
-                    raise ValueError("unsupported reasoning effort")
-            update_desktop_task_settings(task_id, model=model, effort=effort)
-            status = "模型已更新" if model is not None else "推理强度已更新"
+            if service_tier not in supported_tiers | {"default"}:
+                raise ValueError("unsupported service tier")
+        update_desktop_task_settings(
+            task_id,
+            model=model,
+            effort=effort,
+            service_tier=service_tier,
+        )
+        setting_name = (
+            "模型"
+            if model is not None
+            else "分析强度"
+            if effort is not None
+            else "速度"
+        )
+        status = f"{setting_name}已保存，将从下一条尚未开始的消息生效"
     except ValueError:
         status = "所选设置已失效，请刷新后重新选择"
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         log(f"task settings update failed error={type(exc).__name__}")
         status = "Codex Desktop 未接受操作，请稍后重试"
     refresh_task_settings_card(user_id, message_id, task_id, status)
+
+
+def complete_task_context_compaction(
+    user_id: str,
+    message_id: str,
+    task_id: str,
+) -> None:
+    task, error = task_settings_for_current_user(user_id, task_id, require_idle=True)
+    if task is None:
+        fallback = task_by_id(task_id, user_id)
+        if fallback is not None and message_id:
+            patch_card(message_id, build_compact_task_context_card(fallback, error))
+        return
+    try:
+        compact_desktop_task(task_id)
+        status = "当前 Task 上下文压缩已启动"
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        log(f"task context compaction failed error={type(exc).__name__}")
+        status = "Codex Desktop 未接受压缩操作，请稍后重试"
+    if message_id:
+        patch_card(message_id, build_compact_task_context_card(task, status))
 
 
 def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
@@ -6080,11 +6272,12 @@ def help_text() -> str:
         "机器人菜单 Task 管理 →“切换 Task” —— 切换当前 Task 或恢复已归档 Task\n"
         "机器人菜单 Task 管理 →“新建 Task” —— 选择项目并新建 Task\n"
         "机器人菜单 Task 管理 →“归档当前 Task” —— 可取消或二次确认归档当前 Task\n"
-        "机器人菜单 Task 管理 →“Task 运行设置” —— 设置当前 Task 的模型、推理强度或压缩上下文\n"
         "机器人菜单 管理桌面 Task →“订阅桌面 Task” —— 多选需要自动接收 Desktop 新结果的 Task\n"
         "机器人菜单 管理桌面 Task →“接续当前 Task” —— 接续桥接中的当前 Task\n"
         "机器人菜单 管理桌面 Task →“接续其他 Task” —— 先切换 Task 再接续\n"
-        "机器人菜单“Codex 额度用量” —— 查看额度和 Task 用量分析\n"
+        "机器人菜单 模型设置 →“修改当前 Task 模型” —— 设置模型、分析强度和速度\n"
+        "机器人菜单 模型设置 →“压缩当前 Task 上下文” —— 确认后总结较早内容\n"
+        "机器人菜单 模型设置 →“Codex 额度用量” —— 查看账户额度和 Task 用量分析\n"
         "对话 —— 用文字打开 Task 选择卡片（备用）\n"
         "选择 N —— 文字选择 task（备用）\n"
         "搜索 关键词 —— 按标题搜索当前项目的 Task\n"
@@ -7188,7 +7381,7 @@ def card_context_type(card: dict[str, Any]) -> str:
     }
     if "new_task_project_selector" in names:
         return "new_task"
-    if names & {"task_model_selector", "task_effort_selector"}:
+    if names & {"task_model_selector", "task_effort_selector", "task_speed_selector"}:
         return "task_settings"
     if names & {"subscription_project_selector", "subscription_task_selector"}:
         return "task_subscriptions"
@@ -8816,12 +9009,15 @@ def update_desktop_task_settings(
     *,
     model: str | None = None,
     effort: str | None = None,
+    service_tier: str | None = None,
 ) -> None:
     settings: dict[str, Any] = {}
     if model is not None:
         settings["model"] = model
     if effort is not None:
         settings["effort"] = effort
+    if service_tier is not None:
+        settings["serviceTier"] = service_tier
     if not settings:
         raise ValueError("missing task settings")
     desktop_task_request(
@@ -11029,7 +11225,12 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
             if task is None:
                 fallback = task_by_id(task_id, user_id)
                 if fallback is not None and message_id:
-                    patch_card(message_id, build_task_settings_card(fallback, status=error))
+                    card = (
+                        build_compact_task_context_card(fallback, error)
+                        if action == "compact_current_task"
+                        else build_task_settings_card(fallback, status=error)
+                    )
+                    patch_card(message_id, card)
                 return
             if not ui_intent_is_current(event):
                 log(f"card intent skipped action={action} reason=superseded")
@@ -11039,24 +11240,22 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
                 if action == "compact_current_task"
                 else "正在读取 Codex Desktop 设置"
             )
-            loading_card = build_task_settings_card(
-                task,
-                status=loading_status,
-                loading=True,
+            loading_card = (
+                build_compact_task_context_card(task, loading_status, loading=True)
+                if action == "compact_current_task"
+                else build_task_settings_card(task, status=loading_status, loading=True)
             )
             token = str(event.get("token") or "")
             if not (token and update_card(token, loading_card)) and message_id:
                 patch_card(message_id, loading_card)
             target = (
-                complete_task_settings_operation
+                complete_task_context_compaction
                 if action == "compact_current_task"
                 else refresh_task_settings_card
             )
-            kwargs = {"compact": True} if action == "compact_current_task" else {}
             threading.Thread(
                 target=target,
                 args=(user_id, message_id, task_id),
-                kwargs=kwargs,
                 daemon=True,
                 name=f"codex-feishu-task-settings-{task_id[:8]}",
             ).start()
@@ -11699,11 +11898,13 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
     recognized_task_settings_card = any(
         isinstance(element, dict)
         and element.get("tag") == "select_static"
-        and element.get("name") in {"task_model_selector", "task_effort_selector"}
+        and element.get("name")
+        in {"task_model_selector", "task_effort_selector", "task_speed_selector"}
         for element in elements
     ) or context_type == "task_settings"
     if action_tag == "select_static" and (
-        action_name in {"task_model_selector", "task_effort_selector"}
+        action_name
+        in {"task_model_selector", "task_effort_selector", "task_speed_selector"}
         or (not action_name and recognized_task_settings_card)
     ):
         selectors = {
@@ -11714,7 +11915,11 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
         if not action_name:
             matching = [
                 name
-                for name in ("task_model_selector", "task_effort_selector")
+                for name in (
+                    "task_model_selector",
+                    "task_effort_selector",
+                    "task_speed_selector",
+                )
                 if selected_value in selectors.get(name, {}).get("options", [])
             ]
             if len(matching) != 1:
@@ -11730,7 +11935,6 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
         task, error = task_settings_for_current_user(
             user_id,
             task_id,
-            require_idle=True,
         )
         if task is None:
             fallback = task_by_id(task_id, user_id)
@@ -11742,7 +11946,13 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
             return
         loading_card = build_task_settings_card(
             task,
-            status="正在更新模型" if action_name == "task_model_selector" else "正在更新推理强度",
+            status=(
+                "正在更新模型"
+                if action_name == "task_model_selector"
+                else "正在更新分析强度"
+                if action_name == "task_effort_selector"
+                else "正在更新速度"
+            ),
             loading=True,
         )
         token = str(event.get("token") or "")
@@ -11755,6 +11965,8 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
                 {"model": selected_value}
                 if action_name == "task_model_selector"
                 else {"effort": selected_value}
+                if action_name == "task_effort_selector"
+                else {"service_tier": selected_value}
             ),
             daemon=True,
             name=f"codex-feishu-task-settings-{task_id[:8]}",
@@ -12155,6 +12367,7 @@ def _handle_menu_event_once(event: dict[str, Any]) -> None:
         DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY,
         TASK_SUBSCRIPTIONS_MENU_EVENT_KEY,
         TASK_SETTINGS_MENU_EVENT_KEY,
+        COMPACT_CONTEXT_MENU_EVENT_KEY,
     } or not authorized_user(user_id):
         return
     event_id = str(event.get("event_id") or "")
@@ -12258,6 +12471,21 @@ def _handle_menu_event_once(event: dict[str, Any]) -> None:
                 name=f"codex-feishu-task-settings-{str(task['id'])[:8]}",
             ).start()
         log(f"menu handled key={event_key} result=task-settings-card")
+        return
+    if event_key == COMPACT_CONTEXT_MENU_EVENT_KEY:
+        task = selected_task(user_id, state)
+        if task is None:
+            send_task_card(user_id, state, event_id)
+            log(f"menu handled key={event_key} result=task-selector")
+            return
+        send_menu_card(
+            user_id,
+            state,
+            build_compact_task_context_card(task),
+            f"compact-task-context-{event_id}",
+            "compact_task_context",
+        )
+        log(f"menu handled key={event_key} result=compact-task-context-card")
         return
     if event_key == DESKTOP_SYNC_MENU_EVENT_KEY:
         start_desktop_sync(user_id, state, event_id)

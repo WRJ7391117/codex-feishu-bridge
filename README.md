@@ -2,14 +2,14 @@
 
 把飞书 Bot 变成 Codex Desktop 的移动入口：在飞书里按项目选择桌面版左侧栏中的 Task，发送文字、图片、文件或音频，并接收可更新的运行状态和最终结果。
 
-版本说明：当前源码和本机构建为 `1.9.24 (build 60)`。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.9.25 (build 61)`。不得用旧版本或同版本不同构建覆盖。
 
 面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
 ## 能力
 
-- 飞书机器人一级菜单为“Task 管理”“管理桌面 Task”和“Codex 额度用量”；“Task 管理”下提供“当前 Task”“切换 Task”“新建 Task”“归档当前 Task”“Task 运行设置”，“管理桌面 Task”下提供“订阅桌面 Task”“接续当前 Task”“接续其他 Task”
-- “Task 运行设置”可读取并切换当前 Task 的模型与推理强度，也可在确认后压缩上下文；运行中的 Task 和过期卡片不会修改设置
+- 飞书机器人一级菜单为“Task 管理”“管理桌面 Task”和“模型设置”；“模型设置”下提供“修改当前 Task 模型”“压缩当前 Task 上下文”“Codex 额度用量”
+- “修改当前 Task 模型”可读取并切换当前 Task 的模型、分析强度与速度；运行中修改会保存给下一条尚未开始的消息，压缩上下文仍要求 Task 空闲并二次确认
 - “管理桌面 Task”→“接续当前 Task”只读取该飞书用户在桥接中选择的当前 Task，并先显示项目、Task 标题和桌面状态供确认；没有有效当前 Task 时只打开选择卡，不自动猜测其他 Task
 - 每位授权用户可独立订阅最多 20 个有权访问的 Task；这些 Task 在 Codex Desktop 完成新运行后自动推送结果，订阅前的历史结果不会补发
 - 按 `项目 · Task 标题` 显示所有未归档本地 Task，每页 50 条，可翻页和按标题搜索
@@ -120,12 +120,14 @@ App 运行时优先使用随安装包提供的 `1.0.89-codex-feishu.3`，它在�
      - “切换 Task” → Event Key `select_task`
      - “新建 Task” → Event Key `new_task`
      - “归档当前 Task” → Event Key `archive_task`
-     - “Task 运行设置” → Event Key `task_settings`
    - 主菜单“管理桌面 Task”下添加三个子菜单，动作均选择“推送事件”：
      - “订阅桌面 Task” → Event Key `task_subscriptions`
      - “接续当前 Task” → Event Key `sync_desktop`
      - “接续其他 Task” → Event Key `sync_desktop_switch`
-   - 主菜单“Codex 额度用量”直接选择“推送事件” → Event Key `codex_usage`
+   - 主菜单“模型设置”下添加三个子菜单，动作均选择“推送事件”：
+     - “修改当前 Task 模型” → Event Key `task_settings`
+     - “压缩当前 Task 上下文” → Event Key `compact_task_context`
+     - “Codex 额度用量” → Event Key `codex_usage`
 6. 创建并发布新的飞书应用版本；发布成功后菜单可能需要约 5 分钟生效。机器人菜单仅在与 Bot 的单聊中显示。
 
 首次连接向导可启动一次两分钟监听。让机主单聊 Bot 并发送 App 当次显示的六位验证码后，App 才会识别该消息的 `open_id`，但不会自动授予任何项目。终端备用方式如下：
@@ -146,7 +148,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
    - 点击“添加用户”可继续添加白名单用户；
 3. 群 Chat ID 可留空，先使用与 Bot 的单聊；
 4. 点击“开启桥接”；
-5. 确认 App 中的九个 Event Key 与飞书后台完全一致，然后分别测试 Task 运行设置、订阅和接续入口。
+5. 确认 App 中的十个 Event Key 与飞书后台完全一致，然后分别测试模型设置、上下文压缩、额度用量、订阅和接续入口。
 
 未授权用户也可以先私聊 Bot 发任意消息。Bot 只会登记访问申请，不会开放任何 Task；机主在 App 的“待审批访问申请”中点击“配置授权”，填写明确项目并保存后才会生效。
 
@@ -169,7 +171,9 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 - 点击 Bot 菜单“管理桌面 Task”→“订阅桌面 Task” → 按项目筛选并逐个订阅或取消订阅；订阅不改变当前 Task，Desktop 以后完成的新运行会自动推送，收到结果后当前 Task 跟随该结果以便直接追问
 - 点击 Bot 菜单“管理桌面 Task”→“接续当前 Task” → 卡片显示本人的桥接当前 Task、所属项目和桌面状态；确认“接续当前 Task”后，已完成结果立即推送，运行中的结果跨桥接重启持续跟踪并在完成后推送
 - 点击 Bot 菜单“管理桌面 Task”→“接续其他 Task” → 先切换 Task，再通过“接续选定的 Task”确认；没有有效当前 Task 时“接续当前 Task”也会进入同一选择流程，不会自动猜测其他 Task
-- 点击 Bot 菜单“Codex 额度用量” → 打开独立用量卡；卡片内可继续选择“当日 Task 用量分析”或“当期 Task 用量分析”，查看有权访问项目中的 Task Token 排名、占比、单次模型调用用量、主要消耗原因及是否偏高。“当日”从本地当天 00:00 开始，“当期”与当前 Codex 主额度重置周期一致；Token 用于 Task 间比较和异常诊断，不等同于官方额度或账单的按 Task 扣减
+- 点击 Bot 菜单“模型设置”→“修改当前 Task 模型” → 修改当前 Task 的模型、分析强度和标准/快速速度；设置仅影响下一条尚未开始的消息，运行中的这一轮不会改变
+- 点击 Bot 菜单“模型设置”→“压缩当前 Task 上下文” → 查看当前项目和 Task，Task 空闲时二次确认后总结较早内容
+- 点击 Bot 菜单“模型设置”→“Codex 额度用量” → 打开独立用量卡；卡片内可继续选择“当日 Task 用量分析”或“当期 Task 用量分析”，查看有权访问项目中的 Task Token 排名、占比、单次模型调用用量、主要消耗原因及是否偏高。“当日”从本地当天 00:00 开始，“当期”与当前 Codex 主额度重置周期一致；Token 用于 Task 间比较和异常诊断，不等同于官方额度或账单的按 Task 扣减
 - 多个 Task 并行时，运行进度不会改变当前 Task；某个 Task 完成、失败或停止并返回最终内容后，当前 Task 自动跟随该结果。下一条消息会直接进入刚返回结果的 Task；随后另一个 Task 再返回时，当前 Task继续跟随最新结果
 - 在 Task 卡的“显示范围”中切换“全部 Task / 最近使用 / 我的收藏”；可收藏或取消收藏当前 Task
 - 项目 Task 超过 50 条时点击“上一页/下一页”；发送“搜索 关键词”可按标题筛选，卡片中可一键清除搜索

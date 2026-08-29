@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.9.25 (build 61)
+
+- Reorganizes the Bot menu under “模型设置”, separates Task model controls from context compaction, and keeps Codex quota as an account-level submenu.
+- Adds per-Task Standard/Fast speed selection and allows model, analysis-strength, and speed changes during a running turn for the next unstarted message; context compaction remains idle-only.
+
 ## 1.9.24 (build 60)
 
 - Adds a Feishu “Task 运行设置” entry for reading and changing the selected Task's model and reasoning effort, with stale-card and running-Task safeguards.

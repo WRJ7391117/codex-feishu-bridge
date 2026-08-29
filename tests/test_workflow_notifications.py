@@ -879,6 +879,7 @@ class InstallerSafetyTests(unittest.TestCase):
                         "desktop_sync_switch_menu_event_key",
                         "task_subscriptions_menu_event_key",
                         "task_settings_menu_event_key",
+                        "compact_context_menu_event_key",
                     )
                 },
                 {
@@ -891,6 +892,7 @@ class InstallerSafetyTests(unittest.TestCase):
                     "desktop_sync_switch_menu_event_key": "sync_desktop_switch",
                     "task_subscriptions_menu_event_key": "task_subscriptions",
                     "task_settings_menu_event_key": "task_settings",
+                    "compact_context_menu_event_key": "compact_task_context",
                 },
             )
             self.assertEqual(migrated["allowed_users"], original["allowed_users"])
@@ -2184,12 +2186,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.9.24")
-        self.assertEqual(info["CFBundleVersion"], "60")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.9.25")
+        self.assertEqual(info["CFBundleVersion"], "61")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.9.24 (build 60)", readme)
-        self.assertIn("1.9.24 (build 60", release_notes)
+        self.assertIn("1.9.25 (build 61)", readme)
+        self.assertIn("1.9.25 (build 61", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):
@@ -2251,8 +2253,8 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         self.assertIn('"接续当前 Task"', configuration)
         self.assertIn('"接续其他 Task"', configuration)
         self.assertIn('"订阅桌面 Task"', configuration)
-        self.assertIn("九个机器人菜单 Event Key 都不能为空", source)
-        self.assertIn("九个机器人菜单 Event Key 不能重复", source)
+        self.assertIn("十个机器人菜单 Event Key 都不能为空", source)
+        self.assertIn("十个机器人菜单 Event Key 不能重复", source)
         self.assertIn(
             'config["desktop_sync_switch_menu_event_key"] = desktopSyncSwitchEventKey',
             source,
@@ -2263,6 +2265,10 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         )
         self.assertIn(
             'config["task_settings_menu_event_key"] = taskSettingsEventKey',
+            source,
+        )
+        self.assertIn(
+            'config["compact_context_menu_event_key"] = compactContextEventKey',
             source,
         )
         self.assertIn('config["current_task_menu_event_key"] = currentTaskEventKey', source)

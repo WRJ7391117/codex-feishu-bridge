@@ -160,6 +160,9 @@ class ProductOnboardingTests(unittest.TestCase):
             config["task_subscriptions_menu_event_key"], "task_subscriptions"
         )
         self.assertEqual(config["task_settings_menu_event_key"], "task_settings")
+        self.assertEqual(
+            config["compact_context_menu_event_key"], "compact_task_context"
+        )
         self.assertNotIn("workflow_notifications", config)
 
     def test_public_installer_verifies_release_and_refuses_downgrade(self):

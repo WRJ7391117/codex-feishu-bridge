@@ -20,7 +20,7 @@ The bridge consumes:
 
 - `im.message.receive_v1` for text, image, file, and audio input
 - `card.action.trigger` for project/Task selection, Task creation/archive confirmation, stop, and one-time approval decisions
-- `application.bot.menu_v6` for the “Task 管理” submenus “当前 Task”, “切换 Task”, “新建 Task”, and “归档当前 Task”; the “管理桌面 Task” submenus “订阅桌面 Task”, “接续当前 Task”, and “接续其他 Task”; and the top-level “Codex 额度用量” menu
+- `application.bot.menu_v6` for the “Task 管理” submenus “当前 Task”, “切换 Task”, “新建 Task”, and “归档当前 Task”; the “管理桌面 Task” submenus “订阅桌面 Task”, “接续当前 Task”, and “接续其他 Task”; and the “模型设置” submenus “修改当前 Task 模型”, “压缩当前 Task 上下文”, and “Codex 额度用量”
 
 Card actions differ from ordinary events at the WebSocket ingress. The bundled CLI registers `card.action.trigger` with `OnP2CardActionTrigger`, forwards the unchanged raw event into the local bus, and immediately returns a valid `CardActionTriggerResponse` with a visible processing toast. This synchronous response prevents Feishu error `108002`; the later complete-card update remains a separate delayed-update API call.
 
