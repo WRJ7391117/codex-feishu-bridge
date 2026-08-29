@@ -143,6 +143,8 @@ def validate_config(payload) -> None:
         "task_subscriptions_menu_event_key",
         "task_settings_menu_event_key",
         "compact_context_menu_event_key",
+        "promlight_menu_event_key",
+        "promlight_legend_menu_event_key",
         "lark_cli_path",
         "codex_cli_path",
     )
@@ -375,6 +377,8 @@ defaults = {
     "task_subscriptions_menu_event_key": "task_subscriptions",
     "task_settings_menu_event_key": "task_settings",
     "compact_context_menu_event_key": "compact_task_context",
+    "promlight_menu_event_key": "promlight",
+    "promlight_legend_menu_event_key": "promlight_legend",
 }
 before = path.lstat()
 descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -399,6 +403,12 @@ for key, value in defaults.items():
     if key not in payload:
         payload[key] = value
         changed = True
+event_keys = [str(payload.get(key) or "").strip() for key in defaults]
+if any(not value for value in event_keys) or len(set(event_keys)) != len(event_keys):
+    raise SystemExit(
+        "bridge menu Event Keys must be non-empty and unique; "
+        "open Bridge App and correct the menu configuration before updating"
+    )
 if not changed:
     raise SystemExit(0)
 

@@ -1,5 +1,15 @@
 # Release Notes
 
+## 1.9.31 (build 69)
+
+- Adds one top-level Feishu menu, “提示灯”, with “我的提示灯” and “灯光状态说明” leaves.
+- Adds private per-user PromLight ownership, per-light Task allowlists, defaults, rename/unbind controls, restart recovery, and permission/archive revocation cleanup.
+- Aggregates only explicitly followed Tasks as red error > yellow human gate > yellow running > green idle, while refusing to infer uncertain errors.
+- Uses the local PromLight device-targeted HTTP relay and distinguishes device ACK from independently verified light output; offline lights keep their last logical status without claiming success.
+- Fails closed on unknown Task state, coalesces relay work on one bounded worker, retries no-ACK delivery with backoff, and retains an offline unbind tombstone until the idle command is acknowledged.
+- Adds local PromLight discovery and authorized-user assignment to the macOS App. Mobile Feishu mini-app BLE remains fail-closed until the real GATT protocol and device lifecycle pass true-device validation.
+- Keeps Ori Hub at its frozen V1 boundary: Hub-compatible device semantics are documented, but user identity, Task authorization, subscriptions, cards, and routing remain in the bridge.
+
 ## 1.9.30 (build 68)
 
 - Opens Codex through its registered `codex://` launch URL after copying the setup prompt, so DeepOri Bridge no longer accesses the ChatGPT application bundle and does not trigger macOS App Management protection.

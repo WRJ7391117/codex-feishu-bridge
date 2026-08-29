@@ -270,7 +270,20 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(
             config["compact_context_menu_event_key"], "compact_task_context"
         )
+        self.assertEqual(config["promlight_menu_event_key"], "promlight")
+        self.assertEqual(
+            config["promlight_legend_menu_event_key"], "promlight_legend"
+        )
         self.assertNotIn("workflow_notifications", config)
+
+    def test_installer_refuses_duplicate_menu_event_keys_before_migration(self):
+        installer = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn("len(set(event_keys)) != len(event_keys)", installer)
+        self.assertIn("menu Event Keys must be non-empty and unique", installer)
+        self.assertLess(
+            installer.index("len(set(event_keys)) != len(event_keys)"),
+            installer.index("if not changed:"),
+        )
 
     def test_public_installer_verifies_release_and_refuses_downgrade(self):
         installer = PUBLIC_INSTALLER.read_text(encoding="utf-8")

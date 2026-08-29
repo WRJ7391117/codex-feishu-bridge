@@ -50,6 +50,13 @@ private struct AccessRequestDraft: Identifiable {
     let openID: String
 }
 
+private struct PromLightDeviceDraft: Identifiable {
+    var id: String { relayRef }
+    let relayRef: String
+    let label: String
+    let boundOwnerOpenID: String?
+}
+
 private struct CodexUsageItem: Identifiable {
     let id: String
     let name: String
@@ -240,6 +247,28 @@ private final class BridgeController: @unchecked Sendable {
 
     func diagnose() -> CommandResult {
         run(supportDirectory.appendingPathComponent("diagnose.sh").path, [])
+    }
+
+    func promLightInventory() -> CommandResult {
+        run(
+            "/usr/bin/python3",
+            [supportDirectory.appendingPathComponent("bridge.py").path, "--promlight-status-json"]
+        )
+    }
+
+    func bindPromLight(openID: String, relayRef: String, name: String) -> CommandResult {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: ["open_id": openID, "relay_ref": relayRef, "name": name],
+            options: []
+        ), let input = String(data: data, encoding: .utf8) else {
+            return CommandResult(status: 1, output: "无法准备提示灯绑定请求。")
+        }
+        return run(
+            "/usr/bin/python3",
+            [supportDirectory.appendingPathComponent("bridge.py").path, "--promlight-bind-json"],
+            standardInput: input,
+            redacting: relayRef
+        )
     }
 
     func uninstallKeepingData() -> CommandResult {
@@ -663,7 +692,15 @@ private final class BridgeViewModel: ObservableObject {
     @Published var draftTaskSubscriptionsEventKey = "task_subscriptions"
     @Published var draftTaskSettingsEventKey = "task_settings"
     @Published var draftCompactContextEventKey = "compact_task_context"
+    @Published var draftPromLightEventKey = "promlight"
+    @Published var draftPromLightLegendEventKey = "promlight_legend"
     @Published var draftMaxConcurrentRuns = 2
+    @Published var promLightDevices: [PromLightDeviceDraft] = []
+    @Published var selectedPromLightRelayRef = ""
+    @Published var selectedPromLightOwnerOpenID = ""
+    @Published var promLightName = ""
+    @Published var promLightStatus = "尚未刷新本地提示灯。"
+    @Published var isRefreshingPromLight = false
     @Published var setupProfile = "codex-notify"
     @Published var setupAppID = ""
     @Published var setupAppSecret = ""
@@ -690,6 +727,75 @@ private final class BridgeViewModel: ObservableObject {
         authorizedUserCount = configuredUsers(from: config).count
         pendingAccessRequests = bridge.pendingAccessRequests()
         health = bridge.healthSnapshot()
+    }
+
+    func refreshPromLightDevices() {
+        guard !isRefreshingPromLight else { return }
+        isRefreshingPromLight = true
+        promLightStatus = "正在读取本机 PromLight…"
+        let controller = bridge
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = controller.promLightInventory()
+            var devices: [PromLightDeviceDraft] = []
+            if result.status == 0,
+               let data = result.output.data(using: .utf8),
+               let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let bindings = payload["bindings"] as? [[String: Any]] ?? []
+                let ownersByRelay = Dictionary(
+                    uniqueKeysWithValues: bindings.compactMap { item -> (String, String)? in
+                        guard let relay = item["relay_ref"] as? String,
+                              !relay.isEmpty,
+                              let owner = item["owner_open_id"] as? String else { return nil }
+                        return (relay, owner)
+                    }
+                )
+                devices = (payload["devices"] as? [[String: Any]] ?? []).compactMap { item in
+                    guard let relay = item["relay_ref"] as? String, !relay.isEmpty else { return nil }
+                    let label = (item["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return PromLightDeviceDraft(
+                        relayRef: relay,
+                        label: label?.isEmpty == false ? label! : "PromLight",
+                        boundOwnerOpenID: ownersByRelay[relay]
+                    )
+                }
+            }
+            Task { @MainActor in
+                guard let self else { return }
+                self.isRefreshingPromLight = false
+                self.promLightDevices = devices
+                if !devices.contains(where: { $0.relayRef == self.selectedPromLightRelayRef }) {
+                    self.selectedPromLightRelayRef = devices.first?.relayRef ?? ""
+                }
+                let existingOpenIDs = self.draftUsers.map(\.openID).filter { $0.hasPrefix("ou_") }
+                if !existingOpenIDs.contains(self.selectedPromLightOwnerOpenID) {
+                    self.selectedPromLightOwnerOpenID = existingOpenIDs.first ?? ""
+                }
+                self.promLightStatus = result.status == 0
+                    ? (devices.isEmpty ? "没有发现在线提示灯。请先打开 PromLight 并连接设备。" : "发现 \(devices.count) 盏在线提示灯。")
+                    : "无法读取 PromLight。请确认 Bridge 已安装、PromLight 正在运行。"
+            }
+        }
+    }
+
+    func bindSelectedPromLight() {
+        let relayRef = selectedPromLightRelayRef
+        let openID = selectedPromLightOwnerOpenID
+        guard !relayRef.isEmpty, openID.hasPrefix("ou_") else {
+            presentError(title: "无法绑定提示灯", message: "请选择一盏在线提示灯和一位已授权飞书用户。")
+            return
+        }
+        let name = promLightName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let result = bridge.bindPromLight(openID: openID, relayRef: relayRef, name: name)
+        if result.status != 0 {
+            presentError(
+                title: "提示灯绑定失败",
+                message: result.output.isEmpty ? "请确认设备仍在线，并且用户已保存到桥接授权列表。" : result.output
+            )
+            return
+        }
+        promLightName = ""
+        promLightStatus = "提示灯已归属到选定用户。Task 关注与重命名可继续在飞书卡片中完成。"
+        refreshPromLightDevices()
     }
 
     func checkForUpdates(manual: Bool = false) {
@@ -1058,11 +1164,18 @@ private final class BridgeViewModel: ObservableObject {
         draftCompactContextEventKey = String(
             describing: config["compact_context_menu_event_key"] ?? "compact_task_context"
         )
+        draftPromLightEventKey = String(
+            describing: config["promlight_menu_event_key"] ?? "promlight"
+        )
+        draftPromLightLegendEventKey = String(
+            describing: config["promlight_legend_menu_event_key"] ?? "promlight_legend"
+        )
         draftMaxConcurrentRuns = min(
             8,
             max(1, (config["max_concurrent_runs"] as? NSNumber)?.intValue ?? 2)
         )
         showConfiguration = true
+        refreshPromLightDevices()
     }
 
     func saveConfiguration() {
@@ -1077,6 +1190,8 @@ private final class BridgeViewModel: ObservableObject {
         let taskSubscriptionsEventKey = draftTaskSubscriptionsEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let taskSettingsEventKey = draftTaskSettingsEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let compactContextEventKey = draftCompactContextEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let promLightEventKey = draftPromLightEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let promLightLegendEventKey = draftPromLightLegendEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !profile.isEmpty else {
             presentError(title: "配置未保存", message: "lark-cli Profile 不能为空。")
             return
@@ -1127,7 +1242,9 @@ private final class BridgeViewModel: ObservableObject {
             desktopSyncSwitchEventKey: desktopSyncSwitchEventKey,
             taskSubscriptionsEventKey: taskSubscriptionsEventKey,
             taskSettingsEventKey: taskSettingsEventKey,
-            compactContextEventKey: compactContextEventKey
+            compactContextEventKey: compactContextEventKey,
+            promLightEventKey: promLightEventKey,
+            promLightLegendEventKey: promLightLegendEventKey
         )
     }
 
@@ -1143,7 +1260,9 @@ private final class BridgeViewModel: ObservableObject {
         desktopSyncSwitchEventKey: String,
         taskSubscriptionsEventKey: String,
         taskSettingsEventKey: String,
-        compactContextEventKey: String
+        compactContextEventKey: String,
+        promLightEventKey: String,
+        promLightLegendEventKey: String
     ) {
         let menuEventKeys = [
             currentTaskEventKey,
@@ -1156,13 +1275,15 @@ private final class BridgeViewModel: ObservableObject {
             taskSubscriptionsEventKey,
             taskSettingsEventKey,
             compactContextEventKey,
+            promLightEventKey,
+            promLightLegendEventKey,
         ]
         guard menuEventKeys.allSatisfy({ !$0.isEmpty }) else {
-            presentError(title: "配置未保存", message: "十个机器人菜单 Event Key 都不能为空。")
+            presentError(title: "配置未保存", message: "十二个机器人菜单 Event Key 都不能为空。")
             return
         }
         guard Set(menuEventKeys).count == menuEventKeys.count else {
-            presentError(title: "配置未保存", message: "十个机器人菜单 Event Key 不能重复。")
+            presentError(title: "配置未保存", message: "十二个机器人菜单 Event Key 不能重复。")
             return
         }
 
@@ -1190,6 +1311,8 @@ private final class BridgeViewModel: ObservableObject {
         config["task_subscriptions_menu_event_key"] = taskSubscriptionsEventKey
         config["task_settings_menu_event_key"] = taskSettingsEventKey
         config["compact_context_menu_event_key"] = compactContextEventKey
+        config["promlight_menu_event_key"] = promLightEventKey
+        config["promlight_legend_menu_event_key"] = promLightLegendEventKey
         config["max_concurrent_runs"] = min(8, max(1, draftMaxConcurrentRuns))
         config["max_prompt_chars"] = config["max_prompt_chars"] ?? 12000
         config["max_reply_chars"] = config["max_reply_chars"] ?? 3000
@@ -2461,6 +2584,9 @@ private struct ConfigurationChecklistView: View {
                         "task_settings · 修改当前 Task 模型",
                         "compact_task_context · 压缩当前 Task 上下文",
                         "codex_usage · Codex 额度用量",
+                        "一级菜单 · 提示灯",
+                        "promlight · 我的提示灯",
+                        "promlight_legend · 灯光状态说明",
                     ])
                     Divider()
                     Button("打开飞书开放平台", systemImage: "arrow.up.right.square") {
@@ -2500,6 +2626,7 @@ private struct ConfigurationView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     connectionSettings
+                    promLightSettings
                     advancedSettings
                     accessRequests
                     authorizedUsers
@@ -2621,10 +2748,85 @@ private struct ConfigurationView: View {
                         text: $model.draftTaskSubscriptionsEventKey,
                         monospaced: true
                     )
+                    configurationField(
+                        "我的提示灯",
+                        placeholder: "promlight",
+                        text: $model.draftPromLightEventKey,
+                        monospaced: true
+                    )
+                    configurationField(
+                        "灯光状态说明",
+                        placeholder: "promlight_legend",
+                        text: $model.draftPromLightLegendEventKey,
+                        monospaced: true
+                    )
                 }
                 .padding(.top, 10)
             }
             .padding(.vertical, 4)
+        }
+    }
+
+    private var promLightSettings: some View {
+        GroupBox("提示灯") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("本地电脑连接")
+                            .font(.headline)
+                        Text("发现 PromLight，并把灯归属给一位已授权飞书用户。设备标识只保存在本机。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("刷新设备", systemImage: "arrow.clockwise") {
+                        model.refreshPromLightDevices()
+                    }
+                    .disabled(model.isRefreshingPromLight)
+                }
+                if model.promLightDevices.isEmpty {
+                    Text(model.promLightStatus)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("在线提示灯", selection: $model.selectedPromLightRelayRef) {
+                        ForEach(model.promLightDevices) { device in
+                            Text(
+                                device.label
+                                    + (device.boundOwnerOpenID == nil ? "" : " · 已绑定")
+                            )
+                            .tag(device.relayRef)
+                        }
+                    }
+                    Picker("归属用户", selection: $model.selectedPromLightOwnerOpenID) {
+                        ForEach(model.draftUsers.filter { $0.openID.hasPrefix("ou_") }) { user in
+                            Text(user.name.isEmpty ? "已授权用户" : user.name)
+                                .tag(user.openID)
+                        }
+                    }
+                    TextField("可选名称，例如：书桌提示灯", text: $model.promLightName)
+                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        Button("绑定到选定用户") {
+                            model.bindSelectedPromLight()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(
+                            model.selectedPromLightRelayRef.isEmpty
+                                || model.selectedPromLightOwnerOpenID.isEmpty
+                        )
+                        Text(model.promLightStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Divider()
+                Text("手机/Pad 连接：飞书小程序可用于前台配对和重连，但不能承担持续后台提醒；真实 GATT 协议和真机能力完成验证前不会显示为可用。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 6)
         }
     }
 

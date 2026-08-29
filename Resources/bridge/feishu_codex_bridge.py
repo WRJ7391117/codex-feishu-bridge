@@ -25,7 +25,9 @@ import tempfile
 import threading
 import time
 from typing import Any, Callable
+from urllib.error import URLError
 from urllib.parse import unquote, urlsplit
+from urllib.request import Request, urlopen
 import uuid
 
 
@@ -294,6 +296,34 @@ TASK_SETTINGS_MENU_EVENT_KEY = str(
 COMPACT_CONTEXT_MENU_EVENT_KEY = str(
     CONFIG.get("compact_context_menu_event_key") or "compact_task_context"
 )
+PROMLIGHT_MENU_EVENT_KEY = str(
+    CONFIG.get("promlight_menu_event_key") or "promlight"
+)
+PROMLIGHT_LEGEND_MENU_EVENT_KEY = str(
+    CONFIG.get("promlight_legend_menu_event_key") or "promlight_legend"
+)
+PROMLIGHT_API_BASE = "http://127.0.0.1:7800"
+PROMLIGHT_HTTP_TIMEOUT_SECONDS = 2
+PROMLIGHT_TASK_STATUSES = {"idle", "running", "human_gate", "error", "unknown"}
+PROMLIGHT_STATUS_PRIORITY = {
+    "unknown": 0,
+    "idle": 1,
+    "running": 2,
+    "human_gate": 3,
+    "error": 4,
+}
+PROMLIGHT_STATUS_COMMANDS = {
+    "idle": "led green on --only",
+    "running": "led yellow on --only",
+    "human_gate": "led yellow blink --only",
+    "error": "led red blink --only",
+}
+PROMLIGHT_LEGEND_TEXT = (
+    "绿灯常亮：已完成，当前无需处理\n"
+    "黄灯常亮：正在处理中\n"
+    "黄灯闪烁：需要你处理\n"
+    "红灯闪烁：执行出错，请查看 Task"
+)
 REPLY_RETRY_DELAYS = (1.0, 2.0)
 CARD_PATCH_RETRY_DELAYS: tuple[float, ...] = ()
 CARD_PATCH_TIMEOUT_SECONDS = 3
@@ -341,6 +371,12 @@ _last_reply_failure_reason = ""
 _reply_failure_context = threading.local()
 
 _consumers: list[subprocess.Popen[str]] = []
+_promlight_delivery_lock = threading.RLock()
+_promlight_work_condition = threading.Condition()
+_promlight_pending_statuses: dict[
+    str, tuple[str, str, bool, float, str, str]
+] = {}
+_promlight_pending_lamps: dict[str, bool] = {}
 
 
 class InterprocessStateLock:
@@ -609,6 +645,614 @@ def save_state(state: dict[str, Any]) -> None:
                 os.close(directory_descriptor)
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def promlight_state(state: dict[str, Any]) -> dict[str, Any]:
+    namespace = state.setdefault("promlight", {})
+    if not isinstance(namespace, dict):
+        namespace = {}
+        state["promlight"] = namespace
+    for key in ("lamps", "task_statuses", "selected_lamps", "selected_tasks", "selected_projects", "pending_renames"):
+        value = namespace.setdefault(key, {})
+        if not isinstance(value, dict):
+            namespace[key] = {}
+    return namespace
+
+
+def promlight_http_json(path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not path.startswith("/"):
+        raise ValueError("PromLight API path must be local")
+    data = None
+    headers: dict[str, str] = {}
+    if body is not None:
+        data = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(PROMLIGHT_API_BASE + path, data=data, headers=headers)
+    with urlopen(request, timeout=PROMLIGHT_HTTP_TIMEOUT_SECONDS) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("PromLight API returned a non-object response")
+    return payload
+
+
+def discover_promlight_devices() -> list[dict[str, Any]]:
+    try:
+        payload = promlight_http_json("/api/status")
+    except (OSError, URLError, ValueError, json.JSONDecodeError):
+        return []
+    devices = payload.get("devices")
+    if not isinstance(devices, list):
+        return []
+    discovered: list[dict[str, Any]] = []
+    for item in devices:
+        if not isinstance(item, dict):
+            continue
+        if item.get("opened") is not True:
+            continue
+        relay_ref = str(item.get("mac") or "").strip()
+        if not relay_ref:
+            continue
+        label = str(item.get("label") or item.get("product") or "PromLight").strip()
+        discovered.append(
+            {
+                "relay_ref": relay_ref,
+                "label": label[:80] or "PromLight",
+                "online": True,
+            }
+        )
+    return discovered
+
+
+def user_promlight_lamps(state: dict[str, Any], user_id: str) -> list[dict[str, Any]]:
+    lamps = promlight_state(state)["lamps"]
+    return sorted(
+        [
+            dict(lamp)
+            for lamp in lamps.values()
+            if isinstance(lamp, dict) and lamp.get("owner_open_id") == user_id
+        ],
+        key=lambda lamp: (
+            not bool(lamp.get("is_default")),
+            str(lamp.get("name") or "").lower(),
+            str(lamp.get("lamp_id") or ""),
+        ),
+    )
+
+
+def owned_promlight_lamp(
+    state: dict[str, Any],
+    user_id: str,
+    lamp_id: str,
+) -> dict[str, Any]:
+    lamp = promlight_state(state)["lamps"].get(lamp_id)
+    if not isinstance(lamp, dict) or lamp.get("owner_open_id") != user_id:
+        raise PermissionError("提示灯不存在或不属于当前用户")
+    return lamp
+
+
+def bind_promlight(user_id: str, relay_ref: str, name: str = "") -> str:
+    if not authorized_user(user_id):
+        raise PermissionError("当前用户未获桥接授权")
+    relay_ref = str(relay_ref or "").strip()
+    devices = {item["relay_ref"]: item for item in discover_promlight_devices()}
+    discovered = devices.get(relay_ref)
+    if discovered is None:
+        raise ValueError("没有发现这盏在线提示灯")
+    with _promlight_delivery_lock, _state_lock:
+        state = load_state()
+        namespace = promlight_state(state)
+        for lamp in namespace["lamps"].values():
+            if not isinstance(lamp, dict) or lamp.get("relay_ref") != relay_ref:
+                continue
+            if lamp.get("owner_open_id") != user_id:
+                raise PermissionError("这盏提示灯已归属于其他用户")
+            if lamp.get("pending_unbind"):
+                raise ValueError("这盏提示灯正在解绑待收口，请等待设备恢复在线后再绑定")
+            return str(lamp["lamp_id"])
+        lamp_id = "light_" + uuid.uuid4().hex[:12]
+        existing = user_promlight_lamps(state, user_id)
+        lamp_name = " ".join(str(name or discovered["label"]).split())[:40]
+        namespace["lamps"][lamp_id] = {
+            "lamp_id": lamp_id,
+            "owner_open_id": user_id,
+            "name": lamp_name or "我的提示灯",
+            "relay_ref": relay_ref,
+            "relay_type": "desktop",
+            "active_relay": "desktop",
+            "task_ids": [],
+            "is_default": not existing,
+            "online": True,
+            "last_logical_status": "idle",
+            "last_delivery": "not_sent",
+            "last_verified": False,
+            "revision": 1,
+            "updated_at": time.time(),
+        }
+        namespace["selected_lamps"][user_id] = lamp_id
+        save_state(state)
+    return lamp_id
+
+
+def rename_promlight(user_id: str, lamp_id: str, name: str) -> None:
+    normalized = " ".join(str(name or "").split())[:40]
+    if not normalized:
+        raise ValueError("提示灯名称不能为空")
+    with _state_lock:
+        state = load_state()
+        owned_promlight_lamp(state, user_id, lamp_id)["name"] = normalized
+        save_state(state)
+
+
+def set_default_promlight(user_id: str, lamp_id: str) -> None:
+    with _state_lock:
+        state = load_state()
+        selected = owned_promlight_lamp(state, user_id, lamp_id)
+        for lamp in promlight_state(state)["lamps"].values():
+            if isinstance(lamp, dict) and lamp.get("owner_open_id") == user_id:
+                lamp["is_default"] = lamp is selected
+        save_state(state)
+
+
+def unbind_promlight(user_id: str, lamp_id: str) -> None:
+    with _state_lock:
+        state = load_state()
+        lamp = owned_promlight_lamp(state, user_id, lamp_id)
+        lamp["task_ids"] = []
+        lamp["pending_unbind"] = True
+        lamp["pending_unbind_reason"] = "user_request"
+        lamp["pending_idle"] = False
+        lamp["revision"] = int(lamp.get("revision") or 0) + 1
+        lamp["next_retry_at"] = 0
+        save_state(state)
+    schedule_promlight_lamp_refresh(lamp_id, force=True)
+
+
+def set_promlight_task_subscription(
+    user_id: str,
+    lamp_id: str,
+    task_id: str,
+    enabled: bool,
+) -> bool:
+    task = task_by_id(task_id, user_id)
+    if enabled and (task is None or not user_can_access_task(user_id, task)):
+        raise PermissionError("该 Task 已归档、删除或不再属于你的授权项目")
+    with _state_lock:
+        state = load_state()
+        lamp = owned_promlight_lamp(state, user_id, lamp_id)
+        task_ids = [str(value) for value in lamp.get("task_ids", []) if str(value)]
+        previous_ids = list(task_ids)
+        if enabled and task_id not in task_ids:
+            task_ids.append(task_id)
+        elif not enabled and task_id in task_ids:
+            task_ids.remove(task_id)
+        lamp["task_ids"] = task_ids
+        if task_ids != previous_ids:
+            lamp["revision"] = int(lamp.get("revision") or 0) + 1
+        if task_ids:
+            lamp["pending_idle"] = False
+        elif previous_ids:
+            lamp["pending_idle"] = True
+            lamp["next_retry_at"] = 0
+        namespace = promlight_state(state)
+        namespace["selected_lamps"][user_id] = lamp_id
+        if task is not None:
+            namespace["selected_tasks"][user_id] = task_id
+            namespace["selected_projects"][user_id] = task["project"]
+        save_state(state)
+    refresh_promlight_lamp(lamp_id, force=True)
+    return enabled
+
+
+def aggregate_promlight_status(statuses: list[str]) -> str:
+    effective = [status for status in statuses if status in PROMLIGHT_STATUS_PRIORITY]
+    if not effective:
+        return "idle"
+    return max(effective, key=lambda status: PROMLIGHT_STATUS_PRIORITY[status])
+
+
+def promlight_command_for_status(status: str) -> str:
+    if status not in PROMLIGHT_STATUS_COMMANDS:
+        raise ValueError("PromLight status has no safe physical command")
+    return PROMLIGHT_STATUS_COMMANDS[status]
+
+
+def remove_promlight_binding(state: dict[str, Any], lamp_id: str) -> None:
+    namespace = promlight_state(state)
+    current = namespace["lamps"].pop(lamp_id, None)
+    if not isinstance(current, dict):
+        return
+    owner = str(current.get("owner_open_id") or "")
+    if current.get("is_default"):
+        remaining = user_promlight_lamps(state, owner)
+        if remaining:
+            namespace["lamps"][remaining[0]["lamp_id"]]["is_default"] = True
+    if namespace["selected_lamps"].get(owner) == lamp_id:
+        namespace["selected_lamps"].pop(owner, None)
+
+
+def deliver_promlight_effect(lamp: dict[str, Any], status: str) -> dict[str, Any]:
+    if str(lamp.get("active_relay") or "") != "desktop":
+        return {"online": False, "delivery": "unknown", "verified": False}
+    relay_ref = str(lamp.get("relay_ref") or "").strip()
+    if not relay_ref:
+        return {"online": False, "delivery": "unknown", "verified": False}
+    try:
+        response = promlight_http_json(
+            "/api/command",
+            {"device": relay_ref, "cmd": promlight_command_for_status(status)},
+        )
+    except (OSError, URLError, ValueError, json.JSONDecodeError):
+        return {"online": False, "delivery": "unknown", "verified": False}
+    results = response.get("results")
+    statuses = [
+        str(item.get("status") or "")
+        for item in results
+        if isinstance(item, dict)
+    ] if isinstance(results, list) else []
+    acknowledged = bool(response.get("ok")) and bool(statuses) and all(
+        value == "ok" for value in statuses
+    )
+    return {
+        "online": acknowledged,
+        "delivery": "acknowledged" if acknowledged else "unknown",
+        "verified": False,
+    }
+
+
+def refresh_promlight_lamp(lamp_id: str, force: bool = False) -> bool:
+    with _promlight_delivery_lock:
+        with _state_lock:
+            state = load_state()
+            namespace = promlight_state(state)
+            current = namespace["lamps"].get(lamp_id)
+            if not isinstance(current, dict):
+                return False
+            lamp = dict(current)
+            task_ids = [str(value) for value in lamp.get("task_ids", []) if str(value)]
+            statuses = namespace["task_statuses"]
+            owner = str(lamp.get("owner_open_id") or "")
+            lamp_statuses: list[str] = []
+            for task_id in task_ids:
+                entry = statuses.get(task_id)
+                if not isinstance(entry, dict):
+                    continue
+                entry_status = str(entry.get("status") or "idle")
+                target_user_id = str(entry.get("target_user_id") or "")
+                if entry_status == "human_gate" and target_user_id != owner:
+                    entry_status = "running"
+                lamp_statuses.append(entry_status)
+            pending_unbind = bool(lamp.get("pending_unbind"))
+            pending_idle = bool(lamp.get("pending_idle"))
+            logical_status = (
+                "idle"
+                if pending_unbind or pending_idle or (force and not task_ids)
+                else "unknown"
+                if task_ids and not lamp_statuses
+                else aggregate_promlight_status(lamp_statuses)
+            )
+            if not task_ids and not force and not pending_unbind and not pending_idle:
+                return False
+            now = time.time()
+            if (
+                not force
+                and lamp.get("last_logical_status") == logical_status
+                and lamp.get("last_delivery") == "acknowledged"
+            ):
+                return False
+            if (
+                not force
+                and lamp.get("last_delivery") != "acknowledged"
+                and now < float(lamp.get("next_retry_at") or 0)
+            ):
+                return False
+            if logical_status == "unknown":
+                current["online"] = False
+                current["last_delivery"] = "unknown"
+                current["last_verified"] = False
+                current["pending_delivery_status"] = ""
+                current["next_retry_at"] = 0
+                current["updated_at"] = now
+                save_state(state)
+                return True
+        result = deliver_promlight_effect(lamp, logical_status)
+        with _state_lock:
+            state = load_state()
+            current = promlight_state(state)["lamps"].get(lamp_id)
+            if not isinstance(current, dict):
+                return False
+            if int(current.get("revision") or 0) != int(lamp.get("revision") or 0):
+                return False
+            acknowledged = result.get("delivery") == "acknowledged"
+            if acknowledged:
+                current["last_logical_status"] = logical_status
+            current["online"] = bool(result.get("online"))
+            current["last_delivery"] = str(result.get("delivery") or "unknown")
+            current["last_verified"] = bool(result.get("verified"))
+            current["updated_at"] = time.time()
+            if acknowledged:
+                current["retry_count"] = 0
+                current["next_retry_at"] = 0
+                current["pending_delivery_status"] = ""
+                if current.get("pending_unbind") and logical_status == "idle":
+                    remove_promlight_binding(state, lamp_id)
+                elif current.get("pending_idle") and logical_status == "idle":
+                    current["pending_idle"] = False
+            else:
+                retry_count = int(current.get("retry_count") or 0) + 1
+                current["retry_count"] = retry_count
+                current["pending_delivery_status"] = logical_status
+                current["next_retry_at"] = time.time() + min(30, 2 ** min(retry_count, 5))
+            save_state(state)
+        return True
+
+
+def record_promlight_task_status(
+    task_id: str,
+    status: str,
+    source: str,
+    definitive: bool,
+    observed_at: float | None = None,
+    target_user_id: str = "",
+    defer_delivery: bool = False,
+) -> bool:
+    if status not in PROMLIGHT_TASK_STATUSES:
+        raise ValueError("unknown PromLight task status")
+    effective = status if status != "error" or definitive else "unknown"
+    timestamp = time.time() if observed_at is None else float(observed_at)
+    with _state_lock:
+        state = load_state()
+        namespace = promlight_state(state)
+        previous = namespace["task_statuses"].get(task_id)
+        if isinstance(previous, dict) and float(previous.get("updated_at") or 0) > timestamp:
+            return False
+        next_value = {
+            "status": effective,
+            "reported_status": status,
+            "source": str(source)[:40],
+            "definitive": bool(definitive),
+            "target_user_id": str(target_user_id) if effective == "human_gate" else "",
+            "updated_at": timestamp,
+        }
+        namespace["task_statuses"][task_id] = next_value
+        lamp_ids = [
+            lamp_id
+            for lamp_id, lamp in namespace["lamps"].items()
+            if isinstance(lamp, dict) and task_id in lamp.get("task_ids", [])
+        ]
+        changed = previous != next_value
+        save_state(state)
+    for lamp_id in lamp_ids:
+        if defer_delivery:
+            schedule_promlight_lamp_refresh(lamp_id)
+        else:
+            refresh_promlight_lamp(lamp_id)
+    return changed
+
+
+def schedule_promlight_task_status(
+    task_id: str,
+    status: str,
+    source: str,
+    definitive: bool,
+    target_user_id: str = "",
+    turn_id: str = "",
+) -> None:
+    with _promlight_work_condition:
+        pending = _promlight_pending_statuses.get(task_id)
+        if (
+            pending is not None
+            and pending[1] == "bridge_run"
+            and pending[0] in {"human_gate", "error"}
+            and source == "rollout"
+        ):
+            return
+        _promlight_pending_statuses[task_id] = (
+            status,
+            source,
+            definitive,
+            time.time(),
+            target_user_id,
+            turn_id,
+        )
+        _promlight_work_condition.notify()
+
+
+def schedule_promlight_lamp_refresh(lamp_id: str, force: bool = False) -> None:
+    with _promlight_work_condition:
+        _promlight_pending_lamps[lamp_id] = (
+            bool(force) or _promlight_pending_lamps.get(lamp_id, False)
+        )
+        _promlight_work_condition.notify()
+
+
+def process_promlight_work_once() -> bool:
+    task_work: tuple[str, tuple[str, str, bool, float, str, str]] | None = None
+    lamp_work: tuple[str, bool] | None = None
+    with _promlight_work_condition:
+        if _promlight_pending_statuses:
+            task_work = _promlight_pending_statuses.popitem()
+        elif _promlight_pending_lamps:
+            lamp_work = _promlight_pending_lamps.popitem()
+    if task_work is not None:
+        task_id, work = task_work
+        status, source, definitive, observed_at, target_user_id, turn_id = work
+        record_promlight_task_status(
+            task_id,
+            status,
+            source,
+            definitive,
+            observed_at,
+            target_user_id,
+            defer_delivery=True,
+        )
+        if turn_id:
+            with _state_lock:
+                state = load_state()
+                entry = promlight_state(state)["task_statuses"].get(task_id)
+                if isinstance(entry, dict):
+                    entry["turn_id"] = turn_id
+                    save_state(state)
+        return True
+    if lamp_work is not None:
+        refresh_promlight_lamp(*lamp_work)
+        return True
+    return False
+
+
+def promlight_worker_loop() -> None:
+    while not _shutdown_event.is_set():
+        with _promlight_work_condition:
+            if not _promlight_pending_statuses and not _promlight_pending_lamps:
+                _promlight_work_condition.wait(timeout=0.5)
+        try:
+            process_promlight_work_once()
+        except Exception as exc:
+            log(f"PromLight worker failed: {type(exc).__name__}: {exc}")
+
+
+def reconcile_promlight_state() -> bool:
+    idle_lamps: dict[str, bool] = {}
+    changed = False
+    with _promlight_delivery_lock, _state_lock:
+        state = load_state()
+        namespace = promlight_state(state)
+        for lamp_id, value in list(namespace["lamps"].items()):
+            if not isinstance(value, dict):
+                namespace["lamps"].pop(lamp_id, None)
+                changed = True
+                continue
+            owner = str(value.get("owner_open_id") or "")
+            if not authorized_user(owner):
+                if not value.get("pending_unbind"):
+                    value["task_ids"] = []
+                    value["pending_unbind"] = True
+                    value["pending_unbind_reason"] = "permission_revoked"
+                    value["pending_idle"] = False
+                    value["revision"] = int(value.get("revision") or 0) + 1
+                    value["next_retry_at"] = 0
+                    idle_lamps[lamp_id] = True
+                    changed = True
+                elif time.time() >= float(value.get("next_retry_at") or 0):
+                    idle_lamps[lamp_id] = False
+                for key in ("selected_lamps", "selected_tasks", "selected_projects", "pending_renames"):
+                    if owner in namespace[key]:
+                        namespace[key].pop(owner, None)
+                        changed = True
+                continue
+            try:
+                valid_ids = {task["id"] for task in recent_tasks(owner)}
+            except (OSError, sqlite3.Error):
+                continue
+            before = [str(item) for item in value.get("task_ids", []) if str(item)]
+            after = [task_id for task_id in before if task_id in valid_ids]
+            if after != before:
+                value["task_ids"] = after
+                value["revision"] = int(value.get("revision") or 0) + 1
+                changed = True
+                if not after:
+                    value["pending_idle"] = True
+                    value["next_retry_at"] = 0
+                    idle_lamps[lamp_id] = True
+            elif (
+                value.get("pending_idle")
+                and time.time() >= float(value.get("next_retry_at") or 0)
+            ):
+                idle_lamps[lamp_id] = False
+        for owner in list(namespace["selected_lamps"]):
+            selected = str(namespace["selected_lamps"].get(owner) or "")
+            lamp = namespace["lamps"].get(selected)
+            if not isinstance(lamp, dict) or lamp.get("owner_open_id") != owner:
+                namespace["selected_lamps"].pop(owner, None)
+                changed = True
+        watched = {
+            str(task_id)
+            for lamp in namespace["lamps"].values()
+            if isinstance(lamp, dict)
+            for task_id in lamp.get("task_ids", [])
+            if str(task_id)
+        }
+        for task_id in list(namespace["task_statuses"]):
+            if task_id not in watched:
+                namespace["task_statuses"].pop(task_id, None)
+                changed = True
+        if changed:
+            save_state(state)
+    for lamp_id, force in idle_lamps.items():
+        schedule_promlight_lamp_refresh(lamp_id, force)
+    return changed
+
+
+def promlight_task_is_watched(task_id: str) -> bool:
+    with _state_lock:
+        lamps = promlight_state(load_state())["lamps"]
+        return any(
+            isinstance(lamp, dict) and task_id in lamp.get("task_ids", [])
+            for lamp in lamps.values()
+        )
+
+
+def poll_promlight_task_statuses() -> bool:
+    did_work = reconcile_promlight_state()
+    with _state_lock:
+        state = load_state()
+        namespace = promlight_state(state)
+        watched = list(
+            dict.fromkeys(
+                str(task_id)
+                for lamp in namespace["lamps"].values()
+                if isinstance(lamp, dict)
+                for task_id in lamp.get("task_ids", [])
+                if str(task_id)
+            )
+        )
+        previous = dict(namespace["task_statuses"])
+    for task_id in watched:
+        try:
+            snapshot = latest_rollout_turn(rollout_path_for_task(task_id))
+        except (OSError, sqlite3.Error):
+            continue
+        snapshot_status = str(snapshot.get("status") or "none")
+        mapped = {
+            "running": "running",
+            "completed": "idle",
+            "failed": "error",
+            "none": "unknown",
+        }.get(snapshot_status, "unknown")
+        existing = previous.get(task_id)
+        if (
+            mapped == "running"
+            and isinstance(existing, dict)
+            and existing.get("status") == "human_gate"
+            and existing.get("source") == "bridge_run"
+        ):
+            continue
+        definitive = snapshot_status in {"failed", "completed", "running"}
+        existing_status = str(existing.get("status") or "") if isinstance(existing, dict) else ""
+        existing_turn = str(existing.get("turn_id") or "") if isinstance(existing, dict) else ""
+        turn_id = str(snapshot.get("turn_id") or "")
+        if existing_status == mapped and existing_turn == turn_id:
+            with _state_lock:
+                state = load_state()
+                retry_lamps = [
+                    str(lamp_id)
+                    for lamp_id, lamp in promlight_state(state)["lamps"].items()
+                    if isinstance(lamp, dict)
+                    and task_id in lamp.get("task_ids", [])
+                    and bool(lamp.get("pending_delivery_status"))
+                    and time.time() >= float(lamp.get("next_retry_at") or 0)
+                ]
+            for lamp_id in retry_lamps:
+                schedule_promlight_lamp_refresh(lamp_id)
+            continue
+        schedule_promlight_task_status(
+            task_id,
+            mapped,
+            "rollout",
+            definitive,
+            turn_id=turn_id,
+        )
+        did_work = True
+    return did_work
 
 
 def remove_access_requests(open_ids: set[str]) -> int:
@@ -4790,7 +5434,15 @@ def retry_workflow_recoveries(now: float | None = None) -> bool:
 
 def workflow_event_authorized(event: dict[str, Any], record: dict[str, Any]) -> bool:
     recipient, configured_chat_id = workflow_recipient()
-    user_id = str(event.get("operator_id") or event.get("sender_id") or "")
+    user_id = str(
+        event.get("operator_id")
+        or (
+            event.get("sender_id")
+            if event.get("type") not in {"card.action.trigger", "application.bot.menu_v6"}
+            else ""
+        )
+        or ""
+    )
     chat_id = str(event.get("chat_id") or "")
     expected_chat = configured_chat_id or str(record.get("chat_id") or "")
     return user_id == recipient and bool(chat_id) and chat_id == expected_chat
@@ -4856,7 +5508,7 @@ def handle_workflow_card_action(
         processed_key = f"workflow-route:{bridge_event_id}"
         if not mark_processed(load_state(), processed_key):
             return True
-        user_id = str(event.get("operator_id") or event.get("sender_id") or "")
+        user_id = str(event.get("operator_id") or "")
         target_task_id = str(payload.get("task_id") or "")
         if target_task_id != workflow_codex_task_id():
             log("workflow route ignored reason=target-mismatch")
@@ -6864,6 +7516,396 @@ def build_task_subscriptions_card(
     }
 
 
+def promlight_button(
+    text: str,
+    action: str,
+    *,
+    lamp_id: str = "",
+    task_id: str = "",
+    style: str = "default",
+    confirm: tuple[str, str] | None = None,
+) -> dict[str, Any]:
+    value = {"action": action}
+    if lamp_id:
+        value["lamp_id"] = lamp_id
+    if task_id:
+        value["task_id"] = task_id
+    button: dict[str, Any] = {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": text},
+        "type": style,
+        "behaviors": [{"type": "callback", "value": value}],
+    }
+    if confirm is not None:
+        button["confirm"] = {
+            "title": {"tag": "plain_text", "content": confirm[0]},
+            "text": {"tag": "plain_text", "content": confirm[1]},
+        }
+    return button
+
+
+def promlight_legend_element() -> dict[str, Any]:
+    return {
+        "tag": "markdown",
+        "content": (
+            "---\n**灯光图例**\n"
+            + PROMLIGHT_LEGEND_TEXT
+            + "\n\n<font color='grey'>多 Task：红灯闪烁 > 黄灯闪烁 > 黄灯常亮 > 绿灯常亮。"
+            "仅计算你为这盏灯显式关注的 Task。</font>"
+        ),
+    }
+
+
+def build_promlight_legend_card() -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": "灯光状态说明"},
+            "subtitle": {"tag": "plain_text", "content": "PromLight · 按关注 Task 聚合"},
+            "template": "blue",
+            "icon": {"tag": "standard_icon", "token": "lightbulb_colorful"},
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        "**完整说明**\n"
+                        + PROMLIGHT_LEGEND_TEXT
+                        + "\n\n**多 Task 聚合优先级**\n"
+                        "红灯闪烁 > 黄灯闪烁 > 黄灯常亮 > 绿灯常亮\n\n"
+                        "只有你显式关注的 Task 会影响提示灯。灯离线时，卡片会明确显示“提示灯离线”，"
+                        "并保留最后逻辑状态；命令 ACK 不等于灯效已独立回读验证。"
+                    ),
+                },
+                promlight_button("返回我的提示灯", "show_promlight", style="primary_filled"),
+            ],
+        },
+    }
+
+
+def promlight_status_label(status: str) -> str:
+    return {
+        "idle": "绿灯常亮 · 已完成/空闲",
+        "running": "黄灯常亮 · 正在处理中",
+        "human_gate": "黄灯闪烁 · 需要你处理",
+        "error": "红灯闪烁 · 执行出错",
+    }.get(status, "状态待确认")
+
+
+def promlight_updated_text(value: Any) -> str:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return "尚未更新"
+    return datetime.fromtimestamp(timestamp).astimezone().strftime("%m-%d %H:%M:%S")
+
+
+def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    lamps = user_promlight_lamps(state, user_id)
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "markdown",
+            "content": (
+                "在共享 Mac 上由 Bridge 驱动提示灯；飞书用于身份、配置和状态查看。"
+                "每盏灯只受它自己显式关注的 Task 影响。"
+            ),
+        }
+    ]
+    if not lamps:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": "**我的提示灯**\n尚未绑定提示灯。请先选择一种连接方式。",
+            }
+        )
+    for lamp in lamps:
+        lamp_id = str(lamp.get("lamp_id") or "")
+        online = lamp.get("online") is True
+        status = str(lamp.get("last_logical_status") or "idle")
+        task_names: list[str] = []
+        for task_id in lamp.get("task_ids", []):
+            task = task_by_id(str(task_id), user_id)
+            if task is not None:
+                task_names.append(option_text(task))
+        delivery = str(lamp.get("last_delivery") or "not_sent")
+        delivery_text = (
+            "设备已 ACK，灯效未独立回读"
+            if delivery == "acknowledged"
+            else "投递结果未知"
+            if delivery == "unknown"
+            else "尚未下发"
+        )
+        pending_unbind = bool(lamp.get("pending_unbind"))
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": (
+                    f"**{card_markdown_escape(str(lamp.get('name') or 'PromLight'))}**"
+                    + (" · 默认灯" if lamp.get("is_default") else "")
+                    + f"\n{'在线' if online else '提示灯离线'} · 当前中继：本地 Bridge"
+                    + f"\n最后逻辑状态：{promlight_status_label(status)}"
+                    + f"\n状态更新时间：{promlight_updated_text(lamp.get('updated_at'))}"
+                    + f"\n投递语义：{delivery_text}"
+                    + ("\n解绑状态：解绑待收口；灯恢复在线并确认熄除任务灯效后自动完成" if pending_unbind else "")
+                    + "\n关注 Task："
+                    + ("、".join(card_markdown_escape(name) for name in task_names) if task_names else "未关注")
+                ),
+            }
+        )
+        if not pending_unbind:
+            elements.append(
+                promlight_button(
+                    "管理关注 Task",
+                    "promlight_manage_tasks",
+                    lamp_id=lamp_id,
+                    style="primary_filled",
+                )
+            )
+        if not lamp.get("is_default"):
+            elements.append(promlight_button("设为默认灯", "promlight_set_default", lamp_id=lamp_id))
+        elements.append(promlight_button("重命名", "promlight_start_rename", lamp_id=lamp_id))
+        if not pending_unbind:
+            elements.append(
+                promlight_button(
+                    "解绑…",
+                    "promlight_unbind",
+                    lamp_id=lamp_id,
+                    style="danger",
+                    confirm=("确认解绑这盏提示灯？", "解绑后会清除这盏灯的 Task 白名单，并停止后续驱动。"),
+                )
+            )
+    elements.extend(
+        [
+            promlight_button("在本地 Bridge 连接新灯", "promlight_local_pairing"),
+            promlight_button("连接附近提示灯（手机/Pad）", "promlight_mobile_pairing"),
+            promlight_button("刷新状态", "promlight_refresh"),
+            promlight_legend_element(),
+        ]
+    )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": "提示灯控制中心"},
+            "subtitle": {"tag": "plain_text", "content": f"我的提示灯 · {len(lamps)} 盏"},
+            "template": "blue",
+            "icon": {"tag": "standard_icon", "token": "lightbulb_colorful"},
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": elements,
+        },
+    }
+
+
+def build_promlight_local_pairing_card() -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": "在本地 Bridge 连接新灯"},
+            "template": "blue",
+        },
+        "body": {
+            "direction": "vertical",
+            "vertical_spacing": "12px",
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        "1. 确保 PromLight 已与身边的 Mac/Windows 建立 BLE 连接。\n"
+                        "2. 在运行 Codex 的 Mac 上打开 DeepOri Codex Feishu Bridge。\n"
+                        "3. 进入“提示灯”区域，刷新设备并把灯归属给一个已授权飞书用户。\n\n"
+                        "设备 reference 只保存在该 Mac 的私有 state 中，不会显示在飞书或提交到仓库。"
+                    ),
+                },
+                promlight_button("返回我的提示灯", "show_promlight", style="primary_filled"),
+                promlight_legend_element(),
+            ],
+        },
+    }
+
+
+def build_promlight_mobile_pairing_card() -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": "连接附近提示灯（手机/Pad）"},
+            "template": "yellow",
+        },
+        "body": {
+            "direction": "vertical",
+            "vertical_spacing": "12px",
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        "**移动配对暂未开放。**\n\n"
+                        "飞书小程序具备前台 BLE 扫描、连接和 GATT 读写能力，但后台约 5 分钟后可能被销毁，"
+                        "不能承担持续提醒。PromLight v2 的真实 GATT service、characteristic、分包和回读协议"
+                        "也尚未完成授权真机验证。\n\n"
+                        "当前请使用本地 Bridge 路径。这里没有执行扫描或伪装成已连接。"
+                    ),
+                },
+                promlight_button("查看本地连接方法", "promlight_local_pairing"),
+                promlight_button("返回我的提示灯", "show_promlight", style="primary_filled"),
+                promlight_legend_element(),
+            ],
+        },
+    }
+
+
+def build_promlight_task_card(
+    user_id: str,
+    lamp_id: str,
+    state: dict[str, Any],
+    change: str = "",
+) -> dict[str, Any]:
+    namespace = promlight_state(state)
+    lamp = owned_promlight_lamp(state, user_id, lamp_id)
+    tasks = recent_tasks(user_id)
+    valid_ids = {task["id"] for task in tasks}
+    lamp["task_ids"] = [task_id for task_id in lamp.get("task_ids", []) if task_id in valid_ids]
+    projects = list(dict.fromkeys(task["project"] for task in tasks))
+    active_project = str(namespace["selected_projects"].get(user_id) or "")
+    if active_project not in projects:
+        active_project = projects[0] if projects else ""
+    project_tasks = [task for task in tasks if task["project"] == active_project]
+    selected_id = str(namespace["selected_tasks"].get(user_id) or "")
+    if selected_id not in {task["id"] for task in project_tasks}:
+        selected_id = project_tasks[0]["id"] if project_tasks else ""
+    namespace["selected_lamps"][user_id] = lamp_id
+    if active_project:
+        namespace["selected_projects"][user_id] = active_project
+    if selected_id:
+        namespace["selected_tasks"][user_id] = selected_id
+    save_state(state)
+    selected = next((task for task in project_tasks if task["id"] == selected_id), None)
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "markdown",
+            "content": (
+                (f"✅ **{card_markdown_escape(change)}**\n\n" if change else "")
+                + f"正在管理：**{card_markdown_escape(str(lamp.get('name') or 'PromLight'))}**\n"
+                "只有这里显式关注的 Task 会影响这盏灯。保存时会再次校验项目权限和归档状态。"
+            ),
+        }
+    ]
+    if projects:
+        elements.append(
+            {
+                "tag": "select_static",
+                "name": "promlight_project_selector",
+                "placeholder": {"tag": "plain_text", "content": "选择项目"},
+                "options": [
+                    {"text": {"tag": "plain_text", "content": project}, "value": project}
+                    for project in projects
+                ],
+                "initial_option": active_project,
+                "width": "fill",
+            }
+        )
+    if project_tasks:
+        elements.append(
+            {
+                "tag": "select_static",
+                "name": "promlight_task_selector",
+                "placeholder": {"tag": "plain_text", "content": "选择 Task"},
+                "options": [
+                    {
+                        "text": {"tag": "plain_text", "content": option_text(task)},
+                        "value": task["id"],
+                    }
+                    for task in project_tasks[:TASKS_PER_PAGE]
+                ],
+                "initial_option": selected_id,
+                "width": "fill",
+            }
+        )
+        elements.append(
+            promlight_button(
+                "取消关注这个 Task"
+                if selected_id in lamp.get("task_ids", [])
+                else "关注这个 Task",
+                "promlight_toggle_task",
+                lamp_id=lamp_id,
+                task_id=selected_id,
+                style="default" if selected_id in lamp.get("task_ids", []) else "primary_filled",
+            )
+        )
+    else:
+        elements.append({"tag": "markdown", "content": "当前项目没有可关注的 Task。"})
+    subscribed = [task for task in tasks if task["id"] in lamp.get("task_ids", [])]
+    elements.append(
+        {
+            "tag": "markdown",
+            "content": (
+                f"**已关注 {len(subscribed)} 个 Task**\n"
+                + (
+                    "\n".join(f"- {card_markdown_escape(option_text(task))}" for task in subscribed)
+                    if subscribed
+                    else "尚未关注任何 Task。"
+                )
+            ),
+        }
+    )
+    elements.extend(
+        [
+            promlight_button("返回我的提示灯", "show_promlight"),
+            promlight_legend_element(),
+        ]
+    )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": "关注 Task"},
+            "subtitle": {"tag": "plain_text", "content": str(lamp.get("name") or "PromLight")},
+            "template": "blue",
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": elements,
+        },
+    }
+
+
+def build_promlight_rename_card(lamp: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": "重命名提示灯"},
+            "template": "blue",
+        },
+        "body": {
+            "direction": "vertical",
+            "vertical_spacing": "12px",
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"当前名称：**{card_markdown_escape(str(lamp.get('name') or 'PromLight'))}**\n\n"
+                        "请直接发送一条纯文字作为新名称（最多 40 个字符）。这条消息只用于重命名，不会发送到 Codex Task。"
+                    ),
+                },
+                promlight_button("取消重命名", "promlight_cancel_rename"),
+                promlight_legend_element(),
+            ],
+        },
+    }
+
+
 def build_task_subscription_result_card(
     task: dict[str, str],
     status: str,
@@ -7385,6 +8427,8 @@ def card_context_type(card: dict[str, Any]) -> str:
         return "task_settings"
     if names & {"subscription_project_selector", "subscription_task_selector"}:
         return "task_subscriptions"
+    if names & {"promlight_project_selector", "promlight_task_selector"}:
+        return "promlight_tasks"
     if names & {"archived_project_selector", "archived_task_selector"}:
         return "archived_tasks"
     if names & {"project_selector", "task_selector"}:
@@ -7431,6 +8475,30 @@ def subscription_card_active_project(card: dict[str, Any] | None) -> str:
     return ""
 
 
+def promlight_card_active_project(card: dict[str, Any] | None) -> str:
+    if not isinstance(card, dict):
+        return ""
+    for selector in card_selector_context(card)["selectors"]:
+        if selector["name"] == "promlight_project_selector":
+            return str(selector["initial_option"] or "")
+    return ""
+
+
+def promlight_card_lamp_id(card: dict[str, Any] | None) -> str:
+    if not isinstance(card, dict):
+        return ""
+    for element in card.get("body", {}).get("elements", []):
+        if not isinstance(element, dict) or element.get("tag") != "button":
+            continue
+        for behavior in element.get("behaviors", []):
+            if not isinstance(behavior, dict):
+                continue
+            value = behavior.get("value")
+            if isinstance(value, dict) and str(value.get("lamp_id") or ""):
+                return str(value["lamp_id"])
+    return ""
+
+
 def task_card_with_notice(card: dict[str, Any], notice: str) -> dict[str, Any]:
     elements = card.get("body", {}).get("elements", [])
     if isinstance(elements, list):
@@ -7473,8 +8541,11 @@ def remember_card_context(
             if context_type == "task_settings"
             else ""
         ),
+        "lamp_id": promlight_card_lamp_id(card) if context_type == "promlight_tasks" else "",
         "project": (
-            subscription_card_active_project(card)
+            promlight_card_active_project(card)
+            if context_type == "promlight_tasks"
+            else subscription_card_active_project(card)
             if context_type == "task_subscriptions"
             else card_active_project(card, context_type == "archived_tasks")
         ),
@@ -9231,6 +10302,184 @@ def action_payload(event: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def patch_promlight_event_card(
+    event: dict[str, Any],
+    user_id: str,
+    card: dict[str, Any],
+    context_type: str = "",
+) -> None:
+    message_id = str(event.get("message_id") or "")
+    if message_id and context_type:
+        with _state_lock:
+            state = load_state()
+            remember_card_context(state, user_id, message_id, card, context_type)
+    token = str(event.get("token") or "")
+    if token and update_card(token, card):
+        return
+    if message_id:
+        patch_card(message_id, card)
+
+
+def handle_promlight_button_action(
+    event: dict[str, Any],
+    payload: dict[str, Any],
+) -> bool:
+    action = str(payload.get("action") or "")
+    recognized = {
+        "show_promlight",
+        "promlight_refresh",
+        "promlight_manage_tasks",
+        "promlight_toggle_task",
+        "promlight_set_default",
+        "promlight_start_rename",
+        "promlight_cancel_rename",
+        "promlight_unbind",
+        "promlight_local_pairing",
+        "promlight_mobile_pairing",
+    }
+    if action not in recognized:
+        return False
+    user_id = str(event.get("operator_id") or "")
+    lamp_id = str(payload.get("lamp_id") or "")
+    if action == "promlight_local_pairing":
+        patch_promlight_event_card(event, user_id, build_promlight_local_pairing_card())
+        return True
+    if action == "promlight_mobile_pairing":
+        patch_promlight_event_card(event, user_id, build_promlight_mobile_pairing_card())
+        return True
+    if action == "show_promlight":
+        reconcile_promlight_state()
+        with _state_lock:
+            state = load_state()
+            card = build_promlight_control_card(user_id, state)
+        patch_promlight_event_card(event, user_id, card, "promlight")
+        return True
+    if action == "promlight_refresh":
+        reconcile_promlight_state()
+        with _state_lock:
+            state = load_state()
+            lamp_ids = [str(lamp["lamp_id"]) for lamp in user_promlight_lamps(state, user_id)]
+        for current_id in lamp_ids:
+            refresh_promlight_lamp(current_id, force=True)
+        with _state_lock:
+            state = load_state()
+            card = build_promlight_control_card(user_id, state)
+        patch_promlight_event_card(event, user_id, card, "promlight")
+        return True
+    try:
+        with _state_lock:
+            state = load_state()
+            lamp = owned_promlight_lamp(state, user_id, lamp_id)
+            lamp_copy = dict(lamp)
+    except PermissionError:
+        with _state_lock:
+            state = load_state()
+            card = build_promlight_control_card(user_id, state)
+        patch_promlight_event_card(event, user_id, card, "promlight")
+        return True
+    if action == "promlight_manage_tasks":
+        with _state_lock:
+            state = load_state()
+            card = build_promlight_task_card(user_id, lamp_id, state)
+        patch_promlight_event_card(event, user_id, card, "promlight_tasks")
+        return True
+    if action == "promlight_toggle_task":
+        task_id = str(payload.get("task_id") or "")
+        enabled = task_id not in lamp_copy.get("task_ids", [])
+        try:
+            set_promlight_task_subscription(user_id, lamp_id, task_id, enabled)
+            change = "已关注这个 Task" if enabled else "已取消关注这个 Task"
+        except PermissionError as exc:
+            change = str(exc)
+        with _state_lock:
+            state = load_state()
+            card = build_promlight_task_card(user_id, lamp_id, state, change)
+        patch_promlight_event_card(event, user_id, card, "promlight_tasks")
+        return True
+    if action == "promlight_set_default":
+        set_default_promlight(user_id, lamp_id)
+    elif action == "promlight_unbind":
+        unbind_promlight(user_id, lamp_id)
+    elif action == "promlight_start_rename":
+        with _state_lock:
+            state = load_state()
+            promlight_state(state)["pending_renames"][user_id] = lamp_id
+            save_state(state)
+        patch_promlight_event_card(event, user_id, build_promlight_rename_card(lamp_copy))
+        return True
+    elif action == "promlight_cancel_rename":
+        with _state_lock:
+            state = load_state()
+            promlight_state(state)["pending_renames"].pop(user_id, None)
+            save_state(state)
+    with _state_lock:
+        state = load_state()
+        card = build_promlight_control_card(user_id, state)
+    patch_promlight_event_card(event, user_id, card, "promlight")
+    return True
+
+
+def handle_promlight_selector_action(event: dict[str, Any]) -> bool:
+    action_name = str(event.get("action_name") or "")
+    if action_name not in {"promlight_project_selector", "promlight_task_selector"}:
+        return False
+    user_id = str(event.get("operator_id") or "")
+    selected_value = str(event.get("option") or "")
+    stale_card: dict[str, Any] | None = None
+    with _state_lock:
+        state = load_state()
+        namespace = promlight_state(state)
+        context = card_context_details(
+            state,
+            user_id,
+            str(event.get("message_id") or ""),
+        )
+        lamp_id = str(context.get("lamp_id") or "")
+        if context.get("type") != "promlight_tasks" or not lamp_id:
+            stale_card = task_card_with_notice(
+                build_promlight_control_card(user_id, state),
+                "这张提示灯卡片已失效，请从“我的提示灯”重新打开。",
+            )
+        if stale_card is not None:
+            pass
+        else:
+            try:
+                owned_promlight_lamp(state, user_id, lamp_id)
+            except PermissionError:
+                stale_card = task_card_with_notice(
+                    build_promlight_control_card(user_id, state),
+                    "这张提示灯卡片已失效，请从“我的提示灯”重新打开。",
+                )
+        if stale_card is not None:
+            card = stale_card
+        else:
+            tasks = recent_tasks(user_id)
+            if action_name == "promlight_project_selector":
+                projects = {task["project"] for task in tasks}
+                if selected_value not in projects:
+                    return True
+                namespace["selected_projects"][user_id] = selected_value
+                first = next((task for task in tasks if task["project"] == selected_value), None)
+                if first is not None:
+                    namespace["selected_tasks"][user_id] = first["id"]
+            else:
+                task = next((item for item in tasks if item["id"] == selected_value), None)
+                active_project = str(context.get("project") or "")
+                if task is None or (active_project and task["project"] != active_project):
+                    return True
+                namespace["selected_tasks"][user_id] = task["id"]
+                namespace["selected_projects"][user_id] = task["project"]
+            save_state(state)
+            card = build_promlight_task_card(user_id, lamp_id, state)
+    patch_promlight_event_card(
+        event,
+        user_id,
+        card,
+        "promlight" if stale_card is not None else "promlight_tasks",
+    )
+    return True
+
+
 def pending_inputs(state: dict[str, Any]) -> list[dict[str, Any]]:
     pending = state.setdefault("pending_inputs", [])
     if not isinstance(pending, list):
@@ -9908,6 +11157,27 @@ def set_run_progress(
         persist_recoverable_run(run)
     if message_id and card is not None:
         patch_card(message_id, card)
+    task_id = str(run.get("task", {}).get("id") or "")
+    current_outcome = str(run.get("outcome") or "running")
+    if task_id and promlight_task_is_watched(task_id):
+        mapped = (
+            "human_gate"
+            if current_outcome == "approval"
+            else "idle"
+            if current_outcome in {"completed", "stopped"}
+            else "error"
+            if current_outcome == "failed"
+            else "unknown"
+            if current_outcome == "desktop_unavailable"
+            else "running"
+        )
+        schedule_promlight_task_status(
+            task_id,
+            mapped,
+            "bridge_run",
+            mapped != "unknown",
+            str(run.get("user_id") or "") if mapped == "human_gate" else "",
+        )
 
 
 def approval_from_request(request: dict[str, Any]) -> dict[str, Any] | None:
@@ -11015,6 +12285,22 @@ def _handle_message_event_once(event: dict[str, Any]) -> None:
         if processed_event_seen(state, message_id):
             return
 
+    pending_rename = str(promlight_state(state)["pending_renames"].get(user_id) or "")
+    if pending_rename and message_type == "text" and not image_keys and not file_keys:
+        try:
+            rename_promlight(user_id, pending_rename, content)
+            change = "提示灯名称已更新。"
+        except (PermissionError, ValueError) as exc:
+            change = str(exc)
+        with _state_lock:
+            state = load_state()
+            promlight_state(state)["pending_renames"].pop(user_id, None)
+            save_state(state)
+            card = build_promlight_control_card(user_id, state)
+        reply_card(message_id, card, "promlight-renamed")
+        log(f"promlight rename handled result={'updated' if change.startswith('提示灯') else 'rejected'}")
+        return
+
     pending_project = str(
         state.get("pending_task_creations", {}).get(user_id) or ""
     )
@@ -11206,10 +12492,15 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
     if not event_id:
         return
 
+    if action_tag == "select_static" and handle_promlight_selector_action(event):
+        return
+
     if action_tag == "button":
         payload = action_payload(event)
         action = str(payload.get("action") or "")
         if workflow_notifications_enabled() and handle_workflow_card_action(event, payload):
+            return
+        if handle_promlight_button_action(event, payload):
             return
         if action in {"refresh_task_settings", "compact_current_task"}:
             with _state_lock:
@@ -12368,6 +13659,8 @@ def _handle_menu_event_once(event: dict[str, Any]) -> None:
         TASK_SUBSCRIPTIONS_MENU_EVENT_KEY,
         TASK_SETTINGS_MENU_EVENT_KEY,
         COMPACT_CONTEXT_MENU_EVENT_KEY,
+        PROMLIGHT_MENU_EVENT_KEY,
+        PROMLIGHT_LEGEND_MENU_EVENT_KEY,
     } or not authorized_user(user_id):
         return
     event_id = str(event.get("event_id") or "")
@@ -12426,6 +13719,29 @@ def _handle_menu_event_once(event: dict[str, Any]) -> None:
             "task_subscriptions",
         )
         log(f"menu handled key={event_key} result=task-subscriptions-card")
+        return
+    if event_key == PROMLIGHT_MENU_EVENT_KEY:
+        reconcile_promlight_state()
+        with _state_lock:
+            state = load_state()
+            card = build_promlight_control_card(user_id, state)
+        send_menu_card(
+            user_id,
+            state,
+            card,
+            f"promlight-{event_id}",
+            "promlight",
+        )
+        log(f"menu handled key={event_key} result=promlight-card")
+        return
+    if event_key == PROMLIGHT_LEGEND_MENU_EVENT_KEY:
+        send_menu_card(
+            user_id,
+            state,
+            build_promlight_legend_card(),
+            f"promlight-legend-{event_id}",
+        )
+        log(f"menu handled key={event_key} result=promlight-legend-card")
         return
     if event_key == TASK_SETTINGS_MENU_EVENT_KEY:
         task = selected_task(user_id, state)
@@ -12530,9 +13846,16 @@ def dispatch_event(event: dict[str, Any]) -> None:
 
 
 def event_lane_key(event: dict[str, Any]) -> str:
-    return str(
+    identity = (
         event.get("operator_id")
-        or event.get("sender_id")
+        or (
+            event.get("sender_id")
+            if event.get("type") not in {"card.action.trigger", "application.bot.menu_v6"}
+            else ""
+        )
+    )
+    return str(
+        identity
         or event.get("chat_id")
         or event.get("type")
         or "unknown"
@@ -12571,6 +13894,8 @@ def ui_intent_key(event: dict[str, Any]) -> str:
         "subscription_task_selector",
         "task_model_selector",
         "task_effort_selector",
+        "promlight_project_selector",
+        "promlight_task_selector",
     }:
         return f"{user_id}:{message_id}:{action_name}"
     if action_tag != "button":
@@ -12595,6 +13920,9 @@ def ui_intent_key(event: dict[str, Any]) -> str:
         "task_subscription_page",
         "refresh_task_settings",
         "compact_current_task",
+        "show_promlight",
+        "promlight_refresh",
+        "promlight_manage_tasks",
     }:
         return f"{user_id}:{message_id}:{action}"
     return ""
@@ -12873,8 +14201,9 @@ def maintenance_loop(events: queue.Queue[dict[str, Any]]) -> None:
         if now >= next_task_subscription_poll:
             try:
                 poll_task_subscriptions()
+                poll_promlight_task_statuses()
             except Exception as exc:
-                log(f"task subscription loop failed: {type(exc).__name__}: {exc}")
+                log(f"task observation loop failed: {type(exc).__name__}: {exc}")
             next_task_subscription_poll = now + TASK_SUBSCRIPTION_POLL_SECONDS
         if now >= next_workflow_retry:
             try:
@@ -12889,6 +14218,46 @@ def maintenance_loop(events: queue.Queue[dict[str, Any]]) -> None:
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--promlight-status-json"]:
+        with _state_lock:
+            state = load_state()
+            lamps = [
+                {
+                    "lamp_id": str(lamp.get("lamp_id") or ""),
+                    "owner_open_id": str(lamp.get("owner_open_id") or ""),
+                    "name": str(lamp.get("name") or "PromLight"),
+                    "is_default": bool(lamp.get("is_default")),
+                    "relay_ref": str(lamp.get("relay_ref") or ""),
+                }
+                for lamp in promlight_state(state)["lamps"].values()
+                if isinstance(lamp, dict)
+            ]
+        print(
+            json.dumps(
+                {"devices": discover_promlight_devices(), "bindings": lamps},
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    if sys.argv[1:] == ["--promlight-bind-json"]:
+        try:
+            payload = json.load(sys.stdin)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return 2
+        if not isinstance(payload, dict):
+            return 2
+        user_id = str(payload.get("open_id") or "").strip()
+        relay_ref = str(payload.get("relay_ref") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        if not user_id.startswith("ou_") or not relay_ref or len(relay_ref) > 256 or len(name) > 40:
+            return 2
+        try:
+            lamp_id = bind_promlight(user_id, relay_ref, name)
+        except (PermissionError, ValueError) as exc:
+            print(str(exc))
+            return 1
+        print(json.dumps({"ok": True, "lamp_id": lamp_id}, ensure_ascii=False))
+        return 0
     if sys.argv[1:] == ["--remove-access-requests"]:
         try:
             payload = json.load(sys.stdin)
@@ -12975,6 +14344,11 @@ def main() -> int:
 
     write_runtime_status()
     _shutdown_event.clear()
+    threading.Thread(
+        target=promlight_worker_loop,
+        daemon=True,
+        name="codex-feishu-promlight",
+    ).start()
     threading.Thread(
         target=identity_refresh_loop,
         daemon=True,

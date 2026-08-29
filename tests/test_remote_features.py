@@ -736,7 +736,7 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.bridge.send_task_card.assert_called_once()
 
-    def test_task_menu_event_keys_have_ten_distinct_defaults(self):
+    def test_menu_event_keys_have_twelve_distinct_defaults(self):
         event_keys = (
             self.bridge.CURRENT_TASK_MENU_EVENT_KEY,
             self.bridge.TASK_MENU_EVENT_KEY,
@@ -748,6 +748,8 @@ class RemoteFeatureTests(unittest.TestCase):
             self.bridge.TASK_SUBSCRIPTIONS_MENU_EVENT_KEY,
             self.bridge.TASK_SETTINGS_MENU_EVENT_KEY,
             self.bridge.COMPACT_CONTEXT_MENU_EVENT_KEY,
+            self.bridge.PROMLIGHT_MENU_EVENT_KEY,
+            self.bridge.PROMLIGHT_LEGEND_MENU_EVENT_KEY,
         )
 
         self.assertEqual(
@@ -763,9 +765,11 @@ class RemoteFeatureTests(unittest.TestCase):
                 "task_subscriptions",
                 "task_settings",
                 "compact_task_context",
+                "promlight",
+                "promlight_legend",
             ),
         )
-        self.assertEqual(len(set(event_keys)), 10)
+        self.assertEqual(len(set(event_keys)), 12)
 
     def test_codex_task_settings_normalizes_visible_models_and_efforts(self):
         self.bridge.codex_app_server_requests = mock.Mock(
