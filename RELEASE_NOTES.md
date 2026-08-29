@@ -1,5 +1,12 @@
 # Release Notes
 
+## 1.9.24 (build 60)
+
+- Adds a Feishu “Task 运行设置” entry for reading and changing the selected Task's model and reasoning effort, with stale-card and running-Task safeguards.
+- Adds explicit confirmation before compacting the selected Task's context and routes model, effort, and compaction changes through Codex Desktop's versioned IPC protocol.
+- Shows a compact, deduplicated execution timeline on running cards and preserves it across restart recovery.
+- Reads the active Task settings from Codex Desktop's live thread-state snapshot and reduces client-discovery delay before Desktop IPC requests.
+
 ## 1.9.23 (build 59)
 
 - Restricts local result links to the selected Task workspace or a dedicated bridge output directory, while keeping current-turn image-generation events available.

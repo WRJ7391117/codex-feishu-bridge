@@ -553,6 +553,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var draftDesktopSyncEventKey = "sync_desktop"
     @Published var draftDesktopSyncSwitchEventKey = "sync_desktop_switch"
     @Published var draftTaskSubscriptionsEventKey = "task_subscriptions"
+    @Published var draftTaskSettingsEventKey = "task_settings"
     @Published var draftMaxConcurrentRuns = 2
     @Published var setupProfile = "codex-notify"
     @Published var setupAppID = ""
@@ -906,6 +907,9 @@ private final class BridgeViewModel: ObservableObject {
         draftTaskSubscriptionsEventKey = String(
             describing: config["task_subscriptions_menu_event_key"] ?? "task_subscriptions"
         )
+        draftTaskSettingsEventKey = String(
+            describing: config["task_settings_menu_event_key"] ?? "task_settings"
+        )
         draftMaxConcurrentRuns = min(
             8,
             max(1, (config["max_concurrent_runs"] as? NSNumber)?.intValue ?? 2)
@@ -923,6 +927,7 @@ private final class BridgeViewModel: ObservableObject {
         let desktopSyncEventKey = draftDesktopSyncEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let desktopSyncSwitchEventKey = draftDesktopSyncSwitchEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let taskSubscriptionsEventKey = draftTaskSubscriptionsEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let taskSettingsEventKey = draftTaskSettingsEventKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !profile.isEmpty else {
             presentError(title: "配置未保存", message: "lark-cli Profile 不能为空。")
             return
@@ -971,7 +976,8 @@ private final class BridgeViewModel: ObservableObject {
             usageEventKey: usageEventKey,
             desktopSyncEventKey: desktopSyncEventKey,
             desktopSyncSwitchEventKey: desktopSyncSwitchEventKey,
-            taskSubscriptionsEventKey: taskSubscriptionsEventKey
+            taskSubscriptionsEventKey: taskSubscriptionsEventKey,
+            taskSettingsEventKey: taskSettingsEventKey
         )
     }
 
@@ -985,7 +991,8 @@ private final class BridgeViewModel: ObservableObject {
         usageEventKey: String,
         desktopSyncEventKey: String,
         desktopSyncSwitchEventKey: String,
-        taskSubscriptionsEventKey: String
+        taskSubscriptionsEventKey: String,
+        taskSettingsEventKey: String
     ) {
         let menuEventKeys = [
             currentTaskEventKey,
@@ -996,13 +1003,14 @@ private final class BridgeViewModel: ObservableObject {
             desktopSyncEventKey,
             desktopSyncSwitchEventKey,
             taskSubscriptionsEventKey,
+            taskSettingsEventKey,
         ]
         guard menuEventKeys.allSatisfy({ !$0.isEmpty }) else {
-            presentError(title: "配置未保存", message: "八个机器人菜单 Event Key 都不能为空。")
+            presentError(title: "配置未保存", message: "九个机器人菜单 Event Key 都不能为空。")
             return
         }
         guard Set(menuEventKeys).count == menuEventKeys.count else {
-            presentError(title: "配置未保存", message: "八个机器人菜单 Event Key 不能重复。")
+            presentError(title: "配置未保存", message: "九个机器人菜单 Event Key 不能重复。")
             return
         }
 
@@ -1028,6 +1036,7 @@ private final class BridgeViewModel: ObservableObject {
         config["desktop_sync_menu_event_key"] = desktopSyncEventKey
         config["desktop_sync_switch_menu_event_key"] = desktopSyncSwitchEventKey
         config["task_subscriptions_menu_event_key"] = taskSubscriptionsEventKey
+        config["task_settings_menu_event_key"] = taskSettingsEventKey
         config["max_concurrent_runs"] = min(8, max(1, draftMaxConcurrentRuns))
         config["max_prompt_chars"] = config["max_prompt_chars"] ?? 12000
         config["max_reply_chars"] = config["max_reply_chars"] ?? 3000
@@ -1921,6 +1930,7 @@ private struct ConfigurationChecklistView: View {
                         "select_task · 切换 Task",
                         "new_task · 新建 Task",
                         "archive_task · 归档当前 Task",
+                        "task_settings · Task 运行设置",
                         "一级菜单 · 管理桌面 Task",
                         "task_subscriptions · 订阅桌面 Task",
                         "sync_desktop · 接续当前 Task",
@@ -2048,6 +2058,12 @@ private struct ConfigurationView: View {
                         "归档当前 Task",
                         placeholder: "archive_task",
                         text: $model.draftArchiveTaskEventKey,
+                        monospaced: true
+                    )
+                    configurationField(
+                        "Task 运行设置",
+                        placeholder: "task_settings",
+                        text: $model.draftTaskSettingsEventKey,
                         monospaced: true
                     )
                     configurationField(

@@ -736,7 +736,7 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.bridge.send_task_card.assert_called_once()
 
-    def test_task_menu_event_keys_have_eight_distinct_defaults(self):
+    def test_task_menu_event_keys_have_nine_distinct_defaults(self):
         event_keys = (
             self.bridge.CURRENT_TASK_MENU_EVENT_KEY,
             self.bridge.TASK_MENU_EVENT_KEY,
@@ -746,6 +746,7 @@ class RemoteFeatureTests(unittest.TestCase):
             self.bridge.DESKTOP_SYNC_MENU_EVENT_KEY,
             self.bridge.DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY,
             self.bridge.TASK_SUBSCRIPTIONS_MENU_EVENT_KEY,
+            self.bridge.TASK_SETTINGS_MENU_EVENT_KEY,
         )
 
         self.assertEqual(
@@ -759,9 +760,244 @@ class RemoteFeatureTests(unittest.TestCase):
                 "sync_desktop",
                 "sync_desktop_switch",
                 "task_subscriptions",
+                "task_settings",
             ),
         )
-        self.assertEqual(len(set(event_keys)), 8)
+        self.assertEqual(len(set(event_keys)), 9)
+
+    def test_codex_task_settings_normalizes_visible_models_and_efforts(self):
+        self.bridge.codex_app_server_requests = mock.Mock(
+            return_value=[
+                {
+                    "data": [
+                        {
+                            "model": "gpt-5.6-sol",
+                            "displayName": "GPT-5.6 Sol",
+                            "defaultReasoningEffort": "medium",
+                            "supportedReasoningEfforts": [
+                                {"reasoningEffort": "low"},
+                                {"reasoningEffort": "high"},
+                            ],
+                        },
+                        {"model": "hidden-model", "hidden": True},
+                    ]
+                }
+            ]
+        )
+        self.bridge.desktop_task_state = mock.Mock(
+            return_value={
+                "latestModel": "gpt-5.6-sol",
+                "latestReasoningEffort": "high",
+                "latestThreadSettings": {},
+            }
+        )
+
+        settings = self.bridge.codex_task_settings("task-a")
+
+        self.assertEqual(settings["model"], "gpt-5.6-sol")
+        self.assertEqual(settings["effort"], "high")
+        self.assertEqual([item["model"] for item in settings["models"]], ["gpt-5.6-sol"])
+        self.assertEqual(settings["models"][0]["efforts"], ["low", "high"])
+        self.bridge.codex_app_server_requests.assert_called_once_with(
+            [("model/list", {"includeHidden": False, "limit": 100})],
+            timeout=10,
+        )
+        self.bridge.desktop_task_state.assert_called_once_with("task-a")
+
+    def test_wait_for_ipc_response_rejects_client_discovery_without_delay(self):
+        client, server = self.bridge.socket.socketpair()
+        result = []
+
+        def wait_for_response():
+            result.append(self.bridge.wait_for_ipc_response(client, "request-1"))
+
+        waiter = threading.Thread(target=wait_for_response)
+        waiter.start()
+        try:
+            self.bridge.send_ipc_message(
+                server,
+                {
+                    "type": "client-discovery-request",
+                    "requestId": "discovery-1",
+                },
+            )
+            discovery = self.bridge.receive_ipc_message(server)
+            self.assertEqual(
+                discovery,
+                {
+                    "type": "client-discovery-response",
+                    "requestId": "discovery-1",
+                    "response": {"canHandle": False},
+                },
+            )
+            self.bridge.send_ipc_message(
+                server,
+                {
+                    "type": "response",
+                    "requestId": "request-1",
+                    "resultType": "success",
+                },
+            )
+        finally:
+            waiter.join(timeout=2)
+            client.close()
+            server.close()
+
+        self.assertEqual(result[0]["resultType"], "success")
+
+    def test_task_settings_card_binds_task_and_confirms_compaction(self):
+        task = self.tasks()[0]
+        card = self.bridge.build_task_settings_card(
+            task,
+            {
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "models": [
+                    {
+                        "model": "gpt-5.6-sol",
+                        "display_name": "GPT-5.6 Sol",
+                        "efforts": ["low", "high"],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(self.bridge.card_context_type(card), "task_settings")
+        self.assertEqual(self.bridge.task_settings_card_task_id(card), "task-a")
+        selectors = {
+            item["name"]: item
+            for item in card["body"]["elements"]
+            if item.get("tag") == "select_static"
+        }
+        self.assertEqual(selectors["task_model_selector"]["initial_option"], "gpt-5.6-sol")
+        self.assertEqual(selectors["task_effort_selector"]["initial_option"], "high")
+        compact = next(
+            item
+            for item in card["body"]["elements"]
+            if item.get("text", {}).get("content") == "压缩当前 Task 上下文…"
+        )
+        self.assertIn("confirm", compact)
+
+    def test_task_settings_menu_replies_immediately_then_reads_in_background(self):
+        task = self.tasks()[0]
+        self.bridge.selected_task = mock.Mock(return_value=task)
+        with mock.patch.object(self.bridge.threading, "Thread") as thread_factory:
+            self.bridge.handle_menu_event(
+                {
+                    "event_id": "evt-task-settings",
+                    "event_key": "task_settings",
+                    "operator_id": "ou_admin",
+                }
+            )
+
+        card = self.bridge.send_card.call_args.args[1]
+        self.assertIn("正在读取", card["body"]["elements"][0]["content"])
+        self.assertIs(thread_factory.call_args.kwargs["target"], self.bridge.refresh_task_settings_card)
+        self.assertEqual(
+            thread_factory.call_args.kwargs["args"],
+            ("ou_admin", "om_current_status", "task-a"),
+        )
+
+    def test_old_task_settings_card_cannot_modify_new_current_task(self):
+        old_task, new_task = self.tasks()[:2]
+        card = self.bridge.build_task_settings_card(
+            old_task,
+            {
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "models": [
+                    {
+                        "model": "gpt-5.6-sol",
+                        "display_name": "GPT-5.6 Sol",
+                        "efforts": ["high"],
+                    }
+                ],
+            },
+        )
+        self.bridge.selected_task = mock.Mock(return_value=new_task)
+        self.bridge.task_by_id = mock.Mock(return_value=old_task)
+        self.bridge.patch_card = mock.Mock(return_value=True)
+        with mock.patch.object(self.bridge.threading, "Thread") as thread_factory:
+            self.bridge.handle_card_event(
+                {
+                    "event_id": "evt-stale-task-settings",
+                    "operator_id": "ou_admin",
+                    "chat_id": "oc_test",
+                    "message_id": "om_settings",
+                    "action_tag": "select_static",
+                    "action_name": "task_model_selector",
+                    "option": "gpt-5.6-sol",
+                    "card_content": json.dumps(card),
+                }
+            )
+
+        thread_factory.assert_not_called()
+        patched = self.bridge.patch_card.call_args.args[1]
+        self.assertIn("当前 Task 已变化", patched["body"]["elements"][0]["content"])
+
+    def test_task_setting_desktop_protocol_methods_are_versioned(self):
+        self.bridge.desktop_task_request = mock.Mock(return_value={"resultType": "success"})
+
+        self.bridge.update_desktop_task_settings("task-a", model="gpt-5.6-sol")
+        self.bridge.compact_desktop_task("task-a")
+
+        self.assertEqual(
+            self.bridge.desktop_task_request.call_args_list[0],
+            mock.call(
+                "task-a",
+                "thread-follower-update-thread-settings",
+                {"threadSettings": {"model": "gpt-5.6-sol"}},
+                version=1,
+            ),
+        )
+        self.assertEqual(
+            self.bridge.desktop_task_request.call_args_list[1],
+            mock.call(
+                "task-a",
+                "thread-follower-compact-thread",
+                {},
+                version=1,
+                timeout_ms=60000,
+            ),
+        )
+
+    def test_run_timeline_deduplicates_and_renders_safe_stage_names(self):
+        run = self.bridge.new_run(
+            "ou_admin", "oc_test", "om_source", self.tasks()[0], [], []
+        )
+
+        self.bridge.set_run_progress(run, "正在分析任务")
+        self.bridge.set_run_progress(run, "正在使用工具")
+        self.bridge.set_run_progress(run, "正在使用工具")
+        self.bridge.set_run_progress(run, "正在协调 Agent")
+        self.bridge.set_run_progress(run, "正在整理回复")
+        self.bridge.set_run_progress(run, "正在发送结果", "completed")
+
+        self.assertEqual(
+            [item["kind"] for item in run["timeline"]],
+            ["preparing", "reasoning", "tool", "agent", "response", "completed"],
+        )
+        self.assertTrue(all(item["state"] == "done" for item in run["timeline"]))
+        content = self.bridge.build_run_card(run)["body"]["elements"][0]["content"]
+        self.assertIn("执行进度", content)
+        self.assertIn("执行工具", content)
+        self.assertNotIn("/Users/", content)
+        self.assertNotIn("exec --dangerous", content)
+
+    def test_recoverable_run_persists_timeline(self):
+        run = self.bridge.new_run(
+            "ou_admin", "oc_test", "om_source", self.tasks()[0], [], []
+        )
+        run["turn_id"] = "turn-1"
+        self.bridge.append_run_timeline(run, "tool", "执行工具")
+        self.bridge.rollout_path_for_task = mock.Mock(return_value=None)
+        self.bridge.latest_rollout_turn = mock.Mock(return_value={})
+
+        self.assertTrue(self.bridge.persist_recoverable_run(run))
+
+        stored = self.bridge.load_state()["recoverable_runs"]["turn-1"]
+        self.assertEqual(stored["timeline"][-1]["kind"], "tool")
+        self.assertEqual(stored["timeline"][-1]["label"], "执行工具")
 
     def test_user_can_subscribe_to_three_home_tasks_without_changing_current_task(self):
         tasks = [

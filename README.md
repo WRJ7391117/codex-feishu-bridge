@@ -2,13 +2,14 @@
 
 把飞书 Bot 变成 Codex Desktop 的移动入口：在飞书里按项目选择桌面版左侧栏中的 Task，发送文字、图片、文件或音频，并接收可更新的运行状态和最终结果。
 
-版本说明：当前源码和本机构建为 `1.9.23 (build 59)`。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.9.24 (build 60)`。不得用旧版本或同版本不同构建覆盖。
 
 面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
 ## 能力
 
-- 飞书机器人一级菜单为“Task 管理”“管理桌面 Task”和“Codex 额度用量”；“Task 管理”下提供“当前 Task”“切换 Task”“新建 Task”“归档当前 Task”，“管理桌面 Task”下提供“订阅桌面 Task”“接续当前 Task”“接续其他 Task”
+- 飞书机器人一级菜单为“Task 管理”“管理桌面 Task”和“Codex 额度用量”；“Task 管理”下提供“当前 Task”“切换 Task”“新建 Task”“归档当前 Task”“Task 运行设置”，“管理桌面 Task”下提供“订阅桌面 Task”“接续当前 Task”“接续其他 Task”
+- “Task 运行设置”可读取并切换当前 Task 的模型与推理强度，也可在确认后压缩上下文；运行中的 Task 和过期卡片不会修改设置
 - “管理桌面 Task”→“接续当前 Task”只读取该飞书用户在桥接中选择的当前 Task，并先显示项目、Task 标题和桌面状态供确认；没有有效当前 Task 时只打开选择卡，不自动猜测其他 Task
 - 每位授权用户可独立订阅最多 20 个有权访问的 Task；这些 Task 在 Codex Desktop 完成新运行后自动推送结果，订阅前的历史结果不会补发
 - 按 `项目 · Task 标题` 显示所有未归档本地 Task，每页 50 条，可翻页和按标题搜索
@@ -119,6 +120,7 @@ App 运行时优先使用随安装包提供的 `1.0.89-codex-feishu.3`，它在�
      - “切换 Task” → Event Key `select_task`
      - “新建 Task” → Event Key `new_task`
      - “归档当前 Task” → Event Key `archive_task`
+     - “Task 运行设置” → Event Key `task_settings`
    - 主菜单“管理桌面 Task”下添加三个子菜单，动作均选择“推送事件”：
      - “订阅桌面 Task” → Event Key `task_subscriptions`
      - “接续当前 Task” → Event Key `sync_desktop`
@@ -144,7 +146,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
    - 点击“添加用户”可继续添加白名单用户；
 3. 群 Chat ID 可留空，先使用与 Bot 的单聊；
 4. 点击“开启桥接”；
-5. 确认 App 中的八个 Event Key 与飞书后台完全一致，然后分别测试“管理桌面 Task”下的订阅和接续入口。
+5. 确认 App 中的九个 Event Key 与飞书后台完全一致，然后分别测试 Task 运行设置、订阅和接续入口。
 
 未授权用户也可以先私聊 Bot 发任意消息。Bot 只会登记访问申请，不会开放任何 Task；机主在 App 的“待审批访问申请”中点击“配置授权”，填写明确项目并保存后才会生效。
 
