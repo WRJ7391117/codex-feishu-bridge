@@ -1,5 +1,9 @@
 # Release Notes
 
+## 1.11.2 (build 81)
+
+- Renames the PromLight Task relationship throughout Feishu from “关注” to the clearer “关联”, keeps add/remove association actions visible together with the unavailable action disabled, and refreshes the Task selector when real Feishu callbacks omit the selector name.
+
 ## 1.11.1 (build 80)
 
 - Replaces the full PromLight setup form on the App home page with one compact status and management entry.

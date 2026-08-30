@@ -1812,7 +1812,7 @@ private struct MainView: View {
         if online == 0 {
             return "未发现在线设备 · Bridge 已内置 PromLight Helper"
         }
-        return "\(online) 盏在线 · \(bound) 盏已绑定 · 关注 Task 在飞书中管理"
+        return "\(online) 盏在线 · \(bound) 盏已绑定 · 关联 Task 在飞书中管理"
     }
 
     private var connectionCard: some View {
@@ -2901,7 +2901,7 @@ private struct PromLightManagementView: View {
 
                     GroupBox("绑定设备") {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("可绑定多盏灯并分别归属用户。每盏灯关注哪些 Task，继续在飞书“提示灯”卡片中管理。")
+                            Text("可绑定多盏灯并分别归属用户。每盏灯关联哪些 Task，继续在飞书“提示灯”卡片中管理。")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -2940,7 +2940,7 @@ private struct PromLightManagementView: View {
                                         model.selectedPromLightRelayRef.isEmpty
                                             || model.selectedPromLightOwnerOpenID.isEmpty
                                     )
-                                    Text("绑定后，可在飞书中设置默认灯、重命名、关注 Task 或解绑。")
+                                    Text("绑定后，可在飞书中设置默认灯、重命名、关联 Task 或解除绑定。")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }

@@ -7575,6 +7575,7 @@ def promlight_button(
     task_id: str = "",
     style: str = "default",
     confirm: tuple[str, str] | None = None,
+    disabled: bool = False,
 ) -> dict[str, Any]:
     value = {"action": action}
     if lamp_id:
@@ -7592,6 +7593,9 @@ def promlight_button(
             "title": {"tag": "plain_text", "content": confirm[0]},
             "text": {"tag": "plain_text", "content": confirm[1]},
         }
+    if disabled:
+        button["disabled"] = True
+        button.pop("behaviors", None)
     return button
 
 
@@ -7633,7 +7637,7 @@ def promlight_legend_element() -> dict[str, Any]:
             "---\n**灯光对应的事件说明**\n"
             + PROMLIGHT_LEGEND_TEXT
             + "\n\n<font color='grey'>多 Task：红灯闪烁 > 黄灯闪烁 > 黄灯常亮 > 绿灯常亮。"
-            "仅计算你为这盏灯显式关注的 Task。</font>"
+            "仅计算你为这盏灯显式关联的 Task。</font>"
         ),
     }
 
@@ -7644,7 +7648,7 @@ def build_promlight_legend_card() -> dict[str, Any]:
         "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
         "header": {
             "title": {"tag": "plain_text", "content": "灯光状态说明"},
-            "subtitle": {"tag": "plain_text", "content": "PromLight · 按关注 Task 聚合"},
+            "subtitle": {"tag": "plain_text", "content": "PromLight · 按关联 Task 聚合"},
             "template": "blue",
             "icon": {"tag": "standard_icon", "token": "lightbulb_colorful"},
         },
@@ -7660,7 +7664,7 @@ def build_promlight_legend_card() -> dict[str, Any]:
                         + PROMLIGHT_LEGEND_TEXT
                         + "\n\n**多 Task 聚合优先级**\n"
                         "红灯闪烁 > 黄灯闪烁 > 黄灯常亮 > 绿灯常亮\n\n"
-                        "只有你显式关注的 Task 会影响提示灯。灯离线时，卡片会明确显示“提示灯离线”，"
+                        "只有你显式关联的 Task 会影响提示灯。灯离线时，卡片会明确显示“提示灯离线”，"
                         "并保留最后逻辑状态；命令 ACK 不等于灯效已独立回读验证。"
                     ),
                 },
@@ -7694,7 +7698,7 @@ def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[st
             "tag": "markdown",
             "content": (
                 "提示灯由运行 Bridge 的 Mac 控制。\n"
-                "- **关注哪些 Task**：决定哪些 Task 会改变灯光。\n"
+                "- **提示灯关联哪些 Task**：决定哪些 Task 会改变灯光。\n"
                 "- **设备设置**：修改名称、默认灯或解除 Bridge 绑定。"
             ),
         }
@@ -7740,15 +7744,15 @@ def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[st
                     + f"\n状态更新时间：{promlight_updated_text(lamp.get('updated_at'))}"
                     + f"\n投递语义：{delivery_text}"
                     + ("\n解绑状态：解绑待收口；灯恢复在线并确认熄除任务灯效后自动完成" if pending_unbind else "")
-                    + "\n关注 Task："
-                    + ("、".join(card_markdown_escape(name) for name in task_names) if task_names else "未关注")
+                    + "\n关联 Task："
+                    + ("、".join(card_markdown_escape(name) for name in task_names) if task_names else "未关联")
                 ),
             }
         )
         if not pending_unbind:
             elements.append(
                 promlight_button(
-                    "关注哪些 Task",
+                    "提示灯关联哪些 Task",
                     "promlight_manage_tasks",
                     lamp_id=lamp_id,
                     style="primary_filled",
@@ -7874,7 +7878,7 @@ def build_promlight_task_card(
             "content": (
                 (f"✅ **{card_markdown_escape(change)}**\n\n" if change else "")
                 + f"正在管理：**{card_markdown_escape(str(lamp.get('name') or 'PromLight'))}**\n"
-                "只有这里显式关注的 Task 会影响这盏灯。保存时会再次校验项目权限和归档状态。"
+                "只有这里显式关联的 Task 会影响这盏灯。保存时会再次校验项目权限和归档状态。"
             ),
         }
     ]
@@ -7909,29 +7913,38 @@ def build_promlight_task_card(
                 "width": "fill",
             }
         )
-        elements.append(
+        associated = selected_id in lamp.get("task_ids", [])
+        elements.extend(
+            [
             promlight_button(
-                "取消关注这个 Task"
-                if selected_id in lamp.get("task_ids", [])
-                else "关注这个 Task",
-                "promlight_toggle_task",
+                "关联这个 Task",
+                "promlight_add_task",
                 lamp_id=lamp_id,
                 task_id=selected_id,
-                style="default" if selected_id in lamp.get("task_ids", []) else "primary_filled",
-            )
+                style="primary_filled",
+                disabled=associated,
+            ),
+            promlight_button(
+                "取消关联这个 Task",
+                "promlight_remove_task",
+                lamp_id=lamp_id,
+                task_id=selected_id,
+                disabled=not associated,
+            ),
+            ]
         )
     else:
-        elements.append({"tag": "markdown", "content": "当前项目没有可关注的 Task。"})
+        elements.append({"tag": "markdown", "content": "当前项目没有可关联的 Task。"})
     subscribed = [task for task in tasks if task["id"] in lamp.get("task_ids", [])]
     elements.append(
         {
             "tag": "markdown",
             "content": (
-                f"**已关注 {len(subscribed)} 个 Task**\n"
+                f"**已关联 {len(subscribed)} 个 Task**\n"
                 + (
                     "\n".join(f"- {card_markdown_escape(option_text(task))}" for task in subscribed)
                     if subscribed
-                    else "尚未关注任何 Task。"
+                    else "尚未关联任何 Task。"
                 )
             ),
         }
@@ -7946,7 +7959,7 @@ def build_promlight_task_card(
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
         "header": {
-            "title": {"tag": "plain_text", "content": "关注 Task"},
+            "title": {"tag": "plain_text", "content": "关联 Task"},
             "subtitle": {"tag": "plain_text", "content": str(lamp.get("name") or "PromLight")},
             "template": "blue",
         },
@@ -10418,6 +10431,8 @@ def handle_promlight_button_action(
         "promlight_refresh",
         "promlight_device_settings",
         "promlight_manage_tasks",
+        "promlight_add_task",
+        "promlight_remove_task",
         "promlight_toggle_task",
         "promlight_set_default",
         "promlight_start_rename",
@@ -10481,14 +10496,25 @@ def handle_promlight_button_action(
             "promlight_device",
         )
         return True
-    if action == "promlight_toggle_task":
+    if action in {"promlight_add_task", "promlight_remove_task", "promlight_toggle_task"}:
         task_id = str(payload.get("task_id") or "")
-        enabled = task_id not in lamp_copy.get("task_ids", [])
+        enabled = (
+            action == "promlight_add_task"
+            or (
+                action == "promlight_toggle_task"
+                and task_id not in lamp_copy.get("task_ids", [])
+            )
+        )
+        processing_action = (
+            "promlight_add_task" if action == "promlight_toggle_task" and enabled
+            else "promlight_remove_task" if action == "promlight_toggle_task"
+            else action
+        )
         with _state_lock:
             state = load_state()
             processing_card = promlight_action_processing_card(
                 build_promlight_task_card(user_id, lamp_id, state),
-                action,
+                processing_action,
             )
         patch_promlight_event_card(
             event,
@@ -10498,7 +10524,7 @@ def handle_promlight_button_action(
         )
         try:
             set_promlight_task_subscription(user_id, lamp_id, task_id, enabled)
-            change = "已关注这个 Task" if enabled else "已取消关注这个 Task"
+            change = "已关联这个 Task" if enabled else "已取消关联这个 Task"
         except PermissionError as exc:
             change = str(exc)
         with _state_lock:
@@ -10545,8 +10571,9 @@ def handle_promlight_button_action(
 
 
 def handle_promlight_selector_action(event: dict[str, Any]) -> bool:
+    allowed_actions = {"promlight_project_selector", "promlight_task_selector"}
     action_name = str(event.get("action_name") or "")
-    if action_name not in {"promlight_project_selector", "promlight_task_selector"}:
+    if action_name and action_name not in allowed_actions:
         return False
     user_id = str(event.get("operator_id") or "")
     selected_value = str(event.get("option") or "")
@@ -10559,6 +10586,25 @@ def handle_promlight_selector_action(event: dict[str, Any]) -> bool:
             user_id,
             str(event.get("message_id") or ""),
         )
+        if not action_name and context.get("type") == "promlight_tasks":
+            selector_context = context.get("selector_context")
+            selectors = (
+                selector_context.get("selectors", [])
+                if isinstance(selector_context, dict)
+                else []
+            )
+            matching = [
+                str(selector.get("name") or "")
+                for selector in selectors
+                if isinstance(selector, dict)
+                and selector.get("name") in allowed_actions
+                and selected_value in selector.get("options", [])
+            ]
+            if len(matching) == 1:
+                action_name = matching[0]
+                log(f"promlight selector inferred name={action_name}")
+        if action_name not in allowed_actions:
+            return False
         lamp_id = str(context.get("lamp_id") or "")
         if context.get("type") != "promlight_tasks" or not lamp_id:
             stale_card = task_card_with_notice(

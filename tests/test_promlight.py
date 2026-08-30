@@ -157,7 +157,7 @@ class PromLightTests(unittest.TestCase):
         )
         for text in ("Desk", "Door", "deepori · Home", "other · Other"):
             self.assertIn(text, card)
-        self.assertIn('"content": "关注哪些 Task"', card)
+        self.assertIn('"content": "提示灯关联哪些 Task"', card)
         self.assertIn('"content": "设备设置"', card)
         self.assertNotIn('"content": "重命名"', card)
         self.assertNotIn('"content": "解除 Bridge 绑定"', card)
@@ -177,7 +177,7 @@ class PromLightTests(unittest.TestCase):
         ):
             self.assertIn(text, settings)
         self.assertIn("停止这盏灯的 Task 提醒并清除关注列表", settings)
-        self.assertNotIn('"content": "关注哪些 Task"', settings)
+        self.assertNotIn('"content": "提示灯关联哪些 Task"', settings)
         self.assertNotIn("解绑…", settings)
 
     def test_device_settings_button_opens_the_owned_lamp_settings_card(self):
@@ -236,6 +236,79 @@ class PromLightTests(unittest.TestCase):
         lamp = self.bind("ou_member", "relay-a", "Desk")
         with self.assertRaises(PermissionError):
             self.bridge.set_promlight_task_subscription("ou_member", lamp, "task-x", True)
+
+    def test_task_card_always_shows_add_and_remove_association_actions(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+
+        available = self.bridge.build_promlight_task_card(
+            "ou_admin", lamp, self.bridge.load_state()
+        )
+        buttons = {
+            element.get("text", {}).get("content"): element
+            for element in available["body"]["elements"]
+            if element.get("tag") == "button"
+        }
+        self.assertIn("关联这个 Task", buttons)
+        self.assertIn("取消关联这个 Task", buttons)
+        self.assertNotIn("disabled", buttons["关联这个 Task"])
+        self.assertEqual(
+            buttons["关联这个 Task"]["behaviors"][0]["value"]["action"],
+            "promlight_add_task",
+        )
+        self.assertTrue(buttons["取消关联这个 Task"]["disabled"])
+        self.assertNotIn("behaviors", buttons["取消关联这个 Task"])
+
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-a", True)
+        associated = self.bridge.build_promlight_task_card(
+            "ou_admin", lamp, self.bridge.load_state()
+        )
+        buttons = {
+            element.get("text", {}).get("content"): element
+            for element in associated["body"]["elements"]
+            if element.get("tag") == "button"
+        }
+        self.assertTrue(buttons["关联这个 Task"]["disabled"])
+        self.assertNotIn("behaviors", buttons["关联这个 Task"])
+        self.assertNotIn("disabled", buttons["取消关联这个 Task"])
+        self.assertEqual(
+            buttons["取消关联这个 Task"]["behaviors"][0]["value"]["action"],
+            "promlight_remove_task",
+        )
+
+    def test_project_selector_without_action_name_refreshes_task_options(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+        with self.bridge._state_lock:
+            state = self.bridge.load_state()
+            card = self.bridge.build_promlight_task_card("ou_admin", lamp, state)
+            self.bridge.remember_card_context(
+                state, "ou_admin", "om_project", card, "promlight_tasks"
+            )
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_card_event(
+            {
+                "type": "card.action.trigger",
+                "event_id": "select-project-without-name",
+                "operator_id": "ou_admin",
+                "message_id": "om_project",
+                "action_tag": "select_static",
+                "action_name": "",
+                "option": "other",
+            }
+        )
+
+        patched = self.bridge.patch_card.call_args.args[1]
+        selectors = {
+            element["name"]: element
+            for element in patched["body"]["elements"]
+            if element.get("tag") == "select_static"
+        }
+        self.assertEqual(selectors["promlight_project_selector"]["initial_option"], "other")
+        self.assertEqual(selectors["promlight_task_selector"]["initial_option"], "task-x")
+        self.assertEqual(
+            [option["value"] for option in selectors["promlight_task_selector"]["options"]],
+            ["task-x"],
+        )
 
     def test_status_aggregation_uses_fixed_priority(self):
         statuses = self.bridge.aggregate_promlight_status
@@ -375,7 +448,7 @@ class PromLightTests(unittest.TestCase):
         )
 
         processing = self.bridge.promlight_action_processing_card(
-            card, "promlight_toggle_task"
+            card, "promlight_add_task"
         )
         buttons = [
             element
@@ -423,7 +496,9 @@ class PromLightTests(unittest.TestCase):
         final_json = json.dumps(final, ensure_ascii=False)
         self.assertIn("正在处理…", processing_json)
         self.assertIn('"disabled": true', processing_json)
-        self.assertIn("已关注这个 Task", final_json)
+        self.assertIn("已关联这个 Task", final_json)
+        self.assertIn("取消关联这个 Task", final_json)
+        self.assertNotIn("取消关注这个 Task", final_json)
         self.assertEqual(
             self.bridge.load_state()["promlight"]["lamps"][lamp]["task_ids"],
             ["task-a"],
