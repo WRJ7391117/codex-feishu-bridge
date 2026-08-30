@@ -3994,21 +3994,26 @@ class RemoteFeatureTests(unittest.TestCase):
             "ipc_pending": {},
         }
         result = []
+        errors = []
+        desktop_ready = threading.Event()
 
         def request():
-            result.append(
-                self.bridge.send_run_ipc_request(
-                    run,
-                    "thread-follower-interrupt-turn",
-                    4,
-                    {
-                        "conversationId": "task-a",
-                        "mode": "user-stop",
-                        "expectedTurnId": "turn-1",
-                    },
-                    2000,
+            try:
+                result.append(
+                    self.bridge.send_run_ipc_request(
+                        run,
+                        "thread-follower-interrupt-turn",
+                        4,
+                        {
+                            "conversationId": "task-a",
+                            "mode": "user-stop",
+                            "expectedTurnId": "turn-1",
+                        },
+                        2000,
+                    )
                 )
-            )
+            except Exception as exc:
+                errors.append(exc)
 
         def desktop():
             request_frame = self.bridge.receive_ipc_message(server)
@@ -4034,22 +4039,39 @@ class RemoteFeatureTests(unittest.TestCase):
                     )
                     + "\n"
                 )
+            desktop_ready.set()
 
         requester = threading.Thread(target=request)
         desktop_side = threading.Thread(target=desktop)
         requester.start()
         desktop_side.start()
+        self.assertTrue(desktop_ready.wait(1))
+        real_select = self.bridge.select.select
+        select_calls = 0
+
+        def miss_first_ipc_poll(readers, writers, error_fds, timeout=0):
+            nonlocal select_calls
+            select_calls += 1
+            if select_calls == 1:
+                return [], [], []
+            return real_select(readers, writers, error_fds, timeout)
+
         try:
-            success, message, _ = self.bridge.wait_for_desktop_turn(
-                rollout,
-                0,
-                "turn-1",
-                ipc_connection=client,
-                on_ipc_response=lambda response: self.bridge.complete_run_ipc_response(
-                    run,
-                    response,
-                ),
-            )
+            with mock.patch.object(
+                self.bridge.select,
+                "select",
+                side_effect=miss_first_ipc_poll,
+            ):
+                success, message, _ = self.bridge.wait_for_desktop_turn(
+                    rollout,
+                    0,
+                    "turn-1",
+                    ipc_connection=client,
+                    on_ipc_response=lambda response: self.bridge.complete_run_ipc_response(
+                        run,
+                        response,
+                    ),
+                )
         finally:
             requester.join()
             desktop_side.join()
@@ -4058,6 +4080,7 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.assertTrue(success)
         self.assertEqual(message, "完成")
+        self.assertEqual(errors, [])
         self.assertEqual(result[0]["resultType"], "success")
 
     def test_following_subscribes_without_replaying_complete_history(self):

@@ -10255,6 +10255,26 @@ def complete_run_ipc_response(run: dict[str, Any], response: dict[str, Any]) -> 
         return True
 
 
+def drain_ready_ipc_responses(
+    connection: socket.socket | None,
+    on_ipc_response: Callable[[dict[str, Any]], bool] | None,
+) -> None:
+    if connection is None or on_ipc_response is None:
+        return
+    while True:
+        try:
+            readable, _, _ = select.select([connection], [], [], 0)
+        except (OSError, ValueError):
+            return
+        if not readable:
+            return
+        try:
+            response = receive_ipc_message(connection)
+        except (ConnectionError, OSError, ValueError, json.JSONDecodeError):
+            return
+        on_ipc_response(response)
+
+
 def send_run_ipc_request(
     run: dict[str, Any],
     method: str,
@@ -11593,6 +11613,8 @@ def wait_for_desktop_turn(
                 continue
             if payload.get("turn_id") != turn_id:
                 continue
+            if event_type in {"task_complete", "task_failed", "turn_aborted"}:
+                drain_ready_ipc_responses(ipc_connection, on_ipc_response)
             if event_type == "task_complete":
                 message = str(payload.get("last_agent_message") or "").strip()
                 return (

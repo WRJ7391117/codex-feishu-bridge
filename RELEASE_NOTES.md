@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.11.5 (build 84)
+
+- Removes a Desktop IPC completion race that could make the Release test suite fail intermittently when a follower action response and Task completion arrived together.
+- Replaces the timing-dependent regression with a deterministic ordering test so the same race is caught without flaky GitHub Actions failures.
+
 ## 1.11.4 (build 83)
 
 - Shows the verified PromLight hardware and device version directly on the App home card, warns that other models or versions may not enable the light feature, clarifies the control-center action as “提示灯设备设置”, and uses “解除与 Bridge 的绑定” consistently in the device-settings flow.
