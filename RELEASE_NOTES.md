@@ -4,6 +4,7 @@
 
 - Removes a Desktop IPC completion race that could make the Release test suite fail intermittently when a follower action response and Task completion arrived together.
 - Replaces the timing-dependent regression with a deterministic ordering test so the same race is caught without flaky GitHub Actions failures.
+- Updates both CI workflows to the Node 24-based checkout action before GitHub retires the older Node 20 runtime.
 
 ## 1.11.4 (build 83)
 
