@@ -1,5 +1,13 @@
 # Release Notes
 
+## 1.10.2 (build 78)
+
+- Moves the complete local PromLight discovery and authorized-user binding flow onto the App home page while keeping the same reusable controls in Bridge settings.
+- Displays the verified PromLight hardware report (`0.1.3`, release `19`), the required PromLight Mac relay version (`0.2.3`), and each connected device's actual reported product/version without exposing its private device reference.
+- Keeps unverified hardware or relay versions explicitly outside the compatibility claim and retains the Mac-only continuous-relay boundary.
+- Removes local and mobile hardware-pairing actions from Feishu; the card now manages only already-bound lamps, with independent per-lamp Task lists, names, defaults, status, and unbind controls.
+- States that PromLight App `0.2.3` is still a separately installed dependency and is not redistributed inside the public Bridge package.
+
 ## 1.10.1 (build 77)
 
 - Waits for the Desktop-busy queue worker to finish before its test fixture is removed, eliminating a macOS CI cleanup race without changing production queue behavior.

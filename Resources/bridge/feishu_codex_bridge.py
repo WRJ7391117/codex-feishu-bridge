@@ -675,11 +675,14 @@ def promlight_http_json(path: str, body: dict[str, Any] | None = None) -> dict[s
     return payload
 
 
-def discover_promlight_devices() -> list[dict[str, Any]]:
-    try:
-        payload = promlight_http_json("/api/status")
-    except (OSError, URLError, ValueError, json.JSONDecodeError):
-        return []
+def discover_promlight_devices(
+    payload: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if payload is None:
+        try:
+            payload = promlight_http_json("/api/status")
+        except (OSError, URLError, ValueError, json.JSONDecodeError):
+            return []
     devices = payload.get("devices")
     if not isinstance(devices, list):
         return []
@@ -693,10 +696,16 @@ def discover_promlight_devices() -> list[dict[str, Any]]:
         if not relay_ref:
             continue
         label = str(item.get("label") or item.get("product") or "PromLight").strip()
+        product = str(item.get("product") or "PromLight").strip()
+        device_version = str(item.get("version") or "").strip()
+        release_number = item.get("release_number")
         discovered.append(
             {
                 "relay_ref": relay_ref,
                 "label": label[:80] or "PromLight",
+                "product": product[:80] or "PromLight",
+                "device_version": device_version[:32],
+                "release_number": release_number if isinstance(release_number, int) else None,
                 "online": True,
             }
         )
@@ -7651,7 +7660,10 @@ def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[st
         elements.append(
             {
                 "tag": "markdown",
-                "content": "**我的提示灯**\n尚未绑定提示灯。请先选择一种连接方式。",
+                "content": (
+                    "**我的提示灯**\n尚未绑定提示灯。请在运行 Bridge 的 Mac 上打开 App 首页，"
+                    "完成设备连接和用户归属。"
+                ),
             }
         )
     for lamp in lamps:
@@ -7712,8 +7724,6 @@ def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[st
             )
     elements.extend(
         [
-            promlight_button("在本地 Bridge 连接新灯", "promlight_local_pairing"),
-            promlight_button("连接附近提示灯（手机/Pad）", "promlight_mobile_pairing"),
             promlight_button("刷新状态", "promlight_refresh"),
             promlight_legend_element(),
         ]
@@ -7732,64 +7742,6 @@ def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[st
             "padding": "12px 12px 20px 12px",
             "vertical_spacing": "12px",
             "elements": elements,
-        },
-    }
-
-
-def build_promlight_local_pairing_card() -> dict[str, Any]:
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
-        "header": {
-            "title": {"tag": "plain_text", "content": "在本地 Bridge 连接新灯"},
-            "template": "blue",
-        },
-        "body": {
-            "direction": "vertical",
-            "vertical_spacing": "12px",
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": (
-                        "1. 确保 PromLight 已与身边的 Mac/Windows 建立 BLE 连接。\n"
-                        "2. 在运行 Codex 的 Mac 上打开 DeepOri Codex Feishu Bridge。\n"
-                        "3. 进入“提示灯”区域，刷新设备并把灯归属给一个已授权飞书用户。\n\n"
-                        "设备 reference 只保存在该 Mac 的私有 state 中，不会显示在飞书或提交到仓库。"
-                    ),
-                },
-                promlight_button("返回我的提示灯", "show_promlight", style="primary_filled"),
-                promlight_legend_element(),
-            ],
-        },
-    }
-
-
-def build_promlight_mobile_pairing_card() -> dict[str, Any]:
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
-        "header": {
-            "title": {"tag": "plain_text", "content": "连接附近提示灯（手机/Pad）"},
-            "template": "yellow",
-        },
-        "body": {
-            "direction": "vertical",
-            "vertical_spacing": "12px",
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": (
-                        "**移动配对暂未开放。**\n\n"
-                        "飞书小程序具备前台 BLE 扫描、连接和 GATT 读写能力，但后台约 5 分钟后可能被销毁，"
-                        "不能承担持续提醒。PromLight v2 的真实 GATT service、characteristic、分包和回读协议"
-                        "也尚未完成授权真机验证。\n\n"
-                        "当前请使用本地 Bridge 路径。这里没有执行扫描或伪装成已连接。"
-                    ),
-                },
-                promlight_button("查看本地连接方法", "promlight_local_pairing"),
-                promlight_button("返回我的提示灯", "show_promlight", style="primary_filled"),
-                promlight_legend_element(),
-            ],
         },
     }
 
@@ -10376,11 +10328,12 @@ def handle_promlight_button_action(
         return False
     user_id = str(event.get("operator_id") or "")
     lamp_id = str(payload.get("lamp_id") or "")
-    if action == "promlight_local_pairing":
-        patch_promlight_event_card(event, user_id, build_promlight_local_pairing_card())
-        return True
-    if action == "promlight_mobile_pairing":
-        patch_promlight_event_card(event, user_id, build_promlight_mobile_pairing_card())
+    if action in {"promlight_local_pairing", "promlight_mobile_pairing"}:
+        reconcile_promlight_state()
+        with _state_lock:
+            state = load_state()
+            card = build_promlight_control_card(user_id, state)
+        patch_promlight_event_card(event, user_id, card, "promlight")
         return True
     if action == "show_promlight":
         reconcile_promlight_state()
@@ -14279,9 +14232,17 @@ def main() -> int:
                 for lamp in promlight_state(state)["lamps"].values()
                 if isinstance(lamp, dict)
             ]
+        try:
+            relay_status = promlight_http_json("/api/status")
+        except (OSError, URLError, ValueError, json.JSONDecodeError):
+            relay_status = {}
         print(
             json.dumps(
-                {"devices": discover_promlight_devices(), "bindings": lamps},
+                {
+                    "devices": discover_promlight_devices(relay_status),
+                    "bindings": lamps,
+                    "relay_app_version": str(relay_status.get("app_version") or ""),
+                },
                 ensure_ascii=False,
             )
         )

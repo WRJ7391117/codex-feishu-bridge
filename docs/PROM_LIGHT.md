@@ -18,7 +18,7 @@ Codex 仍运行在共享 Mac。飞书只提供身份、配置、通知和移动�
 
 飞书只新增一个一级菜单“提示灯”，下设两个二级入口：
 
-- “我的提示灯”：绑定/连接、重命名、默认灯、在线状态和关注 Task。
+- “我的提示灯”：查看已由 Mac App 绑定的灯，并管理重命名、默认灯、在线状态和每灯独立的关注 Task；不提供手机/Pad 或本地硬件配对入口。
 - “灯光状态说明”：完整说明灯效、聚合优先级和离线语义。
 
 菜单和卡片事件只使用当次实际操作者的 `operator_id`，缺失时拒绝状态变更；普通消息事件只使用其 `sender_id`。普通用户只能管理自己拥有的灯；Task 列表只来自该用户的 `allowed_projects`，保存前再次校验 Task 仍未归档且仍有权限。同一个 Task 可以被多名用户关注，一名用户可以有多盏灯，每盏灯有独立白名单。同一盏灯只有一个 `active_relay`。
@@ -59,13 +59,17 @@ Codex 仍运行在共享 Mac。飞书只提供身份、配置、通知和移动�
 
 Bridge App 负责发现本机灯并把灯归属到一个已授权飞书用户。飞书卡片继续负责重命名、默认灯、Task 白名单、解绑和状态查看。
 
+当前已验证组合为 PromLight 硬件（设备报告版本 `0.1.3`、release `19`）与 PromLight macOS App `0.2.3`，连接通道为 Mac BLE/HID。Bridge App 首页直接展示多灯发现、选择用户、命名和绑定流程，并显示连接设备实际报告的产品与版本。其他硬件型号或版本未完成真实验证前，不宣称兼容。
+
+PromLight App 当前是独立的第三方签名程序，不包含在 Bridge 公共安装包中。其他 Mac 必须另行安装兼容的 PromLight App；在取得可再分发的软件包、许可和 Universal 构建之前，Bridge 不复制或重新签名该程序，也不宣称提示灯驱动已经一键安装。
+
 ## 移动 BLE 可行性与 Gate
 
 飞书官方文档确认，小程序 Android/iOS `V3.25.0+`、HarmonyOS `V7.35.0+` 支持 `openBluetoothAdapter`、扫描、连接、服务/特征发现、`writeBLECharacteristicValue` 和读取；PC 不支持。官方没有单列 iPad，需以真实 iPad 飞书客户端验收。
 
 官方运行机制同时说明：移动端小程序进入后台后一般最多保留约 5 分钟，也可能因系统资源或 iOS 内存告警提前销毁。因此小程序可承担用户在前台完成的首次配对、换设备、重连和物理确认，不能作为持续 Task 提醒 relay。
 
-PromLight v2 的真实 BLE GATT service UUID、characteristic UUID、分包、ACK/read-back 和重连协议尚未从本机已授权资料或官方上游得到。本机实现使用 BLE HID/本地 daemon；公开同名仓库提供的 5E5E/HID 资料不能替代真实 GATT 证据。因此本轮不实现或宣称手机真机 BLE 闭环，只保留移动配对入口边界和明确 blocker。
+PromLight v2 的真实 BLE GATT service UUID、characteristic UUID、分包、ACK/read-back 和重连协议尚未从本机已授权资料或官方上游得到。本机实现使用 BLE HID/本地 daemon；公开同名仓库提供的 5E5E/HID 资料不能替代真实 GATT 证据。因此本轮不实现或宣称手机真机 BLE 闭环，飞书卡片也不显示移动配对入口。
 
 参考：
 

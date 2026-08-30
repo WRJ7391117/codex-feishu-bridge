@@ -2190,12 +2190,32 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.10.1")
-        self.assertEqual(info["CFBundleVersion"], "77")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.10.2")
+        self.assertEqual(info["CFBundleVersion"], "78")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.10.1 (build 77)", readme)
-        self.assertIn("1.10.1 (build 77", release_notes)
+        self.assertIn("1.10.2 (build 78)", readme)
+        self.assertIn("1.10.2 (build 78", release_notes)
+
+
+class AppPromLightHomeTests(unittest.TestCase):
+    def test_home_exposes_promlight_binding_and_verified_compatibility(self):
+        source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(
+            encoding="utf-8"
+        )
+        main_view = source.split("private struct MainView", 1)[1].split(
+            "private struct ConnectionSetupView", 1
+        )[0]
+        self.assertIn("PromLightSettingsView(model: model)", main_view)
+        self.assertIn("model.refreshPromLightDevices()", main_view)
+        self.assertIn('static let hardware = "PromLight"', source)
+        self.assertIn('static let verifiedDeviceVersion = "0.1.3"', source)
+        self.assertIn("static let verifiedReleaseNumber = 19", source)
+        self.assertIn('static let relayAppVersion = "0.2.3"', source)
+        self.assertIn('Button("绑定到选定用户")', source)
+        self.assertIn("其他型号或版本尚未验证", source)
+        self.assertIn("需单独安装", source)
+        self.assertIn("可连续绑定多盏实体灯", source)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):

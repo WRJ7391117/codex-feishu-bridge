@@ -96,6 +96,15 @@ class PromLightTests(unittest.TestCase):
         )
         self.assertIn("灯光对应的事件说明", compact_legend)
         self.assertNotIn("灯光图例", compact_legend)
+        control = json.dumps(
+            self.bridge.build_promlight_control_card(
+                "ou_admin", self.bridge.load_state()
+            ),
+            ensure_ascii=False,
+        )
+        self.assertIn("请在运行 Bridge 的 Mac 上打开 App 首页", control)
+        self.assertNotIn("连接附近提示灯", control)
+        self.assertNotIn("在本地 Bridge 连接新灯", control)
 
     def test_two_promlight_menu_leaves_send_control_and_legend_cards(self):
         self.bridge.send_card = mock.Mock(return_value=(True, "oc_test", "om_test"))
@@ -130,6 +139,24 @@ class PromLightTests(unittest.TestCase):
         self.assertEqual(state["promlight"]["lamps"][lamp_b]["task_ids"], ["task-a"])
         with self.assertRaises(PermissionError):
             self.bridge.set_promlight_task_subscription("ou_member", lamp_a, "task-a", True)
+
+    def test_one_user_can_name_and_manage_separate_task_lists_for_multiple_lamps(self):
+        lamp_a = self.bind("ou_admin", "relay-a", "Desk")
+        lamp_b = self.bind("ou_admin", "relay-b", "Door")
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp_a, "task-a", True)
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp_b, "task-x", True)
+
+        state = self.bridge.load_state()
+        self.assertEqual(state["promlight"]["lamps"][lamp_a]["name"], "Desk")
+        self.assertEqual(state["promlight"]["lamps"][lamp_b]["name"], "Door")
+        self.assertEqual(state["promlight"]["lamps"][lamp_a]["task_ids"], ["task-a"])
+        self.assertEqual(state["promlight"]["lamps"][lamp_b]["task_ids"], ["task-x"])
+        card = json.dumps(
+            self.bridge.build_promlight_control_card("ou_admin", state),
+            ensure_ascii=False,
+        )
+        for text in ("Desk", "Door", "deepori · Home", "other · Other"):
+            self.assertIn(text, card)
 
     def test_task_permission_is_rechecked_when_subscription_is_saved(self):
         lamp = self.bind("ou_member", "relay-a", "Desk")
@@ -328,6 +355,20 @@ class PromLightTests(unittest.TestCase):
             ["task-a"],
         )
 
+    def test_stale_pairing_button_returns_to_the_current_control_card(self):
+        self.bridge.patch_promlight_event_card = mock.Mock()
+
+        handled = self.bridge.handle_promlight_button_action(
+            {"operator_id": "ou_admin", "message_id": "om_old"},
+            {"action": "promlight_mobile_pairing"},
+        )
+
+        self.assertTrue(handled)
+        card = self.bridge.patch_promlight_event_card.call_args.args[2]
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertIn("提示灯控制中心", rendered)
+        self.assertNotIn("连接附近提示灯", rendered)
+
     def test_daemon_ack_is_not_reported_as_verified_light_effect(self):
         with mock.patch.object(
             self.bridge,
@@ -429,11 +470,23 @@ class PromLightTests(unittest.TestCase):
             "promlight_http_json",
             return_value={
                 "bluetooth": True,
-                "devices": [{"mac": "private-device-ref", "label": "Desk", "opened": True}],
+                "devices": [
+                    {
+                        "mac": "private-device-ref",
+                        "label": "Desk",
+                        "product": "PromLight",
+                        "version": "0.1.3",
+                        "release_number": 19,
+                        "opened": True,
+                    }
+                ],
             },
         ):
             devices = self.bridge.discover_promlight_devices()
         self.assertEqual(devices[0]["relay_ref"], "private-device-ref")
+        self.assertEqual(devices[0]["product"], "PromLight")
+        self.assertEqual(devices[0]["device_version"], "0.1.3")
+        self.assertEqual(devices[0]["release_number"], 19)
         lamp = self.bind("ou_admin", "private-device-ref", "Desk")
         card = json.dumps(
             self.bridge.build_promlight_control_card("ou_admin", self.bridge.load_state()),

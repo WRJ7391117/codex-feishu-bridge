@@ -25,6 +25,13 @@ private enum ProductBrand {
     """
 }
 
+private enum PromLightCompatibility {
+    static let hardware = "PromLight"
+    static let verifiedDeviceVersion = "0.1.3"
+    static let verifiedReleaseNumber = 19
+    static let relayAppVersion = "0.2.3"
+}
+
 private struct CommandResult {
     let status: Int32
     let output: String
@@ -54,6 +61,9 @@ private struct PromLightDeviceDraft: Identifiable {
     var id: String { relayRef }
     let relayRef: String
     let label: String
+    let product: String
+    let deviceVersion: String
+    let releaseNumber: Int?
     let boundOwnerOpenID: String?
 }
 
@@ -701,7 +711,9 @@ private final class BridgeViewModel: ObservableObject {
     @Published var draftPromLightEventKey = "promlight"
     @Published var draftPromLightLegendEventKey = "promlight_legend"
     @Published var draftMaxConcurrentRuns = 2
+    @Published var promLightOwners: [AuthorizedUserDraft] = []
     @Published var promLightDevices: [PromLightDeviceDraft] = []
+    @Published var promLightRelayAppVersion = ""
     @Published var selectedPromLightRelayRef = ""
     @Published var selectedPromLightOwnerOpenID = ""
     @Published var promLightName = ""
@@ -733,7 +745,9 @@ private final class BridgeViewModel: ObservableObject {
         isRunning = bridge.isRunning()
         let config = bridge.readConfig()
         profileName = String(describing: config["lark_profile"] ?? "codex-notify")
-        authorizedUserCount = configuredUsers(from: config).count
+        let users = configuredUsers(from: config)
+        authorizedUserCount = users.count
+        promLightOwners = users
         pendingAccessRequests = bridge.pendingAccessRequests()
         health = bridge.healthSnapshot()
         attemptAutomaticUpdateIfReady()
@@ -759,9 +773,11 @@ private final class BridgeViewModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = controller.promLightInventory()
             var devices: [PromLightDeviceDraft] = []
+            var relayAppVersion = ""
             if result.status == 0,
                let data = result.output.data(using: .utf8),
                let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                relayAppVersion = String(describing: payload["relay_app_version"] ?? "")
                 let bindings = payload["bindings"] as? [[String: Any]] ?? []
                 let ownersByRelay = Dictionary(
                     uniqueKeysWithValues: bindings.compactMap { item -> (String, String)? in
@@ -777,6 +793,9 @@ private final class BridgeViewModel: ObservableObject {
                     return PromLightDeviceDraft(
                         relayRef: relay,
                         label: label?.isEmpty == false ? label! : "PromLight",
+                        product: String(describing: item["product"] ?? "PromLight"),
+                        deviceVersion: String(describing: item["device_version"] ?? ""),
+                        releaseNumber: (item["release_number"] as? NSNumber)?.intValue,
                         boundOwnerOpenID: ownersByRelay[relay]
                     )
                 }
@@ -785,10 +804,11 @@ private final class BridgeViewModel: ObservableObject {
                 guard let self else { return }
                 self.isRefreshingPromLight = false
                 self.promLightDevices = devices
+                self.promLightRelayAppVersion = relayAppVersion
                 if !devices.contains(where: { $0.relayRef == self.selectedPromLightRelayRef }) {
                     self.selectedPromLightRelayRef = devices.first?.relayRef ?? ""
                 }
-                let existingOpenIDs = self.draftUsers.map(\.openID).filter { $0.hasPrefix("ou_") }
+                let existingOpenIDs = self.promLightOwners.map(\.openID).filter { $0.hasPrefix("ou_") }
                 if !existingOpenIDs.contains(self.selectedPromLightOwnerOpenID) {
                     self.selectedPromLightOwnerOpenID = existingOpenIDs.first ?? ""
                 }
@@ -1530,21 +1550,24 @@ private struct MainView: View {
     private let refreshTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            header
-            statusCard
-            healthCard
-            usageCard
-            HStack(alignment: .top, spacing: 16) {
-                connectionCard
-                actionsCard
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                header
+                statusCard
+                healthCard
+                usageCard
+                PromLightSettingsView(model: model)
+                HStack(alignment: .top, spacing: 16) {
+                    connectionCard
+                    actionsCard
+                }
+                Text("关闭此窗口不会关闭桥接。你可以从菜单栏图标再次打开控制中心。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            Spacer(minLength: 0)
-            Text("关闭此窗口不会关闭桥接。你可以从菜单栏图标再次打开控制中心。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .padding(28)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(28)
         .frame(minWidth: 760, idealWidth: 820, minHeight: 760, idealHeight: 800)
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $model.showConfiguration) {
@@ -1569,6 +1592,7 @@ private struct MainView: View {
         }
         .onAppear {
             model.refresh()
+            model.refreshPromLightDevices()
             model.checkForUpdates()
         }
         .onReceive(refreshTimer) { _ in
@@ -2728,6 +2752,110 @@ private struct ConfigurationChecklistView: View {
     }
 }
 
+private struct PromLightSettingsView: View {
+    @ObservedObject var model: BridgeViewModel
+
+    var body: some View {
+        GroupBox("提示灯") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("在这台 Mac 上连接和绑定提示灯")
+                            .font(.headline)
+                        Text("可连续绑定多盏实体灯并分别命名、归属用户；每盏灯的关注 Task、重命名和解绑继续在飞书中完成。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 16)
+                    Button(
+                        model.isRefreshingPromLight ? "刷新中…" : "刷新设备",
+                        systemImage: "arrow.clockwise"
+                    ) {
+                        model.refreshPromLightDevices()
+                    }
+                    .disabled(model.isRefreshingPromLight)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(
+                        "当前适配硬件：\(PromLightCompatibility.hardware) · 已验证设备报告版本 \(PromLightCompatibility.verifiedDeviceVersion)（release \(PromLightCompatibility.verifiedReleaseNumber)）",
+                        systemImage: "lightbulb.led"
+                    )
+                    Text(
+                        "Mac 中继：PromLight App "
+                            + (model.promLightRelayAppVersion.isEmpty
+                                ? "未检测（需单独安装 \(PromLightCompatibility.relayAppVersion)）"
+                                : model.promLightRelayAppVersion)
+                            + " · BLE/HID；其他型号或版本尚未验证。"
+                    )
+                    .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+
+                if model.promLightDevices.isEmpty {
+                    Text(model.promLightStatus)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("在线提示灯", selection: $model.selectedPromLightRelayRef) {
+                        ForEach(model.promLightDevices) { device in
+                            Text(deviceLabel(device))
+                                .tag(device.relayRef)
+                        }
+                    }
+                    Picker("归属用户", selection: $model.selectedPromLightOwnerOpenID) {
+                        ForEach(model.promLightOwners) { user in
+                            Text(user.name.isEmpty ? "已授权用户" : user.name)
+                                .tag(user.openID)
+                        }
+                    }
+                    TextField("可选名称，例如：书桌提示灯", text: $model.promLightName)
+                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        Button("绑定到选定用户") {
+                            model.bindSelectedPromLight()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(
+                            model.selectedPromLightRelayRef.isEmpty
+                                || model.selectedPromLightOwnerOpenID.isEmpty
+                        )
+                        Text(model.promLightStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if model.promLightOwners.isEmpty {
+                    Text("尚未保存授权用户。请先在“配置桥接”中添加用户和允许访问的项目。")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Divider()
+                Text("当前自动提醒仅支持 Mac 中继；桥接安装包暂不包含 PromLight App。手机/Pad 不作为提示灯中继。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 6)
+        }
+    }
+
+    private func deviceLabel(_ device: PromLightDeviceDraft) -> String {
+        var details = [device.label, device.product]
+        if !device.deviceVersion.isEmpty {
+            details.append("版本 \(device.deviceVersion)")
+        }
+        if let releaseNumber = device.releaseNumber {
+            details.append("release \(releaseNumber)")
+        }
+        if device.boundOwnerOpenID != nil {
+            details.append("已绑定")
+        }
+        return details.joined(separator: " · ")
+    }
+}
+
 private struct ConfigurationView: View {
     @ObservedObject var model: BridgeViewModel
     @State private var showAdvancedSettings = false
@@ -2739,7 +2867,7 @@ private struct ConfigurationView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     connectionSettings
-                    promLightSettings
+                    PromLightSettingsView(model: model)
                     advancedSettings
                     accessRequests
                     authorizedUsers
@@ -2877,69 +3005,6 @@ private struct ConfigurationView: View {
                 .padding(.top, 10)
             }
             .padding(.vertical, 4)
-        }
-    }
-
-    private var promLightSettings: some View {
-        GroupBox("提示灯") {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("本地电脑连接")
-                            .font(.headline)
-                        Text("发现 PromLight，并把灯归属给一位已授权飞书用户。设备标识只保存在本机。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("刷新设备", systemImage: "arrow.clockwise") {
-                        model.refreshPromLightDevices()
-                    }
-                    .disabled(model.isRefreshingPromLight)
-                }
-                if model.promLightDevices.isEmpty {
-                    Text(model.promLightStatus)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Picker("在线提示灯", selection: $model.selectedPromLightRelayRef) {
-                        ForEach(model.promLightDevices) { device in
-                            Text(
-                                device.label
-                                    + (device.boundOwnerOpenID == nil ? "" : " · 已绑定")
-                            )
-                            .tag(device.relayRef)
-                        }
-                    }
-                    Picker("归属用户", selection: $model.selectedPromLightOwnerOpenID) {
-                        ForEach(model.draftUsers.filter { $0.openID.hasPrefix("ou_") }) { user in
-                            Text(user.name.isEmpty ? "已授权用户" : user.name)
-                                .tag(user.openID)
-                        }
-                    }
-                    TextField("可选名称，例如：书桌提示灯", text: $model.promLightName)
-                        .textFieldStyle(.roundedBorder)
-                    HStack {
-                        Button("绑定到选定用户") {
-                            model.bindSelectedPromLight()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(
-                            model.selectedPromLightRelayRef.isEmpty
-                                || model.selectedPromLightOwnerOpenID.isEmpty
-                        )
-                        Text(model.promLightStatus)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Divider()
-                Text("手机/Pad 连接：飞书小程序可用于前台配对和重连，但不能承担持续后台提醒；真实 GATT 协议和真机能力完成验证前不会显示为可用。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.top, 6)
         }
     }
 
