@@ -1,6 +1,6 @@
 # Release Notes
 
-## 1.11.6 (build 85)
+## 1.11.7 (build 86)
 
 - Shows the complete project and Task title in the body of every Task-scoped Feishu card, so mobile header and selector truncation no longer hides the Task identity.
 - Preserves valid Task subscriptions when the Codex Desktop recent-task catalog is temporarily unavailable or omits a still-active Task, using an authorized direct Task lookup before removing the subscription.

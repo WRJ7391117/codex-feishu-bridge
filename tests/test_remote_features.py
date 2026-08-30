@@ -1677,6 +1677,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.bridge.save_state(state)
         self.bridge.ALLOWED_USERS.pop("ou_miller")
         self.bridge.recent_tasks = lambda user_id: []
+        self.bridge.task_by_id = mock.Mock(return_value=None)
         self.bridge.rollout_path_for_task = lambda task_id: None
 
         self.assertTrue(self.bridge.poll_task_subscriptions())
