@@ -863,7 +863,7 @@ private final class BridgeViewModel: ObservableObject {
             return
         }
         promLightName = ""
-        promLightStatus = "提示灯已归属到选定用户。Task 关注与重命名可继续在飞书卡片中完成。"
+        promLightStatus = "提示灯已归属到选定用户。Task 关联与重命名提示灯可继续在飞书卡片中完成。"
         refreshPromLightDevices()
     }
 

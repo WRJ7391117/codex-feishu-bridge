@@ -1,5 +1,9 @@
 # Release Notes
 
+## 1.11.3 (build 82)
+
+- Clarifies that renaming a PromLight only changes its display name in Bridge and Feishu, without changing the Bluetooth name, stable device ID, connection, or Task associations.
+
 ## 1.11.2 (build 81)
 
 - Renames the PromLight Task relationship throughout Feishu from “关注” to the clearer “关联”, keeps add/remove association actions visible together with the unavailable action disabled, and refreshes the Task selector when real Feishu callbacks omit the selector name.

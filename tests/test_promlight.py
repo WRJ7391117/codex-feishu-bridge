@@ -170,7 +170,9 @@ class PromLightTests(unittest.TestCase):
         )
         for text in (
             "提示灯设置",
-            "只改飞书和 Bridge 中的显示名称",
+            "重命名提示灯",
+            "仅修改飞书和 Bridge 中的显示名称",
+            "不会修改蓝牙设备名称、设备 ID、连接关系或 Task 关联",
             "不会断开 macOS 蓝牙",
             "解除 Bridge 绑定",
             "返回我的提示灯",
@@ -178,7 +180,17 @@ class PromLightTests(unittest.TestCase):
             self.assertIn(text, settings)
         self.assertIn("停止这盏灯的 Task 提醒并清除关注列表", settings)
         self.assertNotIn('"content": "提示灯关联哪些 Task"', settings)
+        self.assertNotIn('"content": "重命名"', settings)
         self.assertNotIn("解绑…", settings)
+
+        rename = json.dumps(
+            self.bridge.build_promlight_rename_card(
+                state["promlight"]["lamps"][lamp_b]
+            ),
+            ensure_ascii=False,
+        )
+        self.assertIn("重命名提示灯", rename)
+        self.assertIn("不会修改蓝牙设备名称、设备 ID、连接关系或 Task 关联", rename)
 
     def test_device_settings_button_opens_the_owned_lamp_settings_card(self):
         lamp = self.bind("ou_member", "relay-a", "Desk")

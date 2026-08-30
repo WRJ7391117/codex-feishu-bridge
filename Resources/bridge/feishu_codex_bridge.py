@@ -7804,7 +7804,8 @@ def build_promlight_device_settings_card(
                 + (" · 默认灯" if lamp.get("is_default") else "")
                 + "\n\n**这些设置分别做什么**\n"
                 "- **设为默认灯**：从飞书进入提示灯功能时，优先管理这盏灯。\n"
-                "- **重命名**：只改飞书和 Bridge 中的显示名称。\n"
+                "- **重命名提示灯**：仅修改飞书和 Bridge 中的显示名称；"
+                "不会修改蓝牙设备名称、设备 ID、连接关系或 Task 关联。\n"
                 "- **解除 Bridge 绑定**：停止这盏灯的 Task 提醒并清除关注列表；"
                 "不会断开 macOS 蓝牙。"
             ),
@@ -7814,7 +7815,7 @@ def build_promlight_device_settings_card(
         elements.append(promlight_button("设为默认灯", "promlight_set_default", lamp_id=lamp_id))
     elements.extend(
         [
-            promlight_button("重命名", "promlight_start_rename", lamp_id=lamp_id),
+            promlight_button("重命名提示灯", "promlight_start_rename", lamp_id=lamp_id),
             promlight_button(
                 "解除 Bridge 绑定",
                 "promlight_unbind",
@@ -7989,6 +7990,8 @@ def build_promlight_rename_card(lamp: dict[str, Any]) -> dict[str, Any]:
                     "tag": "markdown",
                     "content": (
                         f"当前名称：**{card_markdown_escape(str(lamp.get('name') or 'PromLight'))}**\n\n"
+                        "这里只修改飞书和 Bridge 中的显示名称，不会修改蓝牙设备名称、设备 ID、"
+                        "连接关系或 Task 关联。\n\n"
                         "请直接发送一条纯文字作为新名称（最多 40 个字符）。这条消息只用于重命名，不会发送到 Codex Task。"
                     ),
                 },
@@ -12460,7 +12463,7 @@ def _handle_message_event_once(event: dict[str, Any]) -> None:
     if pending_rename and message_type == "text" and not image_keys and not file_keys:
         try:
             rename_promlight(user_id, pending_rename, content)
-            change = "提示灯名称已更新。"
+            change = "提示灯显示名称已更新。"
         except (PermissionError, ValueError) as exc:
             change = str(exc)
         with _state_lock:
