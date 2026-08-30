@@ -3585,8 +3585,13 @@ class RemoteFeatureTests(unittest.TestCase):
             if self.bridge.load_state().get("pending_inputs"):
                 break
             time.sleep(0.01)
+        for _ in range(100):
+            if not self.bridge.active_run_for_task("task-a"):
+                break
+            time.sleep(0.01)
 
         queued = self.bridge.load_state()["pending_inputs"]
+        self.assertIsNone(self.bridge.active_run_for_task("task-a"))
         self.assertEqual(len(queued), 1)
         self.assertEqual(queued[0]["content"], "排队执行")
         self.assertEqual(

@@ -1,5 +1,9 @@
 # Release Notes
 
+## 1.10.1 (build 77)
+
+- Waits for the Desktop-busy queue worker to finish before its test fixture is removed, eliminating a macOS CI cleanup race without changing production queue behavior.
+
 ## 1.10.0 (build 76)
 
 - Adds a persisted, opt-in “自动安装 App 更新” switch while preserving manual update checks; installation waits for all active and queued Task work to finish and keeps the existing signed Universal-package verification.

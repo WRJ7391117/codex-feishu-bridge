@@ -2190,12 +2190,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.10.0")
-        self.assertEqual(info["CFBundleVersion"], "76")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.10.1")
+        self.assertEqual(info["CFBundleVersion"], "77")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.10.0 (build 76)", readme)
-        self.assertIn("1.10.0 (build 76", release_notes)
+        self.assertIn("1.10.1 (build 77)", readme)
+        self.assertIn("1.10.1 (build 77", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):
