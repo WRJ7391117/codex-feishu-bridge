@@ -5905,6 +5905,17 @@ def task_project_text(task: dict[str, str]) -> str:
     return f"项目：{task['project']}"
 
 
+def task_identity_markdown(task: dict[str, str]) -> str:
+    return (
+        f"**项目**：{card_markdown_escape(task['project'])}\n"
+        f"**Task**：{card_markdown_escape(task['title'])}"
+    )
+
+
+def task_identity_element(task: dict[str, str]) -> dict[str, Any]:
+    return {"tag": "markdown", "content": task_identity_markdown(task)}
+
+
 def current_task_text(task: dict[str, str]) -> str:
     return f"🟢 当前 Task\n{task_project_text(task)}\n{task_title_text(task)}"
 
@@ -5998,7 +6009,12 @@ def build_desktop_sync_card(
         "body": {
             "direction": "vertical",
             "padding": "12px 12px 20px 12px",
-            "elements": [{"tag": "markdown", "content": message}],
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"{task_identity_markdown(task)}\n\n{message}",
+                }
+            ],
         },
     }
 
@@ -6161,7 +6177,10 @@ def build_desktop_sync_canceled_card(task: dict[str, str] | None) -> dict[str, A
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": "本次没有接续或订阅 Codex Desktop。当前 Task 保持不变。",
+                    "content": (
+                        f"{task_identity_markdown(task)}\n\n" if task else ""
+                    )
+                    + "本次没有接续或订阅 Codex Desktop。当前 Task 保持不变。",
                 }
             ],
         },
@@ -6244,7 +6263,10 @@ def build_task_settings_card(
         lines.insert(0, "⚠️ **暂时无法读取 Codex 模型列表，请刷新重试。**")
 
     elements: list[dict[str, Any]] = [
-        {"tag": "markdown", "content": "\n\n".join(lines)}
+        {
+            "tag": "markdown",
+            "content": "\n\n".join([task_identity_markdown(task), *lines]),
+        }
     ]
     if models:
         model_selector: dict[str, Any] = {
@@ -6417,7 +6439,10 @@ def build_compact_task_context_card(
             "padding": "12px 12px 20px 12px",
             "vertical_spacing": "12px",
             "elements": [
-                {"tag": "markdown", "content": "\n\n".join(lines)},
+                {
+                    "tag": "markdown",
+                    "content": "\n\n".join([task_identity_markdown(task), *lines]),
+                },
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "确认压缩当前 Task 上下文…"},
@@ -6628,6 +6653,7 @@ def build_run_card(run: dict[str, Any]) -> dict[str, Any]:
     )
     if attachment_count:
         details.append(f"<font color='grey'>本轮附件：{attachment_count} 个</font>")
+    details.insert(0, task_identity_markdown(run["task"]))
     elements: list[dict[str, Any]] = [
         {
             "tag": "markdown",
@@ -6789,6 +6815,7 @@ def build_queued_card(
         details.append(f"<font color='grey'>本 Task 队列：第 {position} 条</font>")
     if attachment_count:
         details.append(f"<font color='grey'>本轮附件：{attachment_count} 个</font>")
+    details.insert(0, task_identity_markdown(task))
     elements: list[dict[str, Any]] = [
         {"tag": "markdown", "content": "\n\n".join(details)}
     ]
@@ -6901,7 +6928,10 @@ def build_approval_card(run: dict[str, Any], approval: dict[str, Any]) -> dict[s
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": f"**授权请求**\n{titles.get(request_type, titles['permission'])}",
+                    "content": (
+                        f"{task_identity_markdown(run['task'])}\n\n"
+                        f"**授权请求**\n{titles.get(request_type, titles['permission'])}"
+                    ),
                 },
                 {"tag": "markdown", "content": f"**请求说明**\n{detail}"},
                 {
@@ -6958,7 +6988,10 @@ def completed_approval_card(
     card["body"]["elements"] = [
         {
             "tag": "markdown",
-            "content": "本次请求已允许。" if approved else "本次请求已拒绝。",
+            "content": (
+                f"{task_identity_markdown(run['task'])}\n\n"
+                + ("本次请求已允许。" if approved else "本次请求已拒绝。")
+            ),
         }
     ]
     return card
@@ -7111,6 +7144,8 @@ def build_task_card(
             ),
         }
     ]
+    if selected:
+        elements.append(task_identity_element(selected))
     project_selector: dict[str, Any] = {
         "tag": "select_static",
         "name": "archived_project_selector" if archived else "project_selector",
@@ -7433,6 +7468,8 @@ def build_task_subscriptions_card(
             "width": "fill",
         }
         elements.append(selector)
+        if selected:
+            elements.append(task_identity_element(selected))
         elements.append(
             {
                 "tag": "button",
@@ -7914,6 +7951,8 @@ def build_promlight_task_card(
                 "width": "fill",
             }
         )
+        if selected:
+            elements.append(task_identity_element(selected))
         associated = selected_id in lamp.get("task_ids", [])
         elements.extend(
             [
@@ -8040,9 +8079,11 @@ def build_task_subscription_result_card(
                 {
                     "tag": "markdown",
                     "content": (
+                        f"{task_identity_markdown(task)}\n\n"
                         "<font color='grey'>完整结果见下方，可直接继续对话。</font>"
                         if completed
-                        else "<font color='grey'>运行详情见下方。</font>"
+                        else f"{task_identity_markdown(task)}\n\n"
+                        "<font color='grey'>运行详情见下方。</font>"
                     ),
                 },
             ],
@@ -8074,6 +8115,7 @@ def build_task_switch_canceled_card(task: dict[str, str]) -> dict[str, Any]:
                 {
                     "tag": "markdown",
                     "content": (
+                        f"{task_identity_markdown(task)}\n\n"
                         "✅ **已取消切换**\n\n"
                         "当前 Task 保持不变，后续消息仍会发送到这里。"
                     ),
@@ -8766,12 +8808,29 @@ def task_subscriptions_card_for_state(
     change: str = "",
 ) -> dict[str, Any]:
     with _state_lock:
-        tasks = recent_tasks(user_id)
+        try:
+            tasks = recent_tasks(user_id)
+        except (OSError, sqlite3.Error) as exc:
+            tasks = []
+            log(f"task subscription catalog unavailable error={type(exc).__name__}")
         subscriptions = user_task_subscriptions(state, user_id)
         valid_ids = {task["id"] for task in tasks}
         for task_id in list(subscriptions):
-            if task_id not in valid_ids:
+            if task_id in valid_ids:
+                continue
+            try:
+                retained_task = task_by_id(task_id, user_id)
+            except (OSError, sqlite3.Error) as exc:
+                log(
+                    "task subscription lookup unavailable "
+                    f"error={type(exc).__name__}"
+                )
+                continue
+            if retained_task is None:
                 subscriptions.pop(task_id, None)
+                continue
+            tasks.append(retained_task)
+            valid_ids.add(task_id)
         selected_map = state.setdefault("subscription_selected_tasks", {})
         selected_id = str(selected_map.get(user_id) or "")
         if selected_id not in valid_ids:
@@ -8941,22 +9000,28 @@ def poll_task_subscriptions() -> bool:
         ]
         turn_owners = dict(state.get("bridge_turn_owners", {}))
     tasks_by_user: dict[str, dict[str, dict[str, str]]] = {}
-    unavailable_users: set[str] = set()
     for user_id in dict.fromkeys(user_id for user_id, _task_id, _entry in pending):
         try:
             tasks_by_user[user_id] = {
                 task["id"]: task for task in recent_tasks(user_id)
             }
         except (OSError, sqlite3.Error) as exc:
-            unavailable_users.add(user_id)
+            tasks_by_user[user_id] = {}
             log(f"task subscription catalog unavailable error={type(exc).__name__}")
     rollout_paths: dict[str, Path | None] = {}
     scan_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
     did_work = False
     for user_id, task_id, entry in pending:
-        if user_id in unavailable_users:
-            continue
         task = tasks_by_user.get(user_id, {}).get(task_id)
+        if task is None:
+            try:
+                task = task_by_id(task_id, user_id)
+            except (OSError, sqlite3.Error) as exc:
+                log(
+                    "task subscription lookup unavailable "
+                    f"error={type(exc).__name__}"
+                )
+                continue
         if task is None:
             with _state_lock:
                 state = load_state()
@@ -8964,6 +9029,7 @@ def poll_task_subscriptions() -> bool:
                 save_state(state)
             did_work = True
             continue
+        tasks_by_user.setdefault(user_id, {})[task_id] = task
         if task_id not in rollout_paths:
             try:
                 rollout_paths[task_id] = rollout_path_for_task(task_id)
@@ -9593,6 +9659,7 @@ def build_current_status_card(
         else ("空闲", "neutral")
     )
     lines = []
+    lines.append(task_identity_markdown(task))
     if change:
         lines.append(f"✅ **{card_markdown_escape(change)}**")
     lines.extend(

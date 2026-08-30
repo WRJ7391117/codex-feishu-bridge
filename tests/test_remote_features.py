@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -117,6 +118,107 @@ class RemoteFeatureTests(unittest.TestCase):
             {"id": "task-b", "title": "Site", "project": "deepori"},
             {"id": "task-c", "title": "Paper", "project": "thesis"},
         ]
+
+    def assert_task_title_visible_in_body(self, card, title):
+        markdown = "\n".join(
+            str(element.get("content") or "")
+            for element in card.get("body", {}).get("elements", [])
+            if isinstance(element, dict) and element.get("tag") == "markdown"
+        )
+        self.assertIn(title, markdown)
+
+    def test_every_task_scoped_card_shows_the_complete_task_title_in_its_body(self):
+        title = "这是一个用于核对飞书手机卡片完整显示的很长的 Codex Task 名称"
+        task = {"id": "task-long", "title": title, "project": "Evolution"}
+        run = {
+            "run_id": "run-long",
+            "task": task,
+            "status": "正在处理",
+            "outcome": "running",
+            "started_at": time.time(),
+            "timeline": [],
+            "is_current_task": True,
+        }
+        queued = {
+            "queue_id": "queue-long",
+            "task": task,
+            "queue_reason": "same_task",
+            "image_keys": [],
+            "file_keys": [],
+            "is_current_task": True,
+        }
+        approval = {
+            "request_id": "approval-long",
+            "type": "permission",
+            "detail": "需要用户确认",
+        }
+        usage = {
+            "title": "当日 Task 用量分析",
+            "subtitle": "今天",
+            "scope": "daily",
+            "total_tokens": 100,
+            "tasks": [
+                {
+                    "task": task,
+                    "model_calls": 1,
+                    "total_tokens": 100,
+                    "share_percent": 100,
+                    "assessment": "正常",
+                    "reason": "常规交互",
+                }
+            ],
+        }
+        workflow = {
+            "workflow_id": "workflow-long",
+            "event_id": "event-long",
+            "decision_token": "token-long",
+            "task_id": "自动化工作流",
+            "status": "user_action_required",
+            "summary": "请选择下一步",
+            "workbench_url": "https://example.com",
+            "actions": [],
+        }
+        cards = {
+            "desktop_sync": self.bridge.build_desktop_sync_card(task, "running"),
+            "desktop_sync_confirmation": self.bridge.build_desktop_sync_confirmation_card(
+                task, "running"
+            ),
+            "desktop_sync_canceled": self.bridge.build_desktop_sync_canceled_card(task),
+            "task_settings": self.bridge.build_task_settings_card(task, {}),
+            "context_compaction": self.bridge.build_compact_task_context_card(task),
+            "run": self.bridge.build_run_card(run),
+            "queued": self.bridge.build_queued_card(queued, 1),
+            "approval": self.bridge.build_approval_card(run, approval),
+            "approval_completed": self.bridge.completed_approval_card(
+                run, approval, True
+            ),
+            "task_switch": self.bridge.build_task_card(
+                [task], task["id"], task["project"]
+            ),
+            "task_subscription": self.bridge.build_task_subscriptions_card(
+                [task], {}, task["id"], task["project"]
+            ),
+            "task_subscription_result": self.bridge.build_task_subscription_result_card(
+                task, "completed"
+            ),
+            "task_switch_canceled": self.bridge.build_task_switch_canceled_card(task),
+            "archive": self.bridge.build_archive_task_card(task),
+            "current_status": self.bridge.build_current_status_card(task, "空闲", 0, 0),
+            "task_usage": self.bridge.build_task_usage_analysis_card(usage),
+        }
+        with mock.patch.object(
+            self.bridge,
+            "workflow_task_route",
+            return_value=(task, task),
+        ):
+            cards["workflow"] = self.bridge.build_workflow_card(
+                workflow,
+                user_id="ou_admin",
+            )
+
+        for name, card in cards.items():
+            with self.subTest(card=name):
+                self.assert_task_title_visible_in_body(card, title)
 
     def test_task_identity_text_is_consistent_across_plain_replies(self):
         task = self.tasks()[0]
@@ -1208,6 +1310,85 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(set(subscriptions["ou_admin"]), {"task-a"})
         self.assertEqual(set(subscriptions["ou_miller"]), {"task-b"})
 
+    def test_subscription_card_retains_valid_task_missing_from_recent_catalog(self):
+        task = self.tasks()[0]
+        state = {
+            "task_subscriptions": {
+                "ou_admin": {
+                    "task-a": {
+                        "task_id": "task-a",
+                        "cursor_offset": 0,
+                        "active_turn_id": "",
+                        "images": [],
+                    }
+                }
+            }
+        }
+        self.bridge.save_state(state)
+        self.bridge.recent_tasks = mock.Mock(
+            side_effect=sqlite3.OperationalError("catalog busy")
+        )
+        self.bridge.task_by_id = mock.Mock(return_value=task)
+
+        card = self.bridge.task_subscriptions_card_for_state(
+            "ou_admin",
+            self.bridge.load_state(),
+        )
+
+        subscriptions = self.bridge.load_state()["task_subscriptions"]["ou_admin"]
+        self.assertIn("task-a", subscriptions)
+        self.assertIn("deepori · Home", json.dumps(card, ensure_ascii=False))
+
+    def test_subscription_poll_falls_back_to_task_lookup_when_catalog_read_fails(self):
+        task = self.tasks()[0]
+        rollout = Path(self.temporary.name) / "catalog-retry-subscription.jsonl"
+        started = {
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "catalog-turn"},
+        }
+        rollout.write_text(json.dumps(started) + "\n", encoding="utf-8")
+        cursor = rollout.stat().st_size
+        self.bridge.save_state(
+            {
+                "task_subscriptions": {
+                    "ou_admin": {
+                        "task-a": {
+                            "task_id": "task-a",
+                            "cursor_offset": cursor,
+                            "active_turn_id": "catalog-turn",
+                            "images": [],
+                        }
+                    }
+                }
+            }
+        )
+        completed = {
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "catalog-turn",
+                "last_agent_message": "最终结果",
+            },
+        }
+        with rollout.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(completed, ensure_ascii=False) + "\n")
+        self.bridge.recent_tasks = mock.Mock(
+            side_effect=sqlite3.OperationalError("catalog busy")
+        )
+        self.bridge.task_by_id = mock.Mock(return_value=task)
+        self.bridge.rollout_path_for_task = mock.Mock(return_value=rollout)
+        self.bridge.deliver_task_subscription_result = mock.Mock(return_value=True)
+
+        self.assertTrue(self.bridge.poll_task_subscriptions())
+
+        self.bridge.deliver_task_subscription_result.assert_called_once_with(
+            "ou_admin",
+            task,
+            mock.ANY,
+        )
+        entry = self.bridge.load_state()["task_subscriptions"]["ou_admin"]["task-a"]
+        self.assertEqual(entry["cursor_offset"], rollout.stat().st_size)
+
     def test_new_subscription_starts_after_existing_result_and_survives_reload(self):
         task = self.tasks()[0]
         rollout = Path(self.temporary.name) / "subscription-rollout.jsonl"
@@ -1417,7 +1598,10 @@ class RemoteFeatureTests(unittest.TestCase):
             [
                 {
                     "tag": "markdown",
-                    "content": "<font color='grey'>完整结果见下方，可直接继续对话。</font>",
+                    "content": (
+                        "**项目**：deepori\n**Task**：Home\n\n"
+                        "<font color='grey'>完整结果见下方，可直接继续对话。</font>"
+                    ),
                 }
             ],
         )

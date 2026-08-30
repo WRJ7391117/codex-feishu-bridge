@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.11.6 (build 85)
+
+- Shows the complete project and Task title in the body of every Task-scoped Feishu card, so mobile header and selector truncation no longer hides the Task identity.
+- Preserves valid Task subscriptions when the Codex Desktop recent-task catalog is temporarily unavailable or omits a still-active Task, using an authorized direct Task lookup before removing the subscription.
+- Keeps subscription polling active through transient catalog read failures and adds deterministic coverage for both the management card and result-delivery paths.
+
 ## 1.11.5 (build 84)
 
 - Removes a Desktop IPC completion race that could make the Release test suite fail intermittently when a follower action response and Task completion arrived together.

@@ -106,6 +106,27 @@ class PromLightTests(unittest.TestCase):
         self.assertNotIn("连接附近提示灯", control)
         self.assertNotIn("在本地 Bridge 连接新灯", control)
 
+    def test_promlight_cards_show_the_complete_task_title_in_body_markdown(self):
+        title = "这是一个用于核对飞书手机卡片完整显示的很长的 Codex Task 名称"
+        task = {"id": "task-long", "title": title, "project": "Evolution"}
+        self.tasks["ou_admin"] = [task]
+        lamp_id = self.bind("ou_admin", "hid://desk", "Desk")
+        state = self.bridge.load_state()
+        state["promlight"]["lamps"][lamp_id]["task_ids"] = [task["id"]]
+        self.bridge.save_state(state)
+
+        cards = (
+            self.bridge.build_promlight_control_card("ou_admin", state),
+            self.bridge.build_promlight_task_card("ou_admin", lamp_id, state),
+        )
+        for card in cards:
+            markdown = "\n".join(
+                str(element.get("content") or "")
+                for element in card.get("body", {}).get("elements", [])
+                if isinstance(element, dict) and element.get("tag") == "markdown"
+            )
+            self.assertIn(title, markdown)
+
     def test_two_promlight_menu_leaves_send_control_and_legend_cards(self):
         self.bridge.send_card = mock.Mock(return_value=(True, "oc_test", "om_test"))
         self.bridge.reconcile_promlight_state = mock.Mock(return_value=False)
