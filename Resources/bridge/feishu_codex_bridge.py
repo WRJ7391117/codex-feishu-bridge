@@ -7693,8 +7693,9 @@ def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[st
         {
             "tag": "markdown",
             "content": (
-                "在共享 Mac 上由 Bridge 驱动提示灯；飞书用于身份、配置和状态查看。"
-                "每盏灯只受它自己显式关注的 Task 影响。"
+                "提示灯由运行 Bridge 的 Mac 控制。\n"
+                "- **关注哪些 Task**：决定哪些 Task 会改变灯光。\n"
+                "- **设备设置**：修改名称、默认灯或解除 Bridge 绑定。"
             ),
         }
     ]
@@ -7747,23 +7748,17 @@ def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[st
         if not pending_unbind:
             elements.append(
                 promlight_button(
-                    "管理关注 Task",
+                    "关注哪些 Task",
                     "promlight_manage_tasks",
                     lamp_id=lamp_id,
                     style="primary_filled",
                 )
             )
-        if not lamp.get("is_default"):
-            elements.append(promlight_button("设为默认灯", "promlight_set_default", lamp_id=lamp_id))
-        elements.append(promlight_button("重命名", "promlight_start_rename", lamp_id=lamp_id))
-        if not pending_unbind:
             elements.append(
                 promlight_button(
-                    "解绑…",
-                    "promlight_unbind",
+                    "设备设置",
+                    "promlight_device_settings",
                     lamp_id=lamp_id,
-                    style="danger",
-                    confirm=("确认解绑这盏提示灯？", "解绑后会清除这盏灯的 Task 白名单，并停止后续驱动。"),
                 )
             )
     elements.extend(
@@ -7778,6 +7773,63 @@ def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[st
         "header": {
             "title": {"tag": "plain_text", "content": "提示灯控制中心"},
             "subtitle": {"tag": "plain_text", "content": f"我的提示灯 · {len(lamps)} 盏"},
+            "template": "blue",
+            "icon": {"tag": "standard_icon", "token": "lightbulb_colorful"},
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": elements,
+        },
+    }
+
+
+def build_promlight_device_settings_card(
+    lamp: dict[str, Any],
+    notice: str = "",
+) -> dict[str, Any]:
+    lamp_id = str(lamp.get("lamp_id") or "")
+    name = str(lamp.get("name") or "PromLight")
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "markdown",
+            "content": (
+                (f"✅ **{card_markdown_escape(notice)}**\n\n" if notice else "")
+                + f"正在设置：**{card_markdown_escape(name)}**"
+                + (" · 默认灯" if lamp.get("is_default") else "")
+                + "\n\n**这些设置分别做什么**\n"
+                "- **设为默认灯**：从飞书进入提示灯功能时，优先管理这盏灯。\n"
+                "- **重命名**：只改飞书和 Bridge 中的显示名称。\n"
+                "- **解除 Bridge 绑定**：停止这盏灯的 Task 提醒并清除关注列表；"
+                "不会断开 macOS 蓝牙。"
+            ),
+        },
+    ]
+    if not lamp.get("is_default"):
+        elements.append(promlight_button("设为默认灯", "promlight_set_default", lamp_id=lamp_id))
+    elements.extend(
+        [
+            promlight_button("重命名", "promlight_start_rename", lamp_id=lamp_id),
+            promlight_button(
+                "解除 Bridge 绑定",
+                "promlight_unbind",
+                lamp_id=lamp_id,
+                style="danger",
+                confirm=(
+                    "确认解除 Bridge 绑定？",
+                    "将停止这盏灯的 Task 提醒并清除关注列表。macOS 蓝牙连接不会被断开。",
+                ),
+            ),
+            promlight_button("返回我的提示灯", "show_promlight"),
+        ]
+    )
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": "提示灯设置"},
+            "subtitle": {"tag": "plain_text", "content": name},
             "template": "blue",
             "icon": {"tag": "standard_icon", "token": "lightbulb_colorful"},
         },
@@ -7908,6 +7960,7 @@ def build_promlight_task_card(
 
 
 def build_promlight_rename_card(lamp: dict[str, Any]) -> dict[str, Any]:
+    lamp_id = str(lamp.get("lamp_id") or "")
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "default", "enable_forward": False},
@@ -7926,7 +7979,11 @@ def build_promlight_rename_card(lamp: dict[str, Any]) -> dict[str, Any]:
                         "请直接发送一条纯文字作为新名称（最多 40 个字符）。这条消息只用于重命名，不会发送到 Codex Task。"
                     ),
                 },
-                promlight_button("取消重命名", "promlight_cancel_rename"),
+                promlight_button(
+                    "返回设备设置",
+                    "promlight_cancel_rename",
+                    lamp_id=lamp_id,
+                ),
                 promlight_legend_element(),
             ],
         },
@@ -10359,6 +10416,7 @@ def handle_promlight_button_action(
     recognized = {
         "show_promlight",
         "promlight_refresh",
+        "promlight_device_settings",
         "promlight_manage_tasks",
         "promlight_toggle_task",
         "promlight_set_default",
@@ -10415,6 +10473,14 @@ def handle_promlight_button_action(
             card = build_promlight_task_card(user_id, lamp_id, state)
         patch_promlight_event_card(event, user_id, card, "promlight_tasks")
         return True
+    if action == "promlight_device_settings":
+        patch_promlight_event_card(
+            event,
+            user_id,
+            build_promlight_device_settings_card(lamp_copy),
+            "promlight_device",
+        )
+        return True
     if action == "promlight_toggle_task":
         task_id = str(payload.get("task_id") or "")
         enabled = task_id not in lamp_copy.get("task_ids", [])
@@ -10442,6 +10508,12 @@ def handle_promlight_button_action(
         return True
     if action == "promlight_set_default":
         set_default_promlight(user_id, lamp_id)
+        with _state_lock:
+            state = load_state()
+            lamp = owned_promlight_lamp(state, user_id, lamp_id)
+            card = build_promlight_device_settings_card(lamp, "已设为默认灯")
+        patch_promlight_event_card(event, user_id, card, "promlight_device")
+        return True
     elif action == "promlight_unbind":
         unbind_promlight(user_id, lamp_id)
     elif action == "promlight_start_rename":
@@ -10449,13 +10521,22 @@ def handle_promlight_button_action(
             state = load_state()
             promlight_state(state)["pending_renames"][user_id] = lamp_id
             save_state(state)
-        patch_promlight_event_card(event, user_id, build_promlight_rename_card(lamp_copy))
+        patch_promlight_event_card(
+            event,
+            user_id,
+            build_promlight_rename_card(lamp_copy),
+            "promlight_rename",
+        )
         return True
     elif action == "promlight_cancel_rename":
         with _state_lock:
             state = load_state()
             promlight_state(state)["pending_renames"].pop(user_id, None)
             save_state(state)
+            lamp = owned_promlight_lamp(state, user_id, lamp_id)
+            card = build_promlight_device_settings_card(lamp)
+        patch_promlight_event_card(event, user_id, card, "promlight_device")
+        return True
     with _state_lock:
         state = load_state()
         card = build_promlight_control_card(user_id, state)
@@ -12340,7 +12421,8 @@ def _handle_message_event_once(event: dict[str, Any]) -> None:
             state = load_state()
             promlight_state(state)["pending_renames"].pop(user_id, None)
             save_state(state)
-            card = build_promlight_control_card(user_id, state)
+            lamp = owned_promlight_lamp(state, user_id, pending_rename)
+            card = build_promlight_device_settings_card(lamp, change)
         reply_card(message_id, card, "promlight-renamed")
         log(f"promlight rename handled result={'updated' if change.startswith('提示灯') else 'rejected'}")
         return

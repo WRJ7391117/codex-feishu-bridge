@@ -1,5 +1,12 @@
 # Release Notes
 
+## 1.11.1 (build 80)
+
+- Replaces the full PromLight setup form on the App home page with one compact status and management entry.
+- Moves device discovery, compatibility details, device selection, naming, and user assignment into a dedicated second-level PromLight management page.
+- Removes the duplicate PromLight form from general Bridge configuration and deduplicates repeated device/product labels.
+- Reorganizes each Feishu light into clear “关注哪些 Task” and “设备设置” paths, and explains that removing the Bridge binding stops Task reminders without disconnecting macOS Bluetooth.
+
 ## 1.11.0 (build 79)
 
 - Bundles a clean, minimal Universal PromLight Helper inside DeepOri Bridge, so supported Macs no longer need a separate PromLight App installation.

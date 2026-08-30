@@ -4,7 +4,7 @@
 
 DeepOri Bridge 是独立开源工具，并非 OpenAI、飞书或 Lark 官方产品。
 
-版本说明：当前源码和本机构建为 `1.11.0 (build 79)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.11.1 (build 80)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
 
 面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
@@ -181,7 +181,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 - 点击 Bot 菜单“模型设置”→“修改当前 Task 模型” → 修改当前 Task 的模型、分析强度和标准/快速速度；设置仅影响下一条尚未开始的消息，运行中的这一轮不会改变
 - 点击 Bot 菜单“模型设置”→“压缩当前 Task 上下文” → 查看当前项目和 Task，Task 空闲时二次确认后总结较早内容
 - 点击 Bot 菜单“模型设置”→“Codex 额度用量” → 打开独立用量卡；卡片内可继续选择“当日 Task 用量分析”或“当期 Task 用量分析”，查看有权访问项目中的 Task Token 排名、占比、单次模型调用用量、主要消耗原因及是否偏高。“当日”从本地当天 00:00 开始，“当期”与当前 Codex 主额度重置周期一致；Token 用于 Task 间比较和异常诊断，不等同于官方额度或账单的按 Task 扣减
-- 点击 Bot 菜单“提示灯”→“我的提示灯” → 查看本人名下提示灯、在线状态、默认灯、当前中继、最后逻辑状态和每灯独立的 Task 白名单；安装包已内置 Universal PromLight Helper，无需另装 PromLight App；设备连接和用户归属在 Mac App 首页完成，重命名、默认灯、关注 Task 和解绑继续在飞书卡片中完成
+- 点击 Bot 菜单“提示灯”→“我的提示灯” → 查看本人名下提示灯、在线状态、默认灯、当前中继、最后逻辑状态和每灯独立的 Task 白名单；安装包已内置 Universal PromLight Helper，无需另装 PromLight App；设备连接和用户归属在 Mac App 首页完成，飞书卡片再分为“关注哪些 Task”和“设备设置”两条路径；“解除 Bridge 绑定”会停止提醒并清除关注列表，但不会断开 macOS 蓝牙
 - 点击 Bot 菜单“提示灯”→“灯光状态说明” → 查看绿常亮、黄常亮、黄闪、红闪及多 Task 聚合优先级；只有显式关注的 Task 参与，离线与设备 ACK/真实灯效验证严格区分
 - 多个 Task 并行时，运行进度不会改变当前 Task；某个 Task 完成、失败或停止并返回最终内容后，当前 Task 自动跟随该结果。下一条消息会直接进入刚返回结果的 Task；随后另一个 Task 再返回时，当前 Task继续跟随最新结果
 - 在 Task 卡的“显示范围”中切换“全部 Task / 最近使用 / 我的收藏”；可收藏或取消收藏当前 Task

@@ -157,6 +157,80 @@ class PromLightTests(unittest.TestCase):
         )
         for text in ("Desk", "Door", "deepori · Home", "other · Other"):
             self.assertIn(text, card)
+        self.assertIn('"content": "关注哪些 Task"', card)
+        self.assertIn('"content": "设备设置"', card)
+        self.assertNotIn('"content": "重命名"', card)
+        self.assertNotIn('"content": "解除 Bridge 绑定"', card)
+
+        settings = json.dumps(
+            self.bridge.build_promlight_device_settings_card(
+                state["promlight"]["lamps"][lamp_b]
+            ),
+            ensure_ascii=False,
+        )
+        for text in (
+            "提示灯设置",
+            "只改飞书和 Bridge 中的显示名称",
+            "不会断开 macOS 蓝牙",
+            "解除 Bridge 绑定",
+            "返回我的提示灯",
+        ):
+            self.assertIn(text, settings)
+        self.assertIn("停止这盏灯的 Task 提醒并清除关注列表", settings)
+        self.assertNotIn('"content": "关注哪些 Task"', settings)
+        self.assertNotIn("解绑…", settings)
+
+    def test_device_settings_button_opens_the_owned_lamp_settings_card(self):
+        lamp = self.bind("ou_member", "relay-a", "Desk")
+        self.bridge.patch_promlight_event_card = mock.Mock()
+
+        handled = self.bridge.handle_promlight_button_action(
+            {"operator_id": "ou_member", "message_id": "om_settings"},
+            {"action": "promlight_device_settings", "lamp_id": lamp},
+        )
+
+        self.assertTrue(handled)
+        patched = self.bridge.patch_promlight_event_card.call_args
+        rendered = json.dumps(patched.args[2], ensure_ascii=False)
+        self.assertIn("提示灯设置", rendered)
+        self.assertIn("Desk", rendered)
+        self.assertEqual(patched.args[3], "promlight_device")
+
+    def test_device_settings_actions_return_clear_feedback_without_crossing_users(self):
+        first = self.bind("ou_admin", "relay-a", "Desk")
+        second = self.bind("ou_admin", "relay-b", "Door")
+        self.bridge.patch_promlight_event_card = mock.Mock()
+
+        self.assertTrue(
+            self.bridge.handle_promlight_button_action(
+                {"operator_id": "ou_admin", "message_id": "om_default"},
+                {"action": "promlight_set_default", "lamp_id": second},
+            )
+        )
+        patched = self.bridge.patch_promlight_event_card.call_args
+        self.assertEqual(patched.args[3], "promlight_device")
+        rendered = json.dumps(patched.args[2], ensure_ascii=False)
+        self.assertIn("已设为默认灯", rendered)
+        self.assertTrue(
+            self.bridge.load_state()["promlight"]["lamps"][second]["is_default"]
+        )
+        self.assertFalse(
+            self.bridge.load_state()["promlight"]["lamps"][first]["is_default"]
+        )
+
+        self.bridge.patch_promlight_event_card.reset_mock()
+        self.assertTrue(
+            self.bridge.handle_promlight_button_action(
+                {"operator_id": "ou_member", "message_id": "om_denied"},
+                {"action": "promlight_device_settings", "lamp_id": second},
+            )
+        )
+        denied = json.dumps(
+            self.bridge.patch_promlight_event_card.call_args.args[2],
+            ensure_ascii=False,
+        )
+        self.assertIn("提示灯控制中心", denied)
+        self.assertNotIn("Door", denied)
 
     def test_task_permission_is_rechecked_when_subscription_is_saved(self):
         lamp = self.bind("ou_member", "relay-a", "Desk")
