@@ -304,7 +304,12 @@ PROMLIGHT_LEGEND_MENU_EVENT_KEY = str(
 )
 PROMLIGHT_API_BASE = "http://127.0.0.1:7800"
 PROMLIGHT_HTTP_TIMEOUT_SECONDS = 2
+PROMLIGHT_HELPER_TIMEOUT_SECONDS = 2
+PROMLIGHT_HELPER_PATH = Path(
+    os.environ.get("CODEX_FEISHU_PROMLIGHT_HELPER", BRIDGE_RESOURCE_DIR / "promlight-helper")
+).expanduser()
 PROMLIGHT_TASK_STATUSES = {"idle", "running", "human_gate", "error", "unknown"}
+PROMLIGHT_TERMINAL_DELIVERIES = {"acknowledged", "submitted"}
 PROMLIGHT_STATUS_PRIORITY = {
     "unknown": 0,
     "idle": 1,
@@ -675,14 +680,43 @@ def promlight_http_json(path: str, body: dict[str, Any] | None = None) -> dict[s
     return payload
 
 
+def promlight_helper_json(*arguments: str) -> dict[str, Any] | None:
+    try:
+        helper_stat = PROMLIGHT_HELPER_PATH.lstat()
+    except OSError:
+        return None
+    if (
+        PROMLIGHT_HELPER_PATH.is_symlink()
+        or not stat.S_ISREG(helper_stat.st_mode)
+        or not os.access(PROMLIGHT_HELPER_PATH, os.X_OK)
+    ):
+        return None
+    try:
+        result = subprocess.run(
+            [str(PROMLIGHT_HELPER_PATH), *arguments],
+            text=True,
+            capture_output=True,
+            timeout=PROMLIGHT_HELPER_TIMEOUT_SECONDS,
+            check=False,
+        )
+        payload = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def discover_promlight_devices(
     payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if payload is None:
-        try:
-            payload = promlight_http_json("/api/status")
-        except (OSError, URLError, ValueError, json.JSONDecodeError):
-            return []
+        helper_payload = promlight_helper_json("list")
+        if helper_payload is not None and helper_payload.get("ok") is True:
+            payload = helper_payload
+        else:
+            try:
+                payload = promlight_http_json("/api/status")
+            except (OSError, URLError, ValueError, json.JSONDecodeError):
+                return []
     devices = payload.get("devices")
     if not isinstance(devices, list):
         return []
@@ -690,14 +724,14 @@ def discover_promlight_devices(
     for item in devices:
         if not isinstance(item, dict):
             continue
-        if item.get("opened") is not True:
+        if item.get("opened") is not True and item.get("online") is not True:
             continue
-        relay_ref = str(item.get("mac") or "").strip()
+        relay_ref = str(item.get("relay_ref") or item.get("mac") or "").strip()
         if not relay_ref:
             continue
         label = str(item.get("label") or item.get("product") or "PromLight").strip()
         product = str(item.get("product") or "PromLight").strip()
-        device_version = str(item.get("version") or "").strip()
+        device_version = str(item.get("device_version") or item.get("version") or "").strip()
         release_number = item.get("release_number")
         discovered.append(
             {
@@ -885,6 +919,14 @@ def deliver_promlight_effect(lamp: dict[str, Any], status: str) -> dict[str, Any
     relay_ref = str(lamp.get("relay_ref") or "").strip()
     if not relay_ref:
         return {"online": False, "delivery": "unknown", "verified": False}
+    helper_result = promlight_helper_json("signal", relay_ref, status)
+    if helper_result is not None and helper_result.get("ok") is True:
+        submitted = helper_result.get("status") == "submitted"
+        return {
+            "online": submitted,
+            "delivery": "submitted" if submitted else "unknown",
+            "verified": False,
+        }
     try:
         response = promlight_http_json(
             "/api/command",
@@ -945,12 +987,12 @@ def refresh_promlight_lamp(lamp_id: str, force: bool = False) -> bool:
             if (
                 not force
                 and lamp.get("last_logical_status") == logical_status
-                and lamp.get("last_delivery") == "acknowledged"
+                and lamp.get("last_delivery") in PROMLIGHT_TERMINAL_DELIVERIES
             ):
                 return False
             if (
                 not force
-                and lamp.get("last_delivery") != "acknowledged"
+                and lamp.get("last_delivery") not in PROMLIGHT_TERMINAL_DELIVERIES
                 and now < float(lamp.get("next_retry_at") or 0)
             ):
                 return False
@@ -971,14 +1013,14 @@ def refresh_promlight_lamp(lamp_id: str, force: bool = False) -> bool:
                 return False
             if int(current.get("revision") or 0) != int(lamp.get("revision") or 0):
                 return False
-            acknowledged = result.get("delivery") == "acknowledged"
-            if acknowledged:
+            delivered = result.get("delivery") in PROMLIGHT_TERMINAL_DELIVERIES
+            if delivered:
                 current["last_logical_status"] = logical_status
             current["online"] = bool(result.get("online"))
             current["last_delivery"] = str(result.get("delivery") or "unknown")
             current["last_verified"] = bool(result.get("verified"))
             current["updated_at"] = time.time()
-            if acknowledged:
+            if delivered:
                 current["retry_count"] = 0
                 current["next_retry_at"] = 0
                 current["pending_delivery_status"] = ""
@@ -7679,6 +7721,8 @@ def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[st
         delivery_text = (
             "设备已 ACK，灯效未独立回读"
             if delivery == "acknowledged"
+            else "已提交给设备，灯效未独立回读"
+            if delivery == "submitted"
             else "投递结果未知"
             if delivery == "unknown"
             else "尚未下发"
@@ -14232,16 +14276,30 @@ def main() -> int:
                 for lamp in promlight_state(state)["lamps"].values()
                 if isinstance(lamp, dict)
             ]
-        try:
-            relay_status = promlight_http_json("/api/status")
-        except (OSError, URLError, ValueError, json.JSONDecodeError):
-            relay_status = {}
+        helper_status = promlight_helper_json("list")
+        relay_type = ""
+        helper_version = ""
+        relay_app_version = ""
+        if helper_status is not None and helper_status.get("ok") is True:
+            relay_status = helper_status
+            relay_type = "built-in"
+            helper_version = str(helper_status.get("helper_version") or "")
+        else:
+            try:
+                relay_status = promlight_http_json("/api/status")
+            except (OSError, URLError, ValueError, json.JSONDecodeError):
+                relay_status = {}
+            if relay_status:
+                relay_type = "legacy-http"
+                relay_app_version = str(relay_status.get("app_version") or "")
         print(
             json.dumps(
                 {
                     "devices": discover_promlight_devices(relay_status),
                     "bindings": lamps,
-                    "relay_app_version": str(relay_status.get("app_version") or ""),
+                    "relay_type": relay_type,
+                    "helper_version": helper_version,
+                    "relay_app_version": relay_app_version,
                 },
                 ensure_ascii=False,
             )

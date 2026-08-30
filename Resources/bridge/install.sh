@@ -23,8 +23,10 @@ umask 077
     "${resource_dir}/uninstall.sh" \
     "${resource_dir}/config.example.json" \
     "${resource_dir}/lark-cli" \
+    "${resource_dir}/promlight-helper" \
     --executables \
     "${resource_dir}/lark-cli" \
+    "${resource_dir}/promlight-helper" \
     --directories \
     "${support_dir}" \
     "${launch_agents_dir}" \
@@ -43,6 +45,7 @@ umask 077
     "${support_dir}/diagnose.sh" \
     "${support_dir}/uninstall.sh" \
     "${support_dir}/lark-cli" \
+    "${support_dir}/promlight-helper" \
     "${HOME}/.codex/hooks/feishu_bridge_control.sh" \
     "${plist}" \
     "${legacy_plist}" \
@@ -487,6 +490,7 @@ PY
     "${resource_dir}/diagnose.sh" "${support_dir}/diagnose.sh" 755 \
     "${resource_dir}/uninstall.sh" "${support_dir}/uninstall.sh" 755 \
     "${resource_dir}/lark-cli" "${support_dir}/lark-cli" 755 \
+    "${resource_dir}/promlight-helper" "${support_dir}/promlight-helper" 755 \
     "${resource_dir}/control.sh" "${HOME}/.codex/hooks/feishu_bridge_control.sh" 755 <<'PY'
 import os
 from pathlib import Path

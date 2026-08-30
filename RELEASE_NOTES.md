@@ -1,5 +1,13 @@
 # Release Notes
 
+## 1.11.0 (build 79)
+
+- Bundles a clean, minimal Universal PromLight Helper inside DeepOri Bridge, so supported Macs no longer need a separate PromLight App installation.
+- Discovers each connected PromLight through macOS IOKit, preserves the existing stable local device reference for current bindings, and sends only the four Task aggregate states used by the bridge.
+- Uses the public MIT-declared PromLight 5E5E protocol as the interoperability reference without copying the upstream daemon, hooks, HTTP server, macros, or session manager.
+- Prefers the built-in Helper and retains PromLight App `0.2.3` only as a migration fallback when the Helper cannot be used.
+- Treats a successful HID write as `submitted`, not verified physical output, and verifies that both the App executable and Helper are Universal before installation or update.
+
 ## 1.10.2 (build 78)
 
 - Moves the complete local PromLight discovery and authorized-user binding flow onto the App home page while keeping the same reusable controls in Bridge settings.

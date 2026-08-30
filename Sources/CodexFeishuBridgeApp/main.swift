@@ -29,7 +29,8 @@ private enum PromLightCompatibility {
     static let hardware = "PromLight"
     static let verifiedDeviceVersion = "0.1.3"
     static let verifiedReleaseNumber = 19
-    static let relayAppVersion = "0.2.3"
+    static let builtInHelperVersion = "1"
+    static let legacyRelayAppVersion = "0.2.3"
 }
 
 private struct CommandResult {
@@ -151,6 +152,7 @@ private final class BridgeController: @unchecked Sendable {
             "diagnose.sh": "diagnose.sh",
             "uninstall.sh": "uninstall.sh",
             "lark-cli": "lark-cli",
+            "promlight-helper": "promlight-helper",
         ]
         return runtimeFiles.allSatisfy { bundledName, installedName in
             let bundled = bundledBridgeDirectory.appendingPathComponent(bundledName)
@@ -555,6 +557,18 @@ private final class BridgeController: @unchecked Sendable {
         guard architectures.status == 0 else {
             throw BridgeUpdateError.message("更新包不是完整的 Universal App。")
         }
+        let helperArchitectures = run(
+            "/usr/bin/lipo",
+            [
+                app.appendingPathComponent(
+                    "Contents/Resources/bridge/promlight-helper"
+                ).path,
+                "-verify_arch", "arm64", "x86_64",
+            ]
+        )
+        guard helperArchitectures.status == 0 else {
+            throw BridgeUpdateError.message("更新包没有包含完整的 Universal PromLight Helper。")
+        }
         return app
     }
 
@@ -713,6 +727,8 @@ private final class BridgeViewModel: ObservableObject {
     @Published var draftMaxConcurrentRuns = 2
     @Published var promLightOwners: [AuthorizedUserDraft] = []
     @Published var promLightDevices: [PromLightDeviceDraft] = []
+    @Published var promLightRelayType = ""
+    @Published var promLightHelperVersion = ""
     @Published var promLightRelayAppVersion = ""
     @Published var selectedPromLightRelayRef = ""
     @Published var selectedPromLightOwnerOpenID = ""
@@ -773,10 +789,14 @@ private final class BridgeViewModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = controller.promLightInventory()
             var devices: [PromLightDeviceDraft] = []
+            var relayType = ""
+            var helperVersion = ""
             var relayAppVersion = ""
             if result.status == 0,
                let data = result.output.data(using: .utf8),
                let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                relayType = String(describing: payload["relay_type"] ?? "")
+                helperVersion = String(describing: payload["helper_version"] ?? "")
                 relayAppVersion = String(describing: payload["relay_app_version"] ?? "")
                 let bindings = payload["bindings"] as? [[String: Any]] ?? []
                 let ownersByRelay = Dictionary(
@@ -804,6 +824,8 @@ private final class BridgeViewModel: ObservableObject {
                 guard let self else { return }
                 self.isRefreshingPromLight = false
                 self.promLightDevices = devices
+                self.promLightRelayType = relayType
+                self.promLightHelperVersion = helperVersion
                 self.promLightRelayAppVersion = relayAppVersion
                 if !devices.contains(where: { $0.relayRef == self.selectedPromLightRelayRef }) {
                     self.selectedPromLightRelayRef = devices.first?.relayRef ?? ""
@@ -813,8 +835,8 @@ private final class BridgeViewModel: ObservableObject {
                     self.selectedPromLightOwnerOpenID = existingOpenIDs.first ?? ""
                 }
                 self.promLightStatus = result.status == 0
-                    ? (devices.isEmpty ? "没有发现在线提示灯。请先打开 PromLight 并连接设备。" : "发现 \(devices.count) 盏在线提示灯。")
-                    : "无法读取 PromLight。请确认 Bridge 已安装、PromLight 正在运行。"
+                    ? (devices.isEmpty ? "没有发现在线提示灯。请先在系统蓝牙中连接 PromLight。" : "发现 \(devices.count) 盏在线提示灯。")
+                    : "无法读取 PromLight。请确认 Bridge 已安装完整，并检查系统蓝牙连接。"
             }
         }
     }
@@ -2782,13 +2804,7 @@ private struct PromLightSettingsView: View {
                         "当前适配硬件：\(PromLightCompatibility.hardware) · 已验证设备报告版本 \(PromLightCompatibility.verifiedDeviceVersion)（release \(PromLightCompatibility.verifiedReleaseNumber)）",
                         systemImage: "lightbulb.led"
                     )
-                    Text(
-                        "Mac 中继：PromLight App "
-                            + (model.promLightRelayAppVersion.isEmpty
-                                ? "未检测（需单独安装 \(PromLightCompatibility.relayAppVersion)）"
-                                : model.promLightRelayAppVersion)
-                            + " · BLE/HID；其他型号或版本尚未验证。"
-                    )
+                    Text(relayDescription)
                     .foregroundStyle(.secondary)
                 }
                 .font(.caption)
@@ -2833,12 +2849,28 @@ private struct PromLightSettingsView: View {
                         .foregroundStyle(.orange)
                 }
                 Divider()
-                Text("当前自动提醒仅支持 Mac 中继；桥接安装包暂不包含 PromLight App。手机/Pad 不作为提示灯中继。")
+                Text("安装 DeepOri Bridge 即包含 PromLight 本地驱动，无需另装 PromLight App。当前自动提醒仅支持 Mac 中继，手机/Pad 不作为持续中继。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             .padding(.top, 6)
         }
+    }
+
+    private var relayDescription: String {
+        if model.promLightRelayType == "built-in" {
+            let version = model.promLightHelperVersion.isEmpty
+                ? PromLightCompatibility.builtInHelperVersion
+                : model.promLightHelperVersion
+            return "Mac 中继：Bridge 内置 PromLight Helper \(version) · Universal BLE/HID；其他型号或版本尚未验证。"
+        }
+        if model.promLightRelayType == "legacy-http" {
+            let version = model.promLightRelayAppVersion.isEmpty
+                ? PromLightCompatibility.legacyRelayAppVersion
+                : model.promLightRelayAppVersion
+            return "Mac 中继：PromLight App \(version) · 兼容回退；重新安装 Bridge 可恢复内置 Helper。"
+        }
+        return "Mac 中继：未检测到内置 PromLight Helper；请重新安装当前版本 Bridge。"
     }
 
     private func deviceLabel(_ device: PromLightDeviceDraft) -> String {

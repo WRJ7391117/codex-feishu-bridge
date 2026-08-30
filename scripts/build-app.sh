@@ -33,6 +33,21 @@ source_file="${project_dir}/Sources/CodexFeishuBridgeApp/main.swift"
 /bin/cp "${project_dir}/Resources/Info.plist" "${contents}/Info.plist"
 /bin/cp "${project_dir}/THIRD_PARTY_NOTICES.md" "${resources_dir}/THIRD_PARTY_NOTICES.md"
 /bin/cp -R "${project_dir}/Resources/bridge" "${resources_dir}/bridge"
+/usr/bin/xcrun clang -Wall -Wextra -Werror -O2 \
+    -target arm64-apple-macos13.0 -isysroot "${sdk}" \
+    "${project_dir}/Sources/PromLightHelper/main.c" \
+    -framework IOKit -framework CoreFoundation \
+    -o "${build_dir}/promlight-helper-arm64"
+/usr/bin/xcrun clang -Wall -Wextra -Werror -O2 \
+    -target x86_64-apple-macos13.0 -isysroot "${sdk}" \
+    "${project_dir}/Sources/PromLightHelper/main.c" \
+    -framework IOKit -framework CoreFoundation \
+    -o "${build_dir}/promlight-helper-x86_64"
+/usr/bin/lipo -create \
+    "${build_dir}/promlight-helper-arm64" \
+    "${build_dir}/promlight-helper-x86_64" \
+    -output "${resources_dir}/bridge/promlight-helper"
+/usr/bin/lipo "${resources_dir}/bridge/promlight-helper" -verify_arch arm64 x86_64
 /bin/mkdir -p "${resources_dir}/CodexSkills"
 /bin/cp -R \
     "${project_dir}/skills/deepori-bridge-setup" \
@@ -45,7 +60,8 @@ source_file="${project_dir}/Sources/CodexFeishuBridgeApp/main.swift"
 /usr/bin/install -m 755 "${bundled_lark_cli}" "${resources_dir}/bridge/lark-cli"
 /bin/chmod 755 \
     "${resources_dir}/bridge/"*.sh \
-    "${resources_dir}/bridge/feishu_codex_bridge.py"
+    "${resources_dir}/bridge/feishu_codex_bridge.py" \
+    "${resources_dir}/bridge/promlight-helper"
 
 icon_source="${project_dir}/Resources/AppIcon.svg"
 icon_png="${build_dir}/AppIcon.png"

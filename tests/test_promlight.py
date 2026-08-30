@@ -370,11 +370,12 @@ class PromLightTests(unittest.TestCase):
         self.assertNotIn("连接附近提示灯", rendered)
 
     def test_daemon_ack_is_not_reported_as_verified_light_effect(self):
-        with mock.patch.object(
-            self.bridge,
-            "promlight_http_json",
-            return_value={"ok": True, "results": [{"status": "ok"}]},
-        ):
+        with mock.patch.object(self.bridge, "promlight_helper_json", return_value=None), \
+             mock.patch.object(
+                 self.bridge,
+                 "promlight_http_json",
+                 return_value={"ok": True, "results": [{"status": "ok"}]},
+             ):
             result = self.bridge.deliver_promlight_effect(
                 {"relay_ref": "relay-a", "active_relay": "desktop"},
                 "running",
@@ -382,12 +383,61 @@ class PromLightTests(unittest.TestCase):
         self.assertEqual(result["delivery"], "acknowledged")
         self.assertFalse(result["verified"])
 
-    def test_no_ack_is_offline_and_keeps_last_logical_state(self):
+    def test_built_in_helper_is_preferred_and_submit_is_not_called_verified(self):
         with mock.patch.object(
             self.bridge,
-            "promlight_http_json",
-            return_value={"ok": False, "results": [{"status": "no-ack"}]},
-        ):
+            "promlight_helper_json",
+            return_value={"ok": True, "status": "submitted", "verified": False},
+        ) as helper, mock.patch.object(self.bridge, "promlight_http_json") as http:
+            result = self.bridge.deliver_promlight_effect(
+                {"relay_ref": "relay-a", "active_relay": "desktop"},
+                "human_gate",
+            )
+
+        helper.assert_called_once_with("signal", "relay-a", "human_gate")
+        http.assert_not_called()
+        self.assertTrue(result["online"])
+        self.assertEqual(result["delivery"], "submitted")
+        self.assertFalse(result["verified"])
+
+    def test_submitted_delivery_is_terminal_for_unchanged_logical_state(self):
+        lamp = self.bind("ou_member", "relay-a", "Desk")
+        self.bridge.set_promlight_task_subscription("ou_member", lamp, "task-a", True)
+        submitted = {"online": True, "delivery": "submitted", "verified": False}
+        with mock.patch.object(
+            self.bridge, "deliver_promlight_effect", return_value=submitted
+        ) as deliver:
+            self.bridge.record_promlight_task_status(
+                "task-a", "running", "bridge_run", True
+            )
+            self.assertFalse(self.bridge.refresh_promlight_lamp(lamp))
+
+        deliver.assert_called_once()
+        current = self.bridge.load_state()["promlight"]["lamps"][lamp]
+        self.assertEqual(current["last_delivery"], "submitted")
+        self.assertFalse(current["last_verified"])
+
+    def test_card_explains_submitted_without_claiming_readback(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+        with self.bridge._state_lock:
+            state = self.bridge.load_state()
+            state["promlight"]["lamps"][lamp]["last_delivery"] = "submitted"
+            self.bridge.save_state(state)
+        card = json.dumps(
+            self.bridge.build_promlight_control_card(
+                "ou_admin", self.bridge.load_state()
+            ),
+            ensure_ascii=False,
+        )
+        self.assertIn("已提交给设备，灯效未独立回读", card)
+
+    def test_no_ack_is_offline_and_keeps_last_logical_state(self):
+        with mock.patch.object(self.bridge, "promlight_helper_json", return_value=None), \
+             mock.patch.object(
+                 self.bridge,
+                 "promlight_http_json",
+                 return_value={"ok": False, "results": [{"status": "no-ack"}]},
+             ):
             result = self.bridge.deliver_promlight_effect(
                 {"relay_ref": "relay-a", "active_relay": "desktop"},
                 "error",
@@ -465,23 +515,24 @@ class PromLightTests(unittest.TestCase):
         self.assertEqual(current["status"], "human_gate")
 
     def test_discovery_keeps_device_reference_local_and_card_hides_it(self):
-        with mock.patch.object(
-            self.bridge,
-            "promlight_http_json",
-            return_value={
-                "bluetooth": True,
-                "devices": [
-                    {
-                        "mac": "private-device-ref",
-                        "label": "Desk",
-                        "product": "PromLight",
-                        "version": "0.1.3",
-                        "release_number": 19,
-                        "opened": True,
-                    }
-                ],
-            },
-        ):
+        with mock.patch.object(self.bridge, "promlight_helper_json", return_value=None), \
+             mock.patch.object(
+                 self.bridge,
+                 "promlight_http_json",
+                 return_value={
+                     "bluetooth": True,
+                     "devices": [
+                         {
+                             "mac": "private-device-ref",
+                             "label": "Desk",
+                             "product": "PromLight",
+                             "version": "0.1.3",
+                             "release_number": 19,
+                             "opened": True,
+                         }
+                     ],
+                 },
+             ):
             devices = self.bridge.discover_promlight_devices()
         self.assertEqual(devices[0]["relay_ref"], "private-device-ref")
         self.assertEqual(devices[0]["product"], "PromLight")
@@ -494,6 +545,31 @@ class PromLightTests(unittest.TestCase):
         )
         self.assertIn(lamp, card)
         self.assertNotIn("private-device-ref", card)
+
+    def test_discovery_prefers_built_in_helper(self):
+        payload = {
+            "ok": True,
+            "helper_version": "1",
+            "devices": [
+                {
+                    "relay_ref": "private-device-ref",
+                    "label": "PromLight",
+                    "product": "PromLight",
+                    "device_version": "0.1.3",
+                    "release_number": 19,
+                    "online": True,
+                }
+            ],
+        }
+        with mock.patch.object(
+            self.bridge, "promlight_helper_json", return_value=payload
+        ) as helper, mock.patch.object(self.bridge, "promlight_http_json") as http:
+            devices = self.bridge.discover_promlight_devices()
+
+        helper.assert_called_once_with("list")
+        http.assert_not_called()
+        self.assertEqual(devices[0]["relay_ref"], "private-device-ref")
+        self.assertEqual(devices[0]["device_version"], "0.1.3")
 
     def test_discovery_excludes_devices_that_are_not_opened(self):
         with mock.patch.object(

@@ -745,6 +745,9 @@ class InstallerSafetyTests(unittest.TestCase):
         lark_cli = package / "lark-cli"
         lark_cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         lark_cli.chmod(0o755)
+        promlight_helper = package / "promlight-helper"
+        promlight_helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        promlight_helper.chmod(0o755)
 
         home = root / "home"
         support = home / "Library/Application Support/Codex Feishu Bridge"
@@ -791,6 +794,7 @@ class InstallerSafetyTests(unittest.TestCase):
             "uninstall.sh",
             "config.example.json",
             "lark-cli",
+            "promlight-helper",
             "config.json",
             "state.json",
             "runtime-status.json",
@@ -2190,12 +2194,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.10.2")
-        self.assertEqual(info["CFBundleVersion"], "78")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.11.0")
+        self.assertEqual(info["CFBundleVersion"], "79")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.10.2 (build 78)", readme)
-        self.assertIn("1.10.2 (build 78", release_notes)
+        self.assertIn("1.11.0 (build 79)", readme)
+        self.assertIn("1.11.0 (build 79", release_notes)
 
 
 class AppPromLightHomeTests(unittest.TestCase):
@@ -2211,10 +2215,12 @@ class AppPromLightHomeTests(unittest.TestCase):
         self.assertIn('static let hardware = "PromLight"', source)
         self.assertIn('static let verifiedDeviceVersion = "0.1.3"', source)
         self.assertIn("static let verifiedReleaseNumber = 19", source)
-        self.assertIn('static let relayAppVersion = "0.2.3"', source)
+        self.assertIn('static let builtInHelperVersion = "1"', source)
+        self.assertIn('static let legacyRelayAppVersion = "0.2.3"', source)
         self.assertIn('Button("绑定到选定用户")', source)
         self.assertIn("其他型号或版本尚未验证", source)
-        self.assertIn("需单独安装", source)
+        self.assertIn("无需另装 PromLight App", source)
+        self.assertIn("Bridge 内置 PromLight Helper", source)
         self.assertIn("可连续绑定多盏实体灯", source)
 
 
@@ -2223,6 +2229,11 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         helper = (ROOT / "Resources/bridge/app_update.sh").read_text(encoding="utf-8")
         self.assertIn(
             'lipo "${staged_app}/Contents/MacOS/CodexFeishuBridge" '
+            "-verify_arch arm64 x86_64",
+            helper,
+        )
+        self.assertIn(
+            'lipo "${staged_app}/Contents/Resources/bridge/promlight-helper" '
             "-verify_arch arm64 x86_64",
             helper,
         )
@@ -2236,6 +2247,7 @@ class AppUpdaterSafetyTests(unittest.TestCase):
             architecture_check.index('app.appendingPathComponent("Contents/MacOS/CodexFeishuBridge").path'),
             architecture_check.index('"-verify_arch"'),
         )
+        self.assertIn("Contents/Resources/bridge/promlight-helper", source)
 
     def test_helper_refuses_destination_outside_applications(self):
         helper = ROOT / "Resources/bridge/app_update.sh"
