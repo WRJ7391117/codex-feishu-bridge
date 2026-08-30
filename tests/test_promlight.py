@@ -91,6 +91,11 @@ class PromLightTests(unittest.TestCase):
             "红灯闪烁 > 黄灯闪烁 > 黄灯常亮 > 绿灯常亮",
         ):
             self.assertIn(text, legend)
+        compact_legend = json.dumps(
+            self.bridge.promlight_legend_element(), ensure_ascii=False
+        )
+        self.assertIn("灯光对应的事件说明", compact_legend)
+        self.assertNotIn("灯光图例", compact_legend)
 
     def test_two_promlight_menu_leaves_send_control_and_legend_cards(self):
         self.bridge.send_card = mock.Mock(return_value=(True, "oc_test", "om_test"))
@@ -229,6 +234,99 @@ class PromLightTests(unittest.TestCase):
 
         patched = self.bridge.patch_card.call_args.args[1]
         self.assertEqual(patched["header"]["subtitle"]["content"], "Desk A")
+
+    def test_promlight_card_refresh_prefers_message_patch(self):
+        card = self.bridge.build_promlight_legend_card()
+        self.bridge.patch_card = mock.Mock(return_value=True)
+        self.bridge.update_card = mock.Mock(return_value=True)
+
+        self.bridge.patch_promlight_event_card(
+            {"message_id": "om_card", "token": "callback-token"},
+            "ou_admin",
+            card,
+        )
+
+        self.bridge.patch_card.assert_called_once_with("om_card", card, persist=False)
+        self.bridge.update_card.assert_not_called()
+
+    def test_promlight_card_refresh_falls_back_and_persists_only_after_both_fail(self):
+        card = self.bridge.build_promlight_legend_card()
+        self.bridge.patch_card = mock.Mock(return_value=False)
+        self.bridge.update_card = mock.Mock(return_value=False)
+        self.bridge.queue_pending_card_patch = mock.Mock()
+
+        self.bridge.patch_promlight_event_card(
+            {"message_id": "om_card", "token": "callback-token"},
+            "ou_admin",
+            card,
+        )
+
+        self.bridge.patch_card.assert_called_once_with("om_card", card, persist=False)
+        self.bridge.update_card.assert_called_once_with("callback-token", card)
+        self.bridge.queue_pending_card_patch.assert_called_once_with(
+            "om_card", card, "飞书卡片刷新失败"
+        )
+
+    def test_promlight_processing_card_disables_only_the_clicked_action(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+        card = self.bridge.build_promlight_task_card(
+            "ou_admin", lamp, self.bridge.load_state()
+        )
+
+        processing = self.bridge.promlight_action_processing_card(
+            card, "promlight_toggle_task"
+        )
+        buttons = [
+            element
+            for element in processing["body"]["elements"]
+            if element.get("tag") == "button"
+        ]
+        clicked = next(
+            button
+            for button in buttons
+            if button.get("text", {}).get("content") == "正在处理…"
+        )
+        self.assertTrue(clicked["disabled"])
+        self.assertEqual(clicked["type"], "default")
+        self.assertNotIn("behaviors", clicked)
+        self.assertTrue(
+            any(
+                button.get("text", {}).get("content") == "返回我的提示灯"
+                and "behaviors" in button
+                for button in buttons
+            )
+        )
+
+    def test_follow_action_patches_processing_state_before_final_card(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+        self.bridge.patch_promlight_event_card = mock.Mock()
+
+        handled = self.bridge.handle_promlight_button_action(
+            {
+                "operator_id": "ou_admin",
+                "message_id": "om_card",
+                "token": "callback-token",
+            },
+            {
+                "action": "promlight_toggle_task",
+                "lamp_id": lamp,
+                "task_id": "task-a",
+            },
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(self.bridge.patch_promlight_event_card.call_count, 2)
+        processing = self.bridge.patch_promlight_event_card.call_args_list[0].args[2]
+        final = self.bridge.patch_promlight_event_card.call_args_list[1].args[2]
+        processing_json = json.dumps(processing, ensure_ascii=False)
+        final_json = json.dumps(final, ensure_ascii=False)
+        self.assertIn("正在处理…", processing_json)
+        self.assertIn('"disabled": true', processing_json)
+        self.assertIn("已关注这个 Task", final_json)
+        self.assertEqual(
+            self.bridge.load_state()["promlight"]["lamps"][lamp]["task_ids"],
+            ["task-a"],
+        )
 
     def test_daemon_ack_is_not_reported_as_verified_light_effect(self):
         with mock.patch.object(

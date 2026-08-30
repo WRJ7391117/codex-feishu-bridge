@@ -4,15 +4,15 @@
 
 DeepOri Bridge 是独立开源工具，并非 OpenAI、飞书或 Lark 官方产品。
 
-版本说明：当前源码和本机构建为 `1.9.31 (build 69)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.10.0 (build 76)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
 
 面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
 ## 能力
 
-- 飞书机器人一级菜单为“Task 管理”“管理桌面 Task”“模型设置”和“提示灯”；“提示灯”下只提供“我的提示灯”和“灯光状态说明”
+- 飞书机器人一级菜单为“Task 管理”“桌面task”“模型设置”和“提示灯”；“提示灯”下只提供“我的提示灯”和“灯光状态说明”
 - “修改当前 Task 模型”可读取并切换当前 Task 的模型、分析强度与速度；运行中修改会保存给下一条尚未开始的消息，压缩上下文仍要求 Task 空闲并二次确认
-- “管理桌面 Task”→“接续当前 Task”只读取该飞书用户在桥接中选择的当前 Task，并先显示项目、Task 标题和桌面状态供确认；没有有效当前 Task 时只打开选择卡，不自动猜测其他 Task
+- “桌面task”→“接续当前 Task”只读取该飞书用户在桥接中选择的当前 Task，并先显示项目、Task 标题和桌面状态供确认；没有有效当前 Task 时只打开选择卡，不自动猜测其他 Task
 - 每位授权用户可独立订阅最多 20 个有权访问的 Task；这些 Task 在 Codex Desktop 完成新运行后自动推送结果，订阅前的历史结果不会补发
 - 按 `项目 · Task 标题` 显示所有未归档本地 Task，每页 50 条，可翻页和按标题搜索
 - 选中后持续保持当前 Task；并行 Task 返回最终结果时，当前 Task 自动跟随最后送达的结果，便于直接继续追问
@@ -43,7 +43,7 @@ DeepOri Bridge 是独立开源工具，并非 OpenAI、飞书或 Lark 官方产�
 - 菜单栏保留随时开启、关闭和快速打开控制中心的入口
 - 用户级 LaunchAgent 常驻，异常退出后自动重启
 - App 内置修复卡片回执的专用 `lark-cli`，避免项目或 Task 已选中但飞书仍提示 `108002`
-- App 启动时自动检查 GitHub Releases，可在控制中心校验 SHA-256、App 身份、签名和 Universal 架构后自动替换；存在待处理飞书工作时拒绝升级
+- App 启动时自动检查 GitHub Releases；用户可在控制中心选择是否自动安装更新，开关默认关闭并在重启后保留。自动或手动安装都会校验 SHA-256、App 身份、签名和 Universal 架构，存在运行、排队或待补发工作时不会升级
 - 支持 Apple Silicon 和 Intel Mac
 
 ## 原理
@@ -124,7 +124,7 @@ App 运行时优先使用随安装包提供的 `1.0.89-codex-feishu.3`，它在�
      - “切换 Task” → Event Key `select_task`
      - “新建 Task” → Event Key `new_task`
      - “归档当前 Task” → Event Key `archive_task`
-   - 主菜单“管理桌面 Task”下添加三个子菜单，动作均选择“推送事件”：
+   - 主菜单“桌面task”下添加三个子菜单，动作均选择“推送事件”：
      - “订阅桌面 Task” → Event Key `task_subscriptions`
      - “接续当前 Task” → Event Key `sync_desktop`
      - “接续其他 Task” → Event Key `sync_desktop_switch`
@@ -175,9 +175,9 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 - 点击 Bot 菜单“Task 管理”→“当前 Task” → 在聊天底部打开最新状态卡；仅在尚未选择 Task 时进入选择页面
 - 点击 Bot 菜单“Task 管理”→“切换 Task” → 卡片只负责先选择项目、再从完整列表中切换到 `项目 · Task 标题`；取消切换时保持原 Task
-- 点击 Bot 菜单“管理桌面 Task”→“订阅桌面 Task” → 按项目筛选并逐个订阅或取消订阅；订阅不改变当前 Task，Desktop 以后完成的新运行会自动推送，收到结果后当前 Task 跟随该结果以便直接追问
-- 点击 Bot 菜单“管理桌面 Task”→“接续当前 Task” → 卡片显示本人的桥接当前 Task、所属项目和桌面状态；确认“接续当前 Task”后，已完成结果立即推送，运行中的结果跨桥接重启持续跟踪并在完成后推送
-- 点击 Bot 菜单“管理桌面 Task”→“接续其他 Task” → 先切换 Task，再通过“接续选定的 Task”确认；没有有效当前 Task 时“接续当前 Task”也会进入同一选择流程，不会自动猜测其他 Task
+- 点击 Bot 菜单“桌面task”→“订阅桌面 Task” → 按项目筛选并逐个订阅或取消订阅；订阅不改变当前 Task，Desktop 以后完成的新运行会自动推送，收到结果后当前 Task 跟随该结果以便直接追问
+- 点击 Bot 菜单“桌面task”→“接续当前 Task” → 卡片显示本人的桥接当前 Task、所属项目和桌面状态；确认“接续当前 Task”后，已完成结果立即推送，运行中的结果跨桥接重启持续跟踪并在完成后推送
+- 点击 Bot 菜单“桌面task”→“接续其他 Task” → 先切换 Task，再通过“接续选定的 Task”确认；没有有效当前 Task 时“接续当前 Task”也会进入同一选择流程，不会自动猜测其他 Task
 - 点击 Bot 菜单“模型设置”→“修改当前 Task 模型” → 修改当前 Task 的模型、分析强度和标准/快速速度；设置仅影响下一条尚未开始的消息，运行中的这一轮不会改变
 - 点击 Bot 菜单“模型设置”→“压缩当前 Task 上下文” → 查看当前项目和 Task，Task 空闲时二次确认后总结较早内容
 - 点击 Bot 菜单“模型设置”→“Codex 额度用量” → 打开独立用量卡；卡片内可继续选择“当日 Task 用量分析”或“当期 Task 用量分析”，查看有权访问项目中的 Task Token 排名、占比、单次模型调用用量、主要消耗原因及是否偏高。“当日”从本地当天 00:00 开始，“当期”与当前 Codex 主额度重置周期一致；Token 用于 Task 间比较和异常诊断，不等同于官方额度或账单的按 Task 扣减

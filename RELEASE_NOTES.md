@@ -1,5 +1,15 @@
 # Release Notes
 
+## 1.10.0 (build 76)
+
+- Adds a persisted, opt-in “自动安装 App 更新” switch while preserving manual update checks; installation waits for all active and queued Task work to finish and keeps the existing signed Universal-package verification.
+- Reorganizes App update controls into compact aligned settings, moves logs and the data directory into collapsed advanced maintenance, and keeps GitHub/VPN guidance visible without crowding the main dashboard.
+- Restores the standard macOS title-bar boundary and adds a safe top inset so the product logo and title remain fully visible below the window controls.
+- Updates current product guidance and in-App help to match the compact Feishu parent menu name “桌面task” without changing any Bot Event Key.
+- Makes PromLight card interactions prefer the stable message-card patch path, falling back to callback-token update and durable retry only when needed.
+- Immediately replaces the clicked PromLight Task-follow button with a disabled “正在处理…” state before applying the subscription and rendering the final card.
+- Renames the compact PromLight legend to “灯光对应的事件说明” so the card clearly explains which Task events drive each light state.
+
 ## 1.9.31 (build 69)
 
 - Adds one top-level Feishu menu, “提示灯”, with “我的提示灯” and “灯光状态说明” leaves.

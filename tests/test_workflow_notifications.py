@@ -2190,12 +2190,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.9.31")
-        self.assertEqual(info["CFBundleVersion"], "69")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.10.0")
+        self.assertEqual(info["CFBundleVersion"], "76")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.9.31 (build 69)", readme)
-        self.assertIn("1.9.31 (build 69", release_notes)
+        self.assertIn("1.10.0 (build 76)", readme)
+        self.assertIn("1.10.0 (build 76", release_notes)
 
 
 class AppUpdaterSafetyTests(unittest.TestCase):
@@ -2238,6 +2238,27 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         self.assertIn("health.pendingDeliveries == 0", source)
         self.assertIn("health.pendingTaskCreations == 0", source)
         self.assertIn('appendingPathComponent("app_update.sh")', source)
+
+    def test_automatic_updates_are_opt_in_persisted_and_wait_for_idle(self):
+        source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(encoding="utf-8")
+        self.assertIn(
+            'automaticUpdatesPreferenceKey = "automaticAppUpdatesEnabled"',
+            source,
+        )
+        self.assertIn("UserDefaults.standard.bool", source)
+        self.assertIn("UserDefaults.standard.set(enabled", source)
+        automatic = source.split("private func attemptAutomaticUpdateIfReady", 1)[1].split(
+            "func installUpdate", 1
+        )[0]
+        for condition in (
+            "automaticUpdatesEnabled",
+            "health.activeRuns == 0",
+            "health.pendingInputs == 0",
+            "health.pendingDeliveries == 0",
+            "health.pendingTaskCreations == 0",
+            "automaticUpdateRetryInterval",
+        ):
+            self.assertIn(condition, automatic)
 
     def test_configuration_sheet_has_one_scroll_region_and_labeled_user_cards(self):
         source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(encoding="utf-8")

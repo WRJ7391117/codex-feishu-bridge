@@ -96,7 +96,7 @@ class ProductOnboardingTests(unittest.TestCase):
             self.assertIn(value, setup)
         for label in (
             "Task 管理",
-            "管理桌面 Task",
+            "桌面task",
             "订阅桌面 Task",
             "接续当前 Task",
             "接续其他 Task",
@@ -203,13 +203,29 @@ class ProductOnboardingTests(unittest.TestCase):
         management = self.source.split("private var actionsCard", 1)[1].split(
             "private func infoRow", 1
         )[0]
-        self.assertIn("检查 App 更新", management)
-        self.assertIn("更新包从 GitHub 获取", management)
-        self.assertIn("请先连接 VPN", management)
+        self.assertIn("App 更新", management)
+        self.assertIn("检查更新", management)
+        self.assertIn("自动安装 App 更新", management)
+        self.assertIn("桥接空闲时自动安装，不中断 Task", management)
+        self.assertIn("更新源：GitHub", management)
+        self.assertIn("请连接 VPN", management)
         self.assertIn("高级维护", management)
+        advanced = management.split("DisclosureGroup", 1)[1]
+        self.assertIn("打开日志", advanced)
+        self.assertIn("数据目录", advanced)
         self.assertIn("修复后台服务", management)
         self.assertIn("不访问 GitHub", management)
         self.assertNotIn("安装/更新后台组件", management)
+
+        window_setup = self.source.split("private func createWindowIfNeeded", 1)[1].split(
+            "@objc private func showMainWindow", 1
+        )[0]
+        self.assertIn("newWindow.titleVisibility = .hidden", window_setup)
+        self.assertIn("newWindow.titlebarAppearsTransparent = false", window_setup)
+        header = self.source.split("private var header", 1)[1].split(
+            "private var statusCard", 1
+        )[0]
+        self.assertIn(".padding(.top, 20)", header)
 
         update_check = self.source.split("func checkForUpdates", 1)[1].split(
             "func installUpdate", 1

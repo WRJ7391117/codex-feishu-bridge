@@ -496,7 +496,8 @@ private final class BridgeController: @unchecked Sendable {
         expectedVersion: String
     ) throws -> URL {
         let health = healthSnapshot()
-        guard health.pendingInputs == 0,
+        guard health.activeRuns == 0,
+              health.pendingInputs == 0,
               health.pendingDeliveries == 0,
               health.pendingTaskCreations == 0 else {
             throw BridgeUpdateError.message("仍有运行队列、待补发结果或新建 Task 请求，请处理完成后再更新。")
@@ -660,7 +661,11 @@ private final class BridgeController: @unchecked Sendable {
 
 @MainActor
 private final class BridgeViewModel: ObservableObject {
+    private static let automaticUpdatesPreferenceKey = "automaticAppUpdatesEnabled"
+    private static let automaticUpdateRetryInterval: TimeInterval = 60 * 60
+
     private let bridge: BridgeController
+    private var lastAutomaticUpdateAttemptAt: Date?
 
     @Published var isRunning = false
     @Published var profileName = "codex-notify"
@@ -678,6 +683,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var updateURL: URL?
     @Published var updateSHA256 = ""
     @Published var isUpdating = false
+    @Published var automaticUpdatesEnabled: Bool
 
     @Published var draftProfile = "codex-notify"
     @Published var draftUsers = [AuthorizedUserDraft()]
@@ -717,6 +723,9 @@ private final class BridgeViewModel: ObservableObject {
 
     init(bridge: BridgeController) {
         self.bridge = bridge
+        self.automaticUpdatesEnabled = UserDefaults.standard.bool(
+            forKey: Self.automaticUpdatesPreferenceKey
+        )
         refresh()
     }
 
@@ -727,6 +736,19 @@ private final class BridgeViewModel: ObservableObject {
         authorizedUserCount = configuredUsers(from: config).count
         pendingAccessRequests = bridge.pendingAccessRequests()
         health = bridge.healthSnapshot()
+        attemptAutomaticUpdateIfReady()
+    }
+
+    func setAutomaticUpdatesEnabled(_ enabled: Bool) {
+        automaticUpdatesEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.automaticUpdatesPreferenceKey)
+        guard enabled else { return }
+        lastAutomaticUpdateAttemptAt = nil
+        if availableVersion.isEmpty {
+            checkForUpdates()
+        } else {
+            attemptAutomaticUpdateIfReady()
+        }
     }
 
     func refreshPromLightDevices() {
@@ -841,6 +863,7 @@ private final class BridgeViewModel: ObservableObject {
                         self.alertTitle = "发现新版本 v\(latest)"
                         self.alertMessage = "已找到经过 SHA-256 标记的 Universal 安装包，可直接下载安装。"
                     }
+                    self.attemptAutomaticUpdateIfReady()
                 } else if manual {
                     self.alertTitle = "已是最新版本"
                     self.alertMessage = "当前版本 v\(current)。"
@@ -849,21 +872,45 @@ private final class BridgeViewModel: ObservableObject {
         }.resume()
     }
 
-    func installUpdate() {
+    private func attemptAutomaticUpdateIfReady() {
+        guard automaticUpdatesEnabled,
+              !availableVersion.isEmpty,
+              updateURL != nil,
+              !updateSHA256.isEmpty,
+              !isUpdating,
+              health.activeRuns == 0,
+              health.pendingInputs == 0,
+              health.pendingDeliveries == 0,
+              health.pendingTaskCreations == 0 else { return }
+        let now = Date()
+        if let lastAutomaticUpdateAttemptAt,
+           now.timeIntervalSince(lastAutomaticUpdateAttemptAt)
+             < Self.automaticUpdateRetryInterval {
+            return
+        }
+        lastAutomaticUpdateAttemptAt = now
+        installUpdate(automatic: true)
+    }
+
+    func installUpdate(automatic: Bool = false) {
         guard !isUpdating else { return }
         health = bridge.healthSnapshot()
         guard health.activeRuns == 0,
               health.pendingInputs == 0,
               health.pendingDeliveries == 0,
               health.pendingTaskCreations == 0 else {
-            presentError(
-                title: "暂不能更新",
-                message: "仍有运行中的 Task、排队消息、待补发结果或新建 Task 请求。全部处理完成后再更新，避免打断飞书任务。"
-            )
+            if !automatic {
+                presentError(
+                    title: "暂不能更新",
+                    message: "仍有运行中的 Task、排队消息、待补发结果或新建 Task 请求。全部处理完成后再更新，避免打断飞书任务。"
+                )
+            }
             return
         }
         guard let updateURL, !availableVersion.isEmpty, !updateSHA256.isEmpty else {
-            checkForUpdates(manual: true)
+            if !automatic {
+                checkForUpdates(manual: true)
+            }
             return
         }
         isUpdating = true
@@ -875,10 +922,12 @@ private final class BridgeViewModel: ObservableObject {
             guard error == nil, let temporaryURL else {
                 Task { @MainActor in
                     self.isUpdating = false
-                    self.presentError(
-                        title: "更新失败",
-                        message: "无法从 GitHub 下载安装包。请检查网络；如当前网络无法访问 GitHub，请先连接 VPN 后重试。"
-                    )
+                    if !automatic {
+                        self.presentError(
+                            title: "更新失败",
+                            message: "无法从 GitHub 下载安装包。请检查网络；如当前网络无法访问 GitHub，请先连接 VPN 后重试。"
+                        )
+                    }
                 }
                 return
             }
@@ -897,13 +946,17 @@ private final class BridgeViewModel: ObservableObject {
                         NSApplication.shared.terminate(nil)
                     } else {
                         self.isUpdating = false
-                        self.presentError(title: "更新失败", message: result.output)
+                        if !automatic {
+                            self.presentError(title: "更新失败", message: result.output)
+                        }
                     }
                 }
             } catch {
                 Task { @MainActor in
                     self.isUpdating = false
-                    self.presentError(title: "更新失败", message: error.localizedDescription)
+                    if !automatic {
+                        self.presentError(title: "更新失败", message: error.localizedDescription)
+                    }
                 }
             }
         }.resume()
@@ -1541,6 +1594,7 @@ private struct MainView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        .padding(.top, 20)
     }
 
     private var statusCard: some View {
@@ -1692,32 +1746,26 @@ private struct MainView: View {
                 }
                 actionButton("配置桥接", icon: "gearshape") { model.prepareConfiguration() }
                 actionButton("运行诊断", icon: "stethoscope") { model.runDiagnosis() }
-                actionButton(
-                    model.isUpdating
-                        ? "正在下载并验证更新…"
-                        : model.availableVersion.isEmpty
-                        ? "检查 App 更新"
-                        : "安装 App 更新 v\(model.availableVersion)",
-                    icon: "arrow.down.app"
-                ) {
-                    if model.availableVersion.isEmpty {
-                        model.checkForUpdates(manual: true)
-                    } else {
-                        model.installUpdate()
-                    }
-                }
-                Text("更新包从 GitHub 获取。若当前网络无法访问 GitHub，请先连接 VPN。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: 10) {
-                    Button("打开日志") { model.openLog() }
-                    Button("数据目录") { model.openSupportDirectory() }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Divider()
+                appUpdateSection
                 Divider()
                 DisclosureGroup {
                     VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Button {
+                                model.openLog()
+                            } label: {
+                                Label("打开日志", systemImage: "doc.text")
+                            }
+                            Button {
+                                model.openSupportDirectory()
+                            } label: {
+                                Label("数据目录", systemImage: "folder")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        Divider()
                         Text("修复使用当前 App 内置的组件，不访问 GitHub；原有配置和 Task 状态会保留。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -1738,6 +1786,71 @@ private struct MainView: View {
             .padding(.top, 6)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var appUpdateSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Label("App 更新", systemImage: "arrow.down.app")
+                Spacer(minLength: 8)
+                Text(
+                    model.availableVersion.isEmpty
+                        ? "v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")"
+                        : "可更新至 v\(model.availableVersion)"
+                )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button(
+                    model.isUpdating
+                        ? "更新中…"
+                        : model.availableVersion.isEmpty
+                        ? "检查更新"
+                        : "安装 v\(model.availableVersion)"
+                ) {
+                    if model.availableVersion.isEmpty {
+                        model.checkForUpdates(manual: true)
+                    } else {
+                        model.installUpdate()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .fixedSize()
+                .disabled(model.isUpdating)
+            }
+
+            Divider()
+                .padding(.leading, 28)
+
+            HStack(spacing: 10) {
+                Label("自动安装更新", systemImage: "arrow.triangle.2.circlepath")
+                Spacer(minLength: 8)
+                Toggle(
+                    "自动安装 App 更新",
+                    isOn: Binding(
+                        get: { model.automaticUpdatesEnabled },
+                        set: { model.setAutomaticUpdatesEnabled($0) }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .disabled(model.isUpdating)
+            }
+
+            Text("桥接空闲时自动安装，不中断 Task。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 28)
+
+            Label(
+                "更新源：GitHub；无法访问时请连接 VPN。",
+                systemImage: "network"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.leading, 28)
+        }
+        .padding(.vertical, 2)
     }
 
     private func infoRow(icon: String, title: String, value: String) -> some View {
@@ -2576,7 +2689,7 @@ private struct ConfigurationChecklistView: View {
                         "select_task · 切换 Task",
                         "new_task · 新建 Task",
                         "archive_task · 归档当前 Task",
-                        "一级菜单 · 管理桌面 Task",
+                        "一级菜单 · 桌面task",
                         "task_subscriptions · 订阅桌面 Task",
                         "sync_desktop · 接续当前 Task",
                         "sync_desktop_switch · 接续其他 Task",
@@ -3085,7 +3198,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         newWindow.title = ProductBrand.name
-        newWindow.titlebarAppearsTransparent = true
+        newWindow.titleVisibility = .hidden
+        newWindow.titlebarAppearsTransparent = false
         newWindow.isReleasedWhenClosed = false
         newWindow.minSize = NSSize(width: 700, height: 500)
         newWindow.contentViewController = hostingController

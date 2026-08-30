@@ -6924,9 +6924,9 @@ def help_text() -> str:
         "机器人菜单 Task 管理 →“切换 Task” —— 切换当前 Task 或恢复已归档 Task\n"
         "机器人菜单 Task 管理 →“新建 Task” —— 选择项目并新建 Task\n"
         "机器人菜单 Task 管理 →“归档当前 Task” —— 可取消或二次确认归档当前 Task\n"
-        "机器人菜单 管理桌面 Task →“订阅桌面 Task” —— 多选需要自动接收 Desktop 新结果的 Task\n"
-        "机器人菜单 管理桌面 Task →“接续当前 Task” —— 接续桥接中的当前 Task\n"
-        "机器人菜单 管理桌面 Task →“接续其他 Task” —— 先切换 Task 再接续\n"
+        "机器人菜单 桌面task →“订阅桌面 Task” —— 多选需要自动接收 Desktop 新结果的 Task\n"
+        "机器人菜单 桌面task →“接续当前 Task” —— 接续桥接中的当前 Task\n"
+        "机器人菜单 桌面task →“接续其他 Task” —— 先切换 Task 再接续\n"
         "机器人菜单 模型设置 →“修改当前 Task 模型” —— 设置模型、分析强度和速度\n"
         "机器人菜单 模型设置 →“压缩当前 Task 上下文” —— 确认后总结较早内容\n"
         "机器人菜单 模型设置 →“Codex 额度用量” —— 查看账户额度和 Task 用量分析\n"
@@ -7544,11 +7544,42 @@ def promlight_button(
     return button
 
 
+def promlight_action_processing_card(
+    card: dict[str, Any],
+    action: str,
+) -> dict[str, Any]:
+    processing_card = json.loads(json.dumps(card, ensure_ascii=False))
+    elements = processing_card.get("body", {}).get("elements", [])
+    if not isinstance(elements, list):
+        return processing_card
+    for element in elements:
+        if not isinstance(element, dict) or element.get("tag") != "button":
+            continue
+        callbacks = element.get("behaviors")
+        if not isinstance(callbacks, list):
+            continue
+        if not any(
+            isinstance(callback, dict)
+            and callback.get("type") == "callback"
+            and isinstance(callback.get("value"), dict)
+            and callback["value"].get("action") == action
+            for callback in callbacks
+        ):
+            continue
+        element["text"] = {"tag": "plain_text", "content": "正在处理…"}
+        element["type"] = "default"
+        element["disabled"] = True
+        element.pop("behaviors", None)
+        element.pop("confirm", None)
+        break
+    return processing_card
+
+
 def promlight_legend_element() -> dict[str, Any]:
     return {
         "tag": "markdown",
         "content": (
-            "---\n**灯光图例**\n"
+            "---\n**灯光对应的事件说明**\n"
             + PROMLIGHT_LEGEND_TEXT
             + "\n\n<font color='grey'>多 Task：红灯闪烁 > 黄灯闪烁 > 黄灯常亮 > 绿灯常亮。"
             "仅计算你为这盏灯显式关注的 Task。</font>"
@@ -10313,11 +10344,15 @@ def patch_promlight_event_card(
         with _state_lock:
             state = load_state()
             remember_card_context(state, user_id, message_id, card, context_type)
+    if message_id and patch_card(message_id, card, persist=False):
+        return
     token = str(event.get("token") or "")
     if token and update_card(token, card):
+        if message_id:
+            clear_pending_card_patch(message_id)
         return
     if message_id:
-        patch_card(message_id, card)
+        queue_pending_card_patch(message_id, card, "飞书卡片刷新失败")
 
 
 def handle_promlight_button_action(
@@ -10386,6 +10421,18 @@ def handle_promlight_button_action(
     if action == "promlight_toggle_task":
         task_id = str(payload.get("task_id") or "")
         enabled = task_id not in lamp_copy.get("task_ids", [])
+        with _state_lock:
+            state = load_state()
+            processing_card = promlight_action_processing_card(
+                build_promlight_task_card(user_id, lamp_id, state),
+                action,
+            )
+        patch_promlight_event_card(
+            event,
+            user_id,
+            processing_card,
+            "promlight_tasks",
+        )
         try:
             set_promlight_task_subscription(user_id, lamp_id, task_id, enabled)
             change = "已关注这个 Task" if enabled else "已取消关注这个 Task"

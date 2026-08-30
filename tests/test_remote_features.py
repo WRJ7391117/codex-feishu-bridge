@@ -142,7 +142,7 @@ class RemoteFeatureTests(unittest.TestCase):
         help_text = self.bridge.help_text()
         for label in (
             "Task 管理",
-            "管理桌面 Task",
+            "桌面task",
             "订阅桌面 Task",
             "接续当前 Task",
             "接续其他 Task",
