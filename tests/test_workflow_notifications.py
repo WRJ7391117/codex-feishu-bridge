@@ -2194,12 +2194,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.11.3")
-        self.assertEqual(info["CFBundleVersion"], "82")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.11.4")
+        self.assertEqual(info["CFBundleVersion"], "83")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.11.3 (build 82)", readme)
-        self.assertIn("1.11.3 (build 82", release_notes)
+        self.assertIn("1.11.4 (build 83)", readme)
+        self.assertIn("1.11.4 (build 83", release_notes)
 
 
 class AppPromLightHomeTests(unittest.TestCase):
@@ -2219,6 +2219,10 @@ class AppPromLightHomeTests(unittest.TestCase):
         self.assertIn("model.refreshPromLightDevices()", main_view)
         self.assertIn('Text("管理提示灯")', main_view)
         self.assertIn('Text("设备与绑定")', main_view)
+        self.assertIn('"当前支持：\\(PromLightCompatibility.hardware)', main_view)
+        self.assertIn('PromLightCompatibility.verifiedDeviceVersion', main_view)
+        self.assertIn('PromLightCompatibility.verifiedReleaseNumber', main_view)
+        self.assertIn('Text("其他型号或版本暂未验证，可能无法启用")', main_view)
         self.assertNotIn("PromLightSettingsView", source)
         self.assertNotIn("PromLightManagementView(model: model)", configuration_view)
         management_view = source.split("private struct PromLightManagementView", 1)[1].split(

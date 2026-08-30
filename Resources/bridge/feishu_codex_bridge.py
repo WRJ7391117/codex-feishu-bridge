@@ -7699,7 +7699,7 @@ def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[st
             "content": (
                 "提示灯由运行 Bridge 的 Mac 控制。\n"
                 "- **提示灯关联哪些 Task**：决定哪些 Task 会改变灯光。\n"
-                "- **设备设置**：修改名称、默认灯或解除 Bridge 绑定。"
+                "- **提示灯设备设置**：修改名称、默认灯或解除与 Bridge 的绑定。"
             ),
         }
     ]
@@ -7760,7 +7760,7 @@ def build_promlight_control_card(user_id: str, state: dict[str, Any]) -> dict[st
             )
             elements.append(
                 promlight_button(
-                    "设备设置",
+                    "提示灯设备设置",
                     "promlight_device_settings",
                     lamp_id=lamp_id,
                 )
@@ -7806,7 +7806,7 @@ def build_promlight_device_settings_card(
                 "- **设为默认灯**：从飞书进入提示灯功能时，优先管理这盏灯。\n"
                 "- **重命名提示灯**：仅修改飞书和 Bridge 中的显示名称；"
                 "不会修改蓝牙设备名称、设备 ID、连接关系或 Task 关联。\n"
-                "- **解除 Bridge 绑定**：停止这盏灯的 Task 提醒并清除关注列表；"
+                "- **解除与 Bridge 的绑定**：停止这盏灯的 Task 提醒并清除关注列表；"
                 "不会断开 macOS 蓝牙。"
             ),
         },
@@ -7817,12 +7817,12 @@ def build_promlight_device_settings_card(
         [
             promlight_button("重命名提示灯", "promlight_start_rename", lamp_id=lamp_id),
             promlight_button(
-                "解除 Bridge 绑定",
+                "解除与 Bridge 的绑定",
                 "promlight_unbind",
                 lamp_id=lamp_id,
                 style="danger",
                 confirm=(
-                    "确认解除 Bridge 绑定？",
+                    "确认解除与 Bridge 的绑定？",
                     "将停止这盏灯的 Task 提醒并清除关注列表。macOS 蓝牙连接不会被断开。",
                 ),
             ),

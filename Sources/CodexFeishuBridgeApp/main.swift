@@ -1787,6 +1787,16 @@ private struct MainView: View {
                         Text(promLightSummary)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        Text(
+                            "当前支持：\(PromLightCompatibility.hardware) · "
+                                + "设备版本 \(PromLightCompatibility.verifiedDeviceVersion)"
+                                + "（release \(PromLightCompatibility.verifiedReleaseNumber)）"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        Text("其他型号或版本暂未验证，可能无法启用")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
                     Spacer()
                     Text("设备与绑定")

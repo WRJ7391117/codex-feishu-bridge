@@ -158,9 +158,10 @@ class PromLightTests(unittest.TestCase):
         for text in ("Desk", "Door", "deepori · Home", "other · Other"):
             self.assertIn(text, card)
         self.assertIn('"content": "提示灯关联哪些 Task"', card)
-        self.assertIn('"content": "设备设置"', card)
+        self.assertIn('"content": "提示灯设备设置"', card)
+        self.assertNotIn('"content": "设备设置"', card)
         self.assertNotIn('"content": "重命名"', card)
-        self.assertNotIn('"content": "解除 Bridge 绑定"', card)
+        self.assertNotIn('"content": "解除与 Bridge 的绑定"', card)
 
         settings = json.dumps(
             self.bridge.build_promlight_device_settings_card(
@@ -174,7 +175,7 @@ class PromLightTests(unittest.TestCase):
             "仅修改飞书和 Bridge 中的显示名称",
             "不会修改蓝牙设备名称、设备 ID、连接关系或 Task 关联",
             "不会断开 macOS 蓝牙",
-            "解除 Bridge 绑定",
+            "解除与 Bridge 的绑定",
             "返回我的提示灯",
         ):
             self.assertIn(text, settings)

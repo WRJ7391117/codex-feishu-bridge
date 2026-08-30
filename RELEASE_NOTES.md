@@ -1,5 +1,9 @@
 # Release Notes
 
+## 1.11.4 (build 83)
+
+- Shows the verified PromLight hardware and device version directly on the App home card, warns that other models or versions may not enable the light feature, clarifies the control-center action as “提示灯设备设置”, and uses “解除与 Bridge 的绑定” consistently in the device-settings flow.
+
 ## 1.11.3 (build 82)
 
 - Clarifies that renaming a PromLight only changes its display name in Bridge and Feishu, without changing the Bluetooth name, stable device ID, connection, or Task associations.
