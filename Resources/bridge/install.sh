@@ -614,7 +614,7 @@ payload = {
     },
     "RunAtLoad": True,
     "KeepAlive": True,
-    "ProcessType": "Background",
+    "ProcessType": "Standard",
     "StandardOutPath": str(Path.home() / ".codex/log/feishu-bridge-launchd.log"),
     "StandardErrorPath": str(Path.home() / ".codex/log/feishu-bridge-launchd.log"),
 }

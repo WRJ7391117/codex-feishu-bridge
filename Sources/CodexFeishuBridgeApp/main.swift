@@ -395,6 +395,11 @@ private final class BridgeController: @unchecked Sendable {
         control("status").output.trimmingCharacters(in: .whitespacesAndNewlines) == "on"
     }
 
+    func isLoginAutostartEnabled() -> Bool {
+        control("autostart-status").output
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "on"
+    }
+
     func readConfig() -> [String: Any] {
         guard let data = try? Data(contentsOf: configURL),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -692,6 +697,7 @@ private final class BridgeViewModel: ObservableObject {
     private var lastAutomaticUpdateAttemptAt: Date?
 
     @Published var isRunning = false
+    @Published var loginAutostartEnabled = false
     @Published var profileName = "codex-notify"
     @Published var authorizedUserCount = 0
     @Published var health = BridgeHealthSnapshot.empty
@@ -761,6 +767,7 @@ private final class BridgeViewModel: ObservableObject {
 
     func refresh() {
         isRunning = bridge.isRunning()
+        loginAutostartEnabled = bridge.isLoginAutostartEnabled()
         let config = bridge.readConfig()
         profileName = String(describing: config["lark_profile"] ?? "codex-notify")
         let users = configuredUsers(from: config)
@@ -1011,10 +1018,30 @@ private final class BridgeViewModel: ObservableObject {
 
     func toggleBridge() {
         let action = isRunning ? "stop" : "start"
+        if action == "stop" {
+            let confirmation = NSAlert()
+            confirmation.messageText = "停止本次桥接运行？"
+            confirmation.informativeText = "停止后，飞书消息暂时无法进入 Codex。登录后自动启动的开关保持不变。"
+            confirmation.alertStyle = .warning
+            confirmation.addButton(withTitle: "停止本次运行")
+            confirmation.addButton(withTitle: "取消")
+            guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+        }
         let result = bridge.control(action)
         if result.status != 0 {
             presentError(
                 title: action == "start" ? "开启失败" : "关闭失败",
+                message: result.output
+            )
+        }
+        refresh()
+    }
+
+    func setLoginAutostartEnabled(_ enabled: Bool) {
+        let result = bridge.control(enabled ? "enable-autostart" : "disable-autostart")
+        if result.status != 0 {
+            presentError(
+                title: "自动启动设置失败",
                 message: result.output
             )
         }
@@ -1652,26 +1679,51 @@ private struct MainView: View {
     }
 
     private var statusCard: some View {
-        HStack(spacing: 16) {
+        let isStarting = model.isRunning && model.health.activeConsumers < 3
+        return HStack(spacing: 16) {
             ZStack {
                 Circle()
-                    .fill(model.isRunning ? Color.green.opacity(0.15) : Color.secondary.opacity(0.12))
+                    .fill(
+                        isStarting
+                            ? Color.orange.opacity(0.15)
+                            : model.isRunning
+                            ? Color.green.opacity(0.15)
+                            : Color.secondary.opacity(0.12)
+                    )
                     .frame(width: 52, height: 52)
-                Image(systemName: model.isRunning ? "checkmark.circle.fill" : "pause.circle.fill")
+                Image(
+                    systemName: isStarting
+                        ? "clock.fill"
+                        : model.isRunning
+                        ? "checkmark.circle.fill"
+                        : "pause.circle.fill"
+                )
                     .font(.system(size: 28))
-                    .foregroundStyle(model.isRunning ? .green : .secondary)
+                    .foregroundStyle(isStarting ? .orange : model.isRunning ? .green : .secondary)
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text(model.isRunning ? "\(ProductBrand.name) 已开启" : "\(ProductBrand.name) 已关闭")
+                Text(
+                    isStarting
+                        ? "\(ProductBrand.name) 正在启动"
+                        : model.isRunning
+                        ? "\(ProductBrand.name) 已开启"
+                        : "\(ProductBrand.name) 已关闭"
+                )
                     .font(.title3.weight(.semibold))
-                Text(model.isRunning
-                     ? "事件监听 \(model.health.activeConsumers)/3 · 运行 \(model.health.activeRuns)/\(model.health.maxConcurrentRuns)"
-                     : "飞书消息暂时不会发送到 Codex Desktop")
+                Text(
+                    isStarting
+                        ? "登录后自动启动已开启 · 正在连接飞书 \(model.health.activeConsumers)/3"
+                        : model.isRunning
+                        ? "\(model.loginAutostartEnabled ? "登录后自动启动已开启" : "仅本次运行") · 事件监听 \(model.health.activeConsumers)/3"
+                        : model.loginAutostartEnabled
+                        ? "飞书消息当前不会进入 Codex · 下次登录会自动启动"
+                        : "飞书消息不会进入 Codex · 登录后自动启动已关闭"
+                )
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button(model.isRunning ? "关闭桥接" : "开启桥接") {
+            Button(model.isRunning ? "停止本次运行…" : "立即开启") {
                 model.toggleBridge()
             }
             .buttonStyle(.borderedProminent)
@@ -1860,6 +1912,8 @@ private struct MainView: View {
                 actionButton("配置桥接", icon: "gearshape") { model.prepareConfiguration() }
                 actionButton("运行诊断", icon: "stethoscope") { model.runDiagnosis() }
                 Divider()
+                loginAutostartSection
+                Divider()
                 appUpdateSection
                 Divider()
                 DisclosureGroup {
@@ -1899,6 +1953,28 @@ private struct MainView: View {
             .padding(.top, 6)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var loginAutostartSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Label("登录后自动启动", systemImage: "power.circle")
+                Spacer(minLength: 8)
+                Toggle(
+                    "登录后自动启动桥接",
+                    isOn: Binding(
+                        get: { model.loginAutostartEnabled },
+                        set: { model.setLoginAutostartEnabled($0) }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+            }
+            Text("只影响下次登录；不会自动弹出 App 窗口，也不会改变当前运行状态。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 28)
+        }
     }
 
     private var appUpdateSection: some View {

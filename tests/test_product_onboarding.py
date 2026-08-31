@@ -246,6 +246,33 @@ class ProductOnboardingTests(unittest.TestCase):
             self.assertNotIn(detail, setup)
         self.assertIn("card.action.trigger", checklist)
 
+    def test_home_explains_login_autostart_and_startup_readiness(self):
+        source = self.source
+        status_card = source.split("private var statusCard", 1)[1].split(
+            "private var healthCard", 1
+        )[0]
+        control = (ROOT / "Resources/bridge/control.sh").read_text(encoding="utf-8")
+        installer = (ROOT / "Resources/bridge/install.sh").read_text(encoding="utf-8")
+
+        self.assertIn("loginAutostartEnabled", source)
+        self.assertIn("正在启动", status_card)
+        self.assertIn("登录后自动启动已开启", status_card)
+        self.assertIn("登录后自动启动已关闭", status_card)
+        self.assertIn("立即开启", status_card)
+        self.assertIn("停止本次运行…", status_card)
+        self.assertIn("停止本次桥接运行？", source)
+        self.assertIn("登录后自动启动的开关保持不变", source)
+        self.assertIn("loginAutostartSection", source)
+        self.assertIn("只影响下次登录", source)
+        self.assertIn('autostart-status)', control)
+        self.assertIn('enable-autostart)', control)
+        self.assertIn('disable-autostart)', control)
+        self.assertIn('print-disabled "${domain}"', control)
+        stop_service = control.split("stop_service()", 1)[1].split("case", 1)[0]
+        self.assertNotIn('launchctl disable "${service}"', stop_service)
+        self.assertIn('"ProcessType": "Standard"', installer)
+        self.assertNotIn('"ProcessType": "Background"', installer)
+
     def test_first_user_discovery_is_bounded_and_does_not_grant_projects(self):
         discovery = self.source.split("func discoverFeishuUser", 1)[1].split(
             "func isRunning", 1

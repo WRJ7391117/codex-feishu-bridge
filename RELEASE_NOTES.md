@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.11.8 (build 87)
+
+- Makes login startup explicit in the App, distinguishes the Feishu consumer connection phase from fully ready operation, and clarifies that the App window does not open automatically.
+- Separates current runtime control from the next-login startup preference, so stopping the current session no longer silently disables future login startup.
+- Runs the login LaunchAgent as a standard service instead of a low-priority background process to reduce startup delay under login load.
+
 ## 1.11.7 (build 86)
 
 - Shows the complete project and Task title in the body of every Task-scoped Feishu card, so mobile header and selector truncation no longer hides the Task identity.
