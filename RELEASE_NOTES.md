@@ -1,5 +1,12 @@
 # Release Notes
 
+## 1.11.9 (build 88)
+
+- Restarts the complete Bridge through LaunchAgent recovery when any one of the three Feishu event consumers exits, preventing silent loss of message, card, or menu events.
+- Fails closed when the persisted Task state is corrupt, unreadable, or insecure, while retaining first-run initialization for a genuinely missing state file.
+- Serializes all macOS App installation paths, rechecks the installed version/build after waiting, and keeps the previous App/runtime until the new runtime passes a fresh health handshake.
+- Retries one transient Feishu card-patch failure immediately before moving the update to the durable background retry queue.
+
 ## 1.11.8 (build 87)
 
 - Makes login startup explicit in the App, distinguishes the Feishu consumer connection phase from fully ready operation, and clarifies that the App window does not open automatically.

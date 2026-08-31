@@ -42,6 +42,57 @@ class RuntimeCompatibilityTests(unittest.TestCase):
     def setUp(self):
         self.bridge = load_bridge()
 
+    def test_corrupt_or_insecure_bridge_state_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.bridge.STATE_PATH = Path(directory) / "state.json"
+            self.bridge.STATE_PATH.write_text('{"selected":', encoding="utf-8")
+            self.bridge.STATE_PATH.chmod(0o600)
+            original = self.bridge.STATE_PATH.read_bytes()
+
+            with self.assertRaises(RuntimeError):
+                self.bridge.load_state()
+            self.assertEqual(self.bridge.STATE_PATH.read_bytes(), original)
+
+            self.bridge.STATE_PATH.write_text("{}\n", encoding="utf-8")
+            self.bridge.STATE_PATH.chmod(0o644)
+            with self.assertRaises(RuntimeError):
+                self.bridge.load_state()
+
+    def test_missing_bridge_state_still_uses_initial_empty_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.bridge.STATE_PATH = Path(directory) / "state.json"
+            self.assertEqual(
+                self.bridge.load_state(),
+                {
+                    "selected": {},
+                    "last_lists": {},
+                    "authorized_chats": {},
+                    "processed": [],
+                    "bridge_turns": [],
+                },
+            )
+
+    def test_any_consumer_exit_requests_parent_restart(self):
+        running = mock.Mock()
+        running.poll.return_value = None
+        clean_exit = mock.Mock()
+        clean_exit.poll.return_value = 0
+        failed_exit = mock.Mock()
+        failed_exit.poll.return_value = 7
+
+        self.assertIsNone(self.bridge.event_consumer_exit_code([running, running]))
+        for position in range(3):
+            consumers = [running, running, running]
+            consumers[position] = clean_exit
+            self.assertEqual(
+                self.bridge.event_consumer_exit_code(consumers),
+                1,
+            )
+        self.assertEqual(
+            self.bridge.event_consumer_exit_code([running, failed_exit]),
+            7,
+        )
+
     def executable(self, directory: str, name: str) -> str:
         path = Path(directory) / name
         path.write_text("#!/bin/sh\n", encoding="utf-8")

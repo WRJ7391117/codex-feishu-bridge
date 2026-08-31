@@ -2808,10 +2808,7 @@ class RemoteFeatureTests(unittest.TestCase):
 
     def test_cancel_archive_keeps_current_task_selected(self):
         task = self.tasks()[0]
-        self.bridge.STATE_PATH.write_text(
-            json.dumps({"selected": {"ou_admin": "task-a"}}),
-            encoding="utf-8",
-        )
+        self.bridge.save_state({"selected": {"ou_admin": "task-a"}})
         self.bridge.selected_task = lambda user_id, state: task
         self.bridge.archive_codex_task = mock.Mock()
         self.bridge.update_card = mock.Mock(return_value=True)
@@ -2844,10 +2841,7 @@ class RemoteFeatureTests(unittest.TestCase):
 
     def test_archive_callback_clears_selection_only_after_success(self):
         task = self.tasks()[0]
-        self.bridge.STATE_PATH.write_text(
-            json.dumps({"selected": {"ou_admin": "task-a"}}),
-            encoding="utf-8",
-        )
+        self.bridge.save_state({"selected": {"ou_admin": "task-a"}})
         self.bridge.selected_task = lambda user_id, state: task
         self.bridge.active_run_for_task = lambda task_id: None
         self.bridge.archive_codex_task = mock.Mock()
@@ -2927,7 +2921,7 @@ class RemoteFeatureTests(unittest.TestCase):
 
     def test_restore_callback_restores_and_selects_archived_task(self):
         task = self.tasks()[0]
-        self.bridge.STATE_PATH.write_text("{}", encoding="utf-8")
+        self.bridge.save_state({})
         self.bridge.archived_tasks = lambda user_id: [task]
         self.bridge.restore_codex_task = mock.Mock()
         self.bridge.reply = mock.Mock(return_value=True)
@@ -2973,7 +2967,7 @@ class RemoteFeatureTests(unittest.TestCase):
         )
 
     def test_show_archived_tasks_opens_restore_selector(self):
-        self.bridge.STATE_PATH.write_text("{}", encoding="utf-8")
+        self.bridge.save_state({})
         self.bridge.archived_tasks = lambda user_id: self.tasks()
         self.bridge.update_card = mock.Mock(return_value=True)
 
@@ -3838,7 +3832,7 @@ class RemoteFeatureTests(unittest.TestCase):
         with mock.patch.object(
             self.bridge.subprocess,
             "run",
-            return_value=failure,
+            side_effect=(failure, failure),
         ) as first_run:
             patched = self.bridge.patch_card(
                 "om_progress",
@@ -3846,7 +3840,7 @@ class RemoteFeatureTests(unittest.TestCase):
             )
 
         self.assertFalse(patched)
-        first_run.assert_called_once()
+        self.assertEqual(first_run.call_count, 2)
         pending = self.bridge.load_state()["pending_replies"]
         self.assertEqual(len(pending), 1)
         with mock.patch.object(

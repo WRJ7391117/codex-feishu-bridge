@@ -330,7 +330,7 @@ PROMLIGHT_LEGEND_TEXT = (
     "红灯闪烁：执行出错，请查看 Task"
 )
 REPLY_RETRY_DELAYS = (1.0, 2.0)
-CARD_PATCH_RETRY_DELAYS: tuple[float, ...] = ()
+CARD_PATCH_RETRY_DELAYS: tuple[float, ...] = (0.25,)
 CARD_PATCH_TIMEOUT_SECONDS = 3
 CARD_SEND_TIMEOUT_SECONDS = 5
 PENDING_REPLY_DELAYS = (15, 30, 60, 120, 300, 600)
@@ -602,19 +602,31 @@ def log(message: str) -> None:
 
 def load_state() -> dict[str, Any]:
     with _state_lock:
+        if not os.path.lexists(STATE_PATH):
+            return {
+                "selected": {},
+                "last_lists": {},
+                "authorized_chats": {},
+                "processed": [],
+                "bridge_turns": [],
+            }
         try:
+            state_stat = STATE_PATH.lstat()
+            if (
+                STATE_PATH.is_symlink()
+                or not stat.S_ISREG(state_stat.st_mode)
+                or state_stat.st_uid != os.getuid()
+                or state_stat.st_mode & 0o777 != 0o600
+            ):
+                raise RuntimeError("bridge state file is unsafe")
             state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            state = None
-        if isinstance(state, dict):
-            return state
-        return {
-            "selected": {},
-            "last_lists": {},
-            "authorized_chats": {},
-            "processed": [],
-            "bridge_turns": [],
-        }
+        except RuntimeError:
+            raise
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("bridge state file is unreadable or invalid") from exc
+        if not isinstance(state, dict):
+            raise RuntimeError("bridge state must be a JSON object")
+        return state
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -14321,7 +14333,21 @@ def stop(_signum: int, _frame: Any) -> None:
     for consumer in _consumers:
         if consumer.poll() is None:
             consumer.terminate()
+    for consumer in _consumers:
+        if consumer.poll() is None:
+            try:
+                consumer.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                log("event consumer did not stop before bridge exit")
     write_runtime_status(active_runs=0)
+
+
+def event_consumer_exit_code(consumers: list[subprocess.Popen[str]]) -> int | None:
+    for consumer in consumers:
+        return_code = consumer.poll()
+        if return_code is not None:
+            return return_code if return_code != 0 else 1
+    return None
 
 
 def diagnostic_report() -> dict[str, Any]:
@@ -14329,9 +14355,15 @@ def diagnostic_report() -> dict[str, Any]:
         config_permissions = CONFIG_PATH.stat().st_mode & 0o777 == 0o600
     except OSError:
         config_permissions = False
+    try:
+        load_state()
+        state_file = True
+    except RuntimeError:
+        state_file = False
     checks = {
         "config_file": CONFIG_PATH.is_file(),
         "config_permissions": config_permissions,
+        "state_file": state_file,
         "allowed_users": allowed_users_config_valid(),
         "lark_cli": bool(LARK_CLI and Path(LARK_CLI).is_file()),
         "codex_cli": bool(CODEX_CLI and Path(CODEX_CLI).is_file()),
@@ -14646,18 +14678,27 @@ def main() -> int:
         daemon=True,
         name="codex-feishu-maintenance",
     ).start()
-    while any(consumer.poll() is None for consumer in _consumers):
+    while event_consumer_exit_code(_consumers) is None:
         try:
             event = events.get(timeout=0.5)
         except queue.Empty:
             continue
         submit_event(event)
+    exit_code = event_consumer_exit_code(_consumers) or 1
+    log(f"event consumer exited; restarting bridge code={exit_code}")
     _shutdown_event.set()
+    stop_workflow_socket_server()
+    for consumer in _consumers:
+        if consumer.poll() is None:
+            consumer.terminate()
+    for consumer in _consumers:
+        if consumer.poll() is None:
+            try:
+                consumer.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                log("event consumer did not stop before bridge exit")
     write_runtime_status(active_runs=0)
-    return next(
-        (consumer.returncode for consumer in _consumers if consumer.returncode),
-        0,
-    )
+    return exit_code
 
 
 if __name__ == "__main__":

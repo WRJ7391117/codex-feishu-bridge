@@ -79,6 +79,23 @@ else
     destination="${HOME}/Applications/Codex 飞书桥接.app"
 fi
 
+log_dir="${HOME}/.codex/log"
+lock_file="${log_dir}/feishu-bridge-app-update.lock"
+/bin/mkdir -p "${log_dir}"
+/bin/chmod 700 "${log_dir}"
+for _attempt in {1..300}; do
+    if /usr/bin/shlock -f "${lock_file}" -p $$; then
+        lock_acquired=1
+        break
+    fi
+    /bin/sleep 0.1
+done
+if [[ "${lock_acquired:-0}" != "1" ]]; then
+    print -u2 "另一个安装或更新仍在进行，请稍后重试"
+    exit 1
+fi
+trap '/bin/rm -f "${lock_file}"; /bin/rm -rf "${temporary_dir}"' EXIT HUP INT TERM
+
 if [[ -L "${destination}" ]]; then
     print -u2 "安装目标是符号链接，已拒绝覆盖"
     exit 1

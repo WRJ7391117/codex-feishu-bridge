@@ -2194,12 +2194,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.11.8")
-        self.assertEqual(info["CFBundleVersion"], "87")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.11.9")
+        self.assertEqual(info["CFBundleVersion"], "88")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.11.8 (build 87)", readme)
-        self.assertIn("1.11.8 (build 87", release_notes)
+        self.assertIn("1.11.9 (build 88)", readme)
+        self.assertIn("1.11.9 (build 88", release_notes)
 
 
 class AppPromLightHomeTests(unittest.TestCase):
@@ -2280,6 +2280,29 @@ class AppUpdaterSafetyTests(unittest.TestCase):
                 env=environment,
             )
         self.assertEqual(result.returncode, 2)
+
+    def test_helper_serializes_updates_rechecks_destination_and_health(self):
+        helper = (ROOT / "Resources/bridge/app_update.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/usr/bin/shlock", helper)
+        self.assertIn("destination_version_before", helper)
+        self.assertIn("destination_build_before", helper)
+        self.assertIn("destination changed while update was waiting", helper)
+        self.assertIn('Contents/Resources/bridge/install.sh', helper)
+        self.assertIn('"active_consumers"', helper)
+        self.assertIn("new runtime failed health handshake", helper)
+        self.assertIn("previous runtime restored", helper)
+
+    def test_all_app_install_paths_share_the_same_update_lock(self):
+        for relative_path in (
+            "Resources/bridge/app_update.sh",
+            "scripts/install-local.sh",
+            "skills/codex-feishu-bridge/scripts/install-latest.sh",
+        ):
+            source = (ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn("feishu-bridge-app-update.lock", source)
+            self.assertIn("/usr/bin/shlock", source)
 
     def test_app_checks_destination_and_all_pending_queues_before_update(self):
         source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(encoding="utf-8")

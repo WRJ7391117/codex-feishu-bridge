@@ -396,6 +396,21 @@ class ReplyReliabilityTests(unittest.TestCase):
         self.assertEqual(pending[0]["card"], {"version": "latest"})
         self.assertEqual(pending[0]["reason"], "飞书 API 网络连接失败")
 
+    def test_card_patch_retries_one_transient_transport_failure_immediately(self):
+        timeout = subprocess.TimeoutExpired(["lark-cli"], 3)
+        with mock.patch.object(
+            self.bridge.subprocess,
+            "run",
+            side_effect=(timeout, self.success()),
+        ) as run, mock.patch.object(self.bridge.time, "sleep") as sleep:
+            self.assertTrue(
+                self.bridge.patch_card("om_progress", {"version": "latest"})
+            )
+
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+        self.assertEqual(self.bridge.load_state().get("pending_replies", []), [])
+
     def test_card_patch_queue_keeps_only_latest_card_for_message(self):
         self.bridge.queue_pending_card_patch(
             "om_progress",
