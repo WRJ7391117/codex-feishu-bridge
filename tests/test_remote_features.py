@@ -818,14 +818,22 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(thread_factory.call_count, 2)
         self.assertIs(
             thread_factory.call_args_list[0].kwargs["target"],
-            self.bridge.refresh_task_usage_analysis_card,
+            self.bridge.run_registered_operation,
         )
+        first_target, first_args, _first_kwargs = (
+            thread_factory.call_args_list[0].kwargs["args"]
+        )
+        self.assertIs(first_target, self.bridge.refresh_task_usage_analysis_card)
         self.assertEqual(
-            thread_factory.call_args_list[0].kwargs["args"],
+            first_args,
             ("ou_admin", "om_status", "daily"),
         )
+        second_target, second_args, _second_kwargs = (
+            thread_factory.call_args_list[1].kwargs["args"]
+        )
+        self.assertIs(second_target, self.bridge.refresh_task_usage_analysis_card)
         self.assertEqual(
-            thread_factory.call_args_list[1].kwargs["args"],
+            second_args,
             ("ou_admin", "om_status", "period"),
         )
 
@@ -1078,9 +1086,14 @@ class RemoteFeatureTests(unittest.TestCase):
 
         card = self.bridge.send_card.call_args.args[1]
         self.assertIn("正在读取", card["body"]["elements"][0]["content"])
-        self.assertIs(thread_factory.call_args.kwargs["target"], self.bridge.refresh_task_settings_card)
+        self.assertIs(
+            thread_factory.call_args.kwargs["target"],
+            self.bridge.run_registered_operation,
+        )
+        target, args, _kwargs = thread_factory.call_args.kwargs["args"]
+        self.assertIs(target, self.bridge.refresh_task_settings_card)
         self.assertEqual(
-            thread_factory.call_args.kwargs["args"],
+            args,
             ("ou_admin", "om_current_status", "task-a"),
         )
 
@@ -1248,10 +1261,12 @@ class RemoteFeatureTests(unittest.TestCase):
 
         self.assertIs(
             thread_factory.call_args.kwargs["target"],
-            self.bridge.complete_task_settings_operation,
+            self.bridge.run_registered_operation,
         )
+        target, _args, kwargs = thread_factory.call_args.kwargs["args"]
+        self.assertIs(target, self.bridge.complete_task_settings_operation)
         self.assertEqual(
-            thread_factory.call_args.kwargs["kwargs"],
+            kwargs,
             {"service_tier": "priority"},
         )
 
@@ -2507,9 +2522,11 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertIn("正在刷新用量", progress_card["body"]["elements"][0]["content"])
         self.assertIs(
             thread_factory.call_args.kwargs["target"],
-            self.bridge.refresh_codex_usage_card,
+            self.bridge.run_registered_operation,
         )
-        self.assertEqual(thread_factory.call_args.kwargs["args"], ("om_status",))
+        target, args, _kwargs = thread_factory.call_args.kwargs["args"]
+        self.assertIs(target, self.bridge.refresh_codex_usage_card)
+        self.assertEqual(args, ("om_status",))
         refresh_thread.start.assert_called_once_with()
 
     def test_task_card_filters_favorites_and_recent_use(self):

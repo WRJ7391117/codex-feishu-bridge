@@ -51,6 +51,10 @@ fi
 if [[ "$(bundle_value CFBundleShortVersionString "${staged_app}")" != "${expected_version}" ]]; then
     exit 2
 fi
+expected_build="$(bundle_value CFBundleVersion "${staged_app}")"
+if [[ -z "${expected_build}" ]]; then
+    exit 2
+fi
 /usr/bin/codesign --verify --deep --strict "${staged_app}"
 /usr/bin/lipo "${staged_app}/Contents/MacOS/CodexFeishuBridge" -verify_arch arm64 x86_64
 /usr/bin/lipo "${staged_app}/Contents/Resources/bridge/promlight-helper" -verify_arch arm64 x86_64
@@ -74,14 +78,9 @@ except (OSError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError
 PY
 )"
 
-for _attempt in {1..300}; do
-    if /usr/bin/shlock -f "${lock_file}" -p $$; then
-        lock_acquired=1
-        break
-    fi
-    /bin/sleep 0.1
-done
-if (( ! lock_acquired )); then
+if /usr/bin/shlock -f "${lock_file}" -p $$; then
+    lock_acquired=1
+else
     print "another update is still in progress"
     exit 6
 fi
@@ -90,17 +89,43 @@ destination_version_now="$(bundle_value CFBundleShortVersionString "${destinatio
 destination_build_now="$(bundle_value CFBundleVersion "${destination}")"
 if [[ "${destination_version_now}" != "${destination_version_before}" || \
       "${destination_build_now}" != "${destination_build_before}" ]]; then
-    print "destination changed while update was waiting; refusing stale replacement"
+    print "destination changed before replacement; refusing stale update"
     exit 6
 fi
 
-for _attempt in {1..300}; do
-    if ! /bin/kill -0 "${running_pid}" 2>/dev/null; then
-        break
-    fi
-    /bin/sleep 0.1
-done
-if /bin/kill -0 "${running_pid}" 2>/dev/null; then
+if ! /usr/bin/python3 - "${running_pid}" <<'PY'
+import os
+import select
+import sys
+
+pid = int(sys.argv[1])
+try:
+    os.kill(pid, 0)
+except ProcessLookupError:
+    raise SystemExit(0)
+monitor = select.kqueue()
+try:
+    try:
+        monitor.control(
+            [
+                select.kevent(
+                    pid,
+                    filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                    fflags=select.KQ_NOTE_EXIT,
+                )
+            ],
+            0,
+            0,
+        )
+    except ProcessLookupError:
+        raise SystemExit(0)
+    if not monitor.control(None, 1, 30):
+        raise SystemExit(1)
+finally:
+    monitor.close()
+PY
+then
     print "old app did not exit before timeout"
     exit 3
 fi
@@ -145,38 +170,87 @@ restore_previous() {
 }
 
 new_installer="${destination}/Contents/Resources/bridge/install.sh"
-if [[ ! -x "${new_installer}" ]] || ! "${new_installer}"; then
+if [[ ! -x "${new_installer}" ]]; then
     restore_previous
     print "new runtime installation failed; previous runtime restored"
     exit 5
 fi
+installer_output=""
+if ! installer_output="$(
+    CODEX_FEISHU_ALLOW_LEGACY_RUNTIME_DEFERRAL=1 "${new_installer}"
+)"; then
+    restore_previous
+    print "new runtime installation failed; previous runtime restored"
+    exit 5
+fi
+print -r -- "${installer_output}"
+runtime_sync_deferred=0
+if [[ "${installer_output}" == \
+      "app installed; legacy runtime sync deferred until a safe stop window" ]]; then
+    runtime_sync_deferred=1
+fi
 
 health_ok=0
-if (( runtime_was_running )); then
-    for _attempt in {1..100}; do
-        if /usr/bin/python3 - "${runtime_status}" "${runtime_updated_before}" <<'PY'
+if (( runtime_sync_deferred )); then
+    health_ok=1
+elif (( runtime_was_running )); then
+    if /usr/bin/python3 - "${runtime_status}" "${runtime_updated_before}" <<'PY'
 import json
+import os
 from pathlib import Path
+import select
 import sys
+import time
 
-try:
-    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-    previous_update = float(sys.argv[2])
-    current_update = float(payload.get("updated_at") or 0)
-except (OSError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
-    raise SystemExit(1)
-raise SystemExit(
-    0
-    if payload.get("active_consumers") == 3 and current_update > previous_update
-    else 1
+path = Path(sys.argv[1])
+previous_update = float(sys.argv[2])
+
+def healthy():
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        current_update = float(payload.get("updated_at") or 0)
+    except (OSError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        payload.get("active_consumers") == 3
+        and payload.get("update_protocol") == 1
+        and current_update > previous_update
+    )
+
+descriptor = os.open(
+    path.parent,
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
 )
+monitor = select.kqueue()
+deadline = time.monotonic() + 10
+try:
+    monitor.control(
+        [
+            select.kevent(
+                descriptor,
+                filter=select.KQ_FILTER_VNODE,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+                fflags=select.KQ_NOTE_WRITE,
+            )
+        ],
+        0,
+        0,
+    )
+    if healthy():
+        raise SystemExit(0)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not monitor.control(None, 1, remaining):
+            raise SystemExit(1)
+        if healthy():
+            raise SystemExit(0)
+finally:
+    monitor.close()
+    os.close(descriptor)
 PY
-        then
-            health_ok=1
-            break
-        fi
-        /bin/sleep 0.1
-    done
+    then
+        health_ok=1
+    fi
 else
     if /usr/bin/python3 \
         "${HOME}/Library/Application Support/Codex Feishu Bridge/bridge.py" \
@@ -190,12 +264,133 @@ if (( ! health_ok )); then
     exit 5
 fi
 
-if ! /usr/bin/open "${destination}"; then
+if ! /usr/bin/python3 - \
+    "${destination}" \
+    "${expected_version}" \
+    "${expected_build}" <<'PY'
+import json
+import os
+from pathlib import Path
+import secrets
+import select
+import stat
+import subprocess
+import sys
+import time
+
+application = Path(sys.argv[1])
+expected_version = sys.argv[2]
+expected_build = sys.argv[3]
+nonce = secrets.token_hex(16)
+root = Path("/tmp") / f"codex-feishu-bridge-{os.getuid()}"
+try:
+    root.mkdir(mode=0o700)
+except FileExistsError:
+    root_stat = root.lstat()
+    if (
+        not stat.S_ISDIR(root_stat.st_mode)
+        or root.is_symlink()
+        or root_stat.st_uid != os.getuid()
+        or root_stat.st_mode & 0o077
+    ):
+        raise SystemExit("unsafe app launch acknowledgement directory")
+root.chmod(0o700)
+directory = root / f"app-launch-ack-{nonce}"
+directory.mkdir(mode=0o700)
+ack_path = directory / "ready.json"
+descriptor = os.open(
+    directory,
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+)
+monitor = select.kqueue()
+process = None
+try:
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or opened.st_uid != os.getuid()
+        or opened.st_mode & 0o077
+    ):
+        raise RuntimeError("unsafe app launch acknowledgement directory")
+    monitor.control(
+        [
+            select.kevent(
+                descriptor,
+                filter=select.KQ_FILTER_VNODE,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+                fflags=select.KQ_NOTE_WRITE,
+            )
+        ],
+        0,
+        0,
+    )
+    process = subprocess.Popen(
+        [
+            str(application / "Contents/MacOS/CodexFeishuBridge"),
+            "--update-launch-ack-path",
+            str(ack_path),
+            "--update-launch-ack-nonce",
+            nonce,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    monitor.control(
+        [
+            select.kevent(
+                process.pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+        ],
+        0,
+        0,
+    )
+    deadline = time.monotonic() + 10
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("new app did not acknowledge launch")
+        events = monitor.control(None, 2, remaining)
+        if not events:
+            raise RuntimeError("new app did not acknowledge launch")
+        if any(event.filter == select.KQ_FILTER_PROC for event in events):
+            raise RuntimeError("new app exited during launch acknowledgement")
+        if not ack_path.is_file():
+            continue
+        payload = json.loads(ack_path.read_text(encoding="utf-8"))
+        if payload != {
+            "nonce": nonce,
+            "version": expected_version,
+            "build": expected_build,
+        }:
+            raise RuntimeError("new app returned an invalid launch acknowledgement")
+        if process.poll() is not None:
+            raise RuntimeError("new app exited during launch acknowledgement")
+        break
+except Exception:
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+    raise
+finally:
+    monitor.close()
+    os.close(descriptor)
+    ack_path.unlink(missing_ok=True)
+    directory.rmdir()
+PY
+then
     restore_previous
-    print "new app failed to open; previous app and runtime restored"
+    print "new app failed launch handshake; previous app and runtime restored"
     exit 5
 fi
-/bin/sleep 2
 if [[ -e "${previous}" ]]; then
     /bin/rm -rf "${previous}"
 fi

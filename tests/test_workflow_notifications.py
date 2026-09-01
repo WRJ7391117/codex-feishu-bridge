@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -884,15 +885,247 @@ class InstallerSafetyTests(unittest.TestCase):
         return package, home, config_path, workflow_path, runtime
 
     @staticmethod
-    def _run_installer(package: Path, home: Path):
+    def _run_installer(
+        package: Path,
+        home: Path,
+        extra_environment: dict[str, str] | None = None,
+    ):
         environment = os.environ.copy()
         environment["HOME"] = str(home)
+        environment.update(extra_environment or {})
         return subprocess.run(
             ["/bin/zsh", str(package / "install.sh")],
             text=True,
             capture_output=True,
             env=environment,
         )
+
+    def test_legacy_app_update_ack_is_deterministic_without_touching_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package, home, _config_path, _workflow_path, runtime = (
+                self._installer_fixture(Path(directory))
+            )
+            installer_source = (package / "install.sh").read_text(encoding="utf-8")
+            label = next(
+                line.split('"', 2)[1]
+                for line in installer_source.splitlines()
+                if line.startswith('label="')
+            )
+            launch_agents = home / "Library/LaunchAgents"
+            launch_agents.mkdir(parents=True)
+            plist_path = launch_agents / f"{label}.plist"
+            with plist_path.open("wb") as handle:
+                plistlib.dump(
+                    {
+                        "Label": label,
+                        "ProgramArguments": ["/bin/sleep", "60"],
+                        "RunAtLoad": True,
+                    },
+                    handle,
+                )
+            plist_path.chmod(0o600)
+            domain = f"gui/{os.getuid()}"
+            bootstrapped = subprocess.run(
+                ["/bin/launchctl", "bootstrap", domain, str(plist_path)],
+                text=True,
+                capture_output=True,
+            )
+            if bootstrapped.returncode != 0:
+                self.skipTest("isolated LaunchAgent unavailable")
+            try:
+                state_path = home / ".codex/feishu-bridge/state.json"
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "pending_inputs": [],
+                            "pending_replies": [],
+                            "pending_task_creations": {},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                state_path.chmod(0o600)
+                runtime_status = home / ".codex/feishu-bridge/runtime-status.json"
+                legacy_updated_at = time.time() - 3600
+                runtime_status.write_text(
+                    json.dumps(
+                        {
+                            "active_consumers": 3,
+                            "active_runs": 0,
+                            "updated_at": legacy_updated_at,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                runtime_status.chmod(0o600)
+                original_runtime_status = runtime_status.read_bytes()
+                original_runtime = runtime.read_bytes()
+                service_before = subprocess.run(
+                    ["/bin/launchctl", "print", f"{domain}/{label}"],
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                ).stdout
+
+                legacy_update = self._run_installer(
+                    package,
+                    home,
+                    {"CODEX_FEISHU_ALLOW_LEGACY_RUNTIME_DEFERRAL": "1"},
+                )
+
+                self.assertEqual(legacy_update.returncode, 0, legacy_update.stderr)
+                self.assertIn("legacy runtime sync deferred", legacy_update.stdout)
+                self.assertEqual(runtime.read_bytes(), original_runtime)
+                service_after = subprocess.run(
+                    ["/bin/launchctl", "print", f"{domain}/{label}"],
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                ).stdout
+                pid_before = next(
+                    line.strip() for line in service_before.splitlines() if "pid =" in line
+                )
+                pid_after = next(
+                    line.strip() for line in service_after.splitlines() if "pid =" in line
+                )
+                self.assertEqual(pid_after, pid_before)
+                status = json.loads(runtime_status.read_text(encoding="utf-8"))
+                self.assertEqual(status["active_consumers"], 3)
+                self.assertEqual(status["updated_at"], legacy_updated_at)
+                self.assertEqual(runtime_status.read_bytes(), original_runtime_status)
+
+                new_app_sync = self._run_installer(package, home)
+                self.assertEqual(new_app_sync.returncode, 75)
+                self.assertIn(
+                    "does not support safe runtime updates",
+                    new_app_sync.stderr,
+                )
+                self.assertEqual(runtime.read_bytes(), original_runtime)
+            finally:
+                subprocess.run(
+                    ["/bin/launchctl", "bootout", f"{domain}/{label}"],
+                    text=True,
+                    capture_output=True,
+                )
+
+    def test_supported_runtime_quiesces_via_socket_before_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package, home, config_path, _workflow_path, runtime = (
+                self._installer_fixture(Path(directory))
+            )
+            installer_source = (package / "install.sh").read_text(encoding="utf-8")
+            label = next(
+                line.split('"', 2)[1]
+                for line in installer_source.splitlines()
+                if line.startswith('label="')
+            )
+            lark_cli = package / "lark-cli"
+            lark_cli.write_text(
+                "#!/bin/zsh\ntrap 'exit 0' TERM INT\nwhile true; do /bin/sleep 1; done\n",
+                encoding="utf-8",
+            )
+            lark_cli.chmod(0o755)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "allowed_users": [
+                            {
+                                "open_id": "ou_test",
+                                "name": "Test",
+                                "allowed_projects": ["*"],
+                            }
+                        ],
+                        "allowed_chat_ids": [],
+                        "lark_cli_path": str(lark_cli),
+                        "codex_cli_path": str(lark_cli),
+                        "state_db_path": str(home / ".codex/sqlite/codex-dev.db"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path = home / ".codex/feishu-bridge/state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "pending_inputs": [],
+                        "pending_replies": [],
+                        "pending_task_creations": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path.chmod(0o600)
+            database = home / ".codex/sqlite/codex-dev.db"
+            database.parent.mkdir(parents=True)
+            database.write_bytes(b"test")
+            launch_agents = home / "Library/LaunchAgents"
+            launch_agents.mkdir(parents=True)
+            plist_path = launch_agents / f"{label}.plist"
+            with plist_path.open("wb") as handle:
+                plistlib.dump(
+                    {
+                        "Label": label,
+                        "ProgramArguments": [
+                            "/usr/bin/python3",
+                            str(package / "feishu_codex_bridge.py"),
+                        ],
+                        "WorkingDirectory": str(home),
+                        "EnvironmentVariables": {
+                            "HOME": str(home),
+                            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                        },
+                        "RunAtLoad": True,
+                        "KeepAlive": True,
+                    },
+                    handle,
+                )
+            plist_path.chmod(0o600)
+            domain = f"gui/{os.getuid()}"
+            bootstrapped = subprocess.run(
+                ["/bin/launchctl", "bootstrap", domain, str(plist_path)],
+                text=True,
+                capture_output=True,
+            )
+            if bootstrapped.returncode != 0:
+                self.skipTest("isolated LaunchAgent unavailable")
+            try:
+                runtime_status = home / ".codex/feishu-bridge/runtime-status.json"
+                deadline = time.monotonic() + 10
+                status = {}
+                while time.monotonic() < deadline:
+                    try:
+                        status = json.loads(runtime_status.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        status = {}
+                    if status.get("update_protocol") == 1 and status.get("active_consumers") == 3:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(status.get("active_consumers"), 3)
+                runtime.write_text("existing runtime\n", encoding="utf-8")
+                runtime.chmod(0o644)
+
+                result = self._run_installer(package, home)
+                bridge_log = home / ".codex/log/feishu-bridge.log"
+
+                log_text = (
+                    bridge_log.read_text(encoding="utf-8")
+                    if bridge_log.is_file()
+                    else ""
+                )
+                self.assertEqual(result.returncode, 0, result.stderr + log_text)
+                self.assertEqual(
+                    runtime.read_bytes(),
+                    (package / "feishu_codex_bridge.py").read_bytes(),
+                )
+                self.assertFalse(
+                    (home / ".codex/feishu-bridge/runtime-update-request.json").exists()
+                )
+            finally:
+                subprocess.run(
+                    ["/bin/launchctl", "bootout", f"{domain}/{label}"],
+                    text=True,
+                    capture_output=True,
+                )
 
     def test_preflight_covers_all_sources_and_private_state_before_runtime_copy(self):
         source = INSTALL_PATH.read_text(encoding="utf-8")
@@ -1143,10 +1376,293 @@ class WorkflowBridgeTests(unittest.TestCase):
         )
         self.bridge.WORKFLOW_SOCKET_PATH = directory / "workflow-notifications.sock"
         self.bridge.WORKFLOW_CONTROL_SOCKET_PATH = directory / "workflow-control.sock"
+        self.bridge.RUNTIME_UPDATE_REQUEST_PATH = directory / "runtime-update-request.json"
 
     def tearDown(self):
         self.bridge.stop_workflow_socket_server()
         self.temporary.cleanup()
+
+    def test_runtime_update_quiesce_requires_valid_nonce_and_all_work_drained(self):
+        request_path = self.bridge.RUNTIME_UPDATE_REQUEST_PATH
+        nonce = "a" * 32
+        ack_directory = self.bridge.runtime_update_ack_directory()
+        ack_directory.mkdir(mode=0o700, exist_ok=True)
+        ack_directory.chmod(0o700)
+        ack_path = ack_directory / f"runtime-update-ack-{nonce}.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(ack_path))
+        ack_path.chmod(0o600)
+        try:
+            request_path.write_text(
+                json.dumps(
+                    {
+                        "protocol": 1,
+                        "nonce": nonce,
+                        "created_at": time.time(),
+                        "ack_path": str(ack_path),
+                        "installer_pid": os.getpid(),
+                        "helper_pid": os.getpid(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(self.bridge.requested_update_quiesce_nonce(), nonce)
+            request_path.write_text(
+                json.dumps(
+                    {
+                        "protocol": 1,
+                        "nonce": "not-a-nonce",
+                        "created_at": time.time(),
+                        "ack_path": str(ack_path),
+                        "installer_pid": os.getpid(),
+                        "helper_pid": os.getpid(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(self.bridge.requested_update_quiesce_nonce(), "")
+        finally:
+            listener.close()
+            ack_path.unlink(missing_ok=True)
+
+        events = queue.Queue()
+        self.bridge._consumer_reader_threads.clear()
+        self.bridge._event_lanes.clear()
+        self.bridge._active_runs.clear()
+        self.bridge.save_state(
+            {
+                "pending_inputs": [],
+                "pending_replies": [],
+                "pending_task_creations": {},
+            }
+        )
+        self.assertTrue(self.bridge.update_quiesce_ready(events))
+
+        events.put({"type": "im.message.receive_v1"})
+        self.assertFalse(self.bridge.update_quiesce_ready(events))
+        events.get_nowait()
+        self.bridge._active_runs["run"] = {"outcome": "desktop_retrying"}
+        self.assertFalse(self.bridge.update_quiesce_ready(events))
+        self.bridge._active_runs.clear()
+        state = self.bridge.load_state()
+        state["pending_inputs"] = [{"ready": False}]
+        self.bridge.save_state(state)
+        self.assertFalse(self.bridge.update_quiesce_ready(events))
+
+        state["pending_inputs"] = []
+        self.bridge.save_state(state)
+        self.bridge._promlight_pending_statuses["task"] = (
+            "working",
+            "bridge_run",
+            False,
+            time.time(),
+            "",
+            "",
+        )
+        self.assertFalse(self.bridge.update_quiesce_ready(events))
+        self.bridge._promlight_pending_statuses.clear()
+        self.bridge._promlight_pending_lamps["lamp"] = True
+        self.assertFalse(self.bridge.update_quiesce_ready(events))
+        self.bridge._promlight_pending_lamps.clear()
+        self.bridge._identity_refresh_pending["ou_test"] = ("", None, time.monotonic())
+        self.assertFalse(self.bridge.update_quiesce_ready(events))
+        self.bridge._identity_refresh_pending.clear()
+        self.bridge._queued_card_refresh_pending["task"] = time.monotonic()
+        self.assertFalse(self.bridge.update_quiesce_ready(events))
+        self.bridge._queued_card_refresh_pending.clear()
+        self.assertTrue(self.bridge.update_quiesce_ready(events))
+
+    def test_runtime_quiesce_ack_uses_one_shot_socket_and_tracked_completion(self):
+        request_path = self.bridge.RUNTIME_UPDATE_REQUEST_PATH
+        nonce = "c" * 32
+        ack_directory = self.bridge.runtime_update_ack_directory()
+        ack_directory.mkdir(mode=0o700, exist_ok=True)
+        ack_directory.chmod(0o700)
+        ack_path = ack_directory / f"runtime-update-ack-{nonce}.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(ack_path))
+        ack_path.chmod(0o600)
+        listener.listen(1)
+        helper = subprocess.Popen(["/bin/sleep", "10"])
+        request_path.write_text(
+            json.dumps(
+                {
+                    "protocol": 1,
+                    "nonce": nonce,
+                    "created_at": time.time(),
+                    "ack_path": str(ack_path),
+                    "installer_pid": os.getpid(),
+                    "helper_pid": helper.pid,
+                }
+            ),
+            encoding="utf-8",
+        )
+        blocker = threading.Event()
+        worker = self.bridge.start_tracked_thread(target=blocker.wait)
+        try:
+            acknowledgement = self.bridge.connect_update_quiesce_ack()
+            self.assertIsNotNone(acknowledgement)
+            connected_nonce, connection = acknowledgement
+            accepted, _address = listener.accept()
+            self.assertFalse(self.bridge.update_quiesce_volatile_idle(queue.Queue()))
+            blocker.set()
+            worker.join(timeout=2)
+            self.assertTrue(self.bridge.update_quiesce_volatile_idle(queue.Queue()))
+            self.bridge._last_runtime_status_signature = None
+            self.assertTrue(
+                self.bridge.acknowledge_update_quiesce(connected_nonce, connection)
+            )
+            self.assertEqual(accepted.recv(128).decode().strip(), nonce)
+            accepted.close()
+            connection.close()
+        finally:
+            blocker.set()
+            helper.terminate()
+            helper.wait(timeout=2)
+            listener.close()
+            ack_path.unlink(missing_ok=True)
+
+    def test_runtime_quiesce_freeze_rechecks_tracked_generation(self):
+        events = queue.Queue()
+        self.bridge._consumer_reader_threads.clear()
+        self.bridge._event_lanes.clear()
+        self.bridge._active_runs.clear()
+        self.bridge.save_state(
+            {
+                "pending_inputs": [],
+                "pending_replies": [],
+                "pending_task_creations": {},
+            }
+        )
+        self.bridge.request_update_quiesce(0, None)
+        self.bridge._update_quiesce_producers_closed = True
+
+        def change_generation(_events):
+            self.assertTrue(
+                self.bridge.tracked_operation_started(allow_quiescing_root=True)
+            )
+            self.bridge.tracked_operation_finished()
+            return True
+
+        with mock.patch.object(
+            self.bridge,
+            "update_quiesce_ready",
+            side_effect=change_generation,
+        ):
+            self.assertFalse(self.bridge.freeze_update_quiesce_if_ready(events))
+        self.assertTrue(self.bridge.freeze_update_quiesce_if_ready(events))
+        self.assertFalse(self.bridge.tracked_operation_started())
+
+    def test_event_taken_before_quiesce_is_admitted_without_leaving_a_ghost_lane(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def dispatch(_event):
+            started.set()
+            release.wait(2)
+
+        self.bridge.request_update_quiesce(0, None)
+        with mock.patch.object(self.bridge, "dispatch_event", side_effect=dispatch):
+            self.bridge.submit_event(
+                {"type": "im.message.receive_v1", "message_id": "om_accepted"},
+                accepted_before_quiesce=True,
+            )
+            self.assertTrue(started.wait(1))
+            with self.bridge._tracked_operations_condition:
+                self.assertEqual(self.bridge._tracked_operations, 1)
+            release.set()
+            with self.bridge._tracked_operations_condition:
+                self.assertTrue(
+                    self.bridge._tracked_operations_condition.wait_for(
+                        lambda: self.bridge._tracked_operations == 0,
+                        timeout=2,
+                    )
+                )
+        self.assertFalse(self.bridge._event_lanes)
+
+        with self.assertRaisesRegex(RuntimeError, "rejects new background work"):
+            self.bridge.submit_event(
+                {"type": "im.message.receive_v1", "message_id": "om_late"}
+            )
+        self.assertFalse(self.bridge._event_lanes)
+
+    def test_runtime_quiesce_installer_pid_is_the_post_ack_lease(self):
+        nonce = "d" * 32
+        ack_directory = self.bridge.runtime_update_ack_directory()
+        ack_directory.mkdir(mode=0o700, exist_ok=True)
+        ack_directory.chmod(0o700)
+        ack_path = ack_directory / f"runtime-update-ack-{nonce}.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(ack_path))
+        ack_path.chmod(0o600)
+        listener.listen(1)
+        installer = subprocess.Popen(["/bin/sleep", "10"])
+        helper = subprocess.Popen(["/bin/sleep", "10"])
+        self.bridge.RUNTIME_UPDATE_REQUEST_PATH.write_text(
+            json.dumps(
+                {
+                    "protocol": 1,
+                    "nonce": nonce,
+                    "created_at": time.time(),
+                    "ack_path": str(ack_path),
+                    "installer_pid": installer.pid,
+                    "helper_pid": helper.pid,
+                }
+            ),
+            encoding="utf-8",
+        )
+        try:
+            acknowledgement = self.bridge.connect_update_quiesce_ack()
+            self.assertIsNotNone(acknowledgement)
+            connected_nonce, connection = acknowledgement
+            accepted, _address = listener.accept()
+            self.bridge._last_runtime_status_signature = None
+            self.assertTrue(
+                self.bridge.acknowledge_update_quiesce(connected_nonce, connection)
+            )
+            self.assertEqual(accepted.recv(128).decode().strip(), nonce)
+            accepted.close()
+            self.assertFalse(self.bridge._update_quiesce_cancelled.wait(0.1))
+            helper.terminate()
+            helper.wait(timeout=2)
+            self.assertTrue(self.bridge._update_quiesce_cancelled.wait(2))
+            connection.close()
+        finally:
+            for process in (installer, helper):
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=2)
+            listener.close()
+            ack_path.unlink(missing_ok=True)
+
+    def test_stop_consumers_escalates_from_term_to_kill(self):
+        self.bridge._consumers.clear()
+        self.bridge._consumer_reader_threads.clear()
+        consumer = subprocess.Popen(
+            ["/bin/sh", "-c", "trap '' TERM; while :; do sleep 1; done"],
+            stdout=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        self.bridge._consumers.append(consumer)
+        try:
+            time.sleep(0.1)
+            self.assertTrue(self.bridge.stop_consumers())
+            self.assertIsNotNone(consumer.poll())
+        finally:
+            if consumer.poll() is None:
+                os.killpg(os.getpgid(consumer.pid), 9)
+                consumer.wait(timeout=2)
+
+    def test_runtime_status_advertises_quiesce_protocol_and_nonce(self):
+        runtime_status = self.bridge.STATE_PATH.with_name("runtime-status.json")
+        self.bridge._quiesced_update_nonce = "b" * 32
+        self.bridge._last_runtime_status_signature = None
+        self.bridge.write_runtime_status()
+
+        payload = json.loads(runtime_status.read_text(encoding="utf-8"))
+        self.assertEqual(payload["update_protocol"], 1)
+        self.assertEqual(payload["quiesced_nonce"], "b" * 32)
 
     def test_expired_cli_fallback_is_removed_when_card_is_opened(self):
         state = self.bridge.load_state()
@@ -2437,10 +2953,19 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         self.assertIn("/usr/bin/shlock", helper)
         self.assertIn("destination_version_before", helper)
         self.assertIn("destination_build_before", helper)
-        self.assertIn("destination changed while update was waiting", helper)
+        self.assertIn("destination changed before replacement", helper)
         self.assertIn('Contents/Resources/bridge/install.sh', helper)
         self.assertIn('"active_consumers"', helper)
+        self.assertIn('payload.get("update_protocol") == 1', helper)
+        self.assertIn("runtime_sync_deferred=1", helper)
         self.assertIn("new runtime failed health handshake", helper)
+        self.assertIn("--update-launch-ack-path", helper)
+        self.assertIn("select.KQ_FILTER_VNODE", helper)
+        self.assertIn("select.KQ_FILTER_PROC", helper)
+        self.assertIn("deadline = time.monotonic() + 10", helper)
+        self.assertNotIn("/bin/sleep", helper)
+        self.assertIn("new app failed launch handshake", helper)
+        self.assertEqual(helper.count('/usr/bin/open "${destination}"'), 1)
         self.assertIn("previous runtime restored", helper)
 
     def test_sparkle_runtime_sync_keeps_health_rollback(self):
@@ -2471,7 +2996,71 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         self.assertGreaterEqual(installer.count("exit 75"), 2)
         self.assertIn("Close the idle-check race", installer)
         self.assertIn('or active_runs != 0', installer)
+        self.assertIn("runtime-update-request.json", installer)
+        self.assertIn('["/bin/launchctl", "kill", "SIGUSR1", service_target]', installer)
+        self.assertIn("listener.accept()", installer)
+        handshake = installer.split("coproc {", 1)[1].split(
+            "# Close the idle-check race", 1
+        )[0]
+        self.assertNotIn("/bin/sleep", handshake)
+        self.assertNotIn("for _attempt", handshake)
+        self.assertIn('runtime.get("quiesced_nonce") != nonce', installer)
+        self.assertIn('runtime.get("active_consumers") != 0', installer)
+        self.assertIn('"${parent_command}" == *app_update.sh*', installer)
+        self.assertIn("legacy runtime sync deferred until a safe stop window", installer)
         self.assertIn("updateRuntimeWithHealthRollback", source)
+
+    def test_first_sparkle_migration_keeps_new_app_when_legacy_runtime_defers(self):
+        helper = (ROOT / "Resources/bridge/app_update.sh").read_text(encoding="utf-8")
+        self.assertIn("CODEX_FEISHU_ALLOW_LEGACY_RUNTIME_DEFERRAL=1", helper)
+        installer = (ROOT / "Resources/bridge/install.sh").read_text(encoding="utf-8")
+        legacy = installer.split('if [[ "${runtime_update_protocol}" != "1" ]]', 1)[1].split(
+            'coproc {', 1
+        )[0]
+        self.assertIn('"${parent_command}" == *app_update.sh*', legacy)
+        self.assertIn("legacy runtime sync deferred until a safe stop window", legacy)
+        self.assertNotIn("runtime-status.json", legacy)
+        self.assertIn("exit 0", legacy)
+
+        source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('result.status == 75', source)
+        self.assertIn("停止一次桥接运行", source)
+        self.assertIn("acknowledgeLegacyUpdateLaunchIfRequested()", source)
+        self.assertIn('"--update-launch-ack-path"', source)
+        launch = source.split("func applicationDidFinishLaunching", 1)[1].split(
+            "func applicationShouldHandleReopen", 1
+        )[0]
+        self.assertLess(
+            launch.index("createWindowIfNeeded()"),
+            launch.index("acknowledgeLegacyUpdateLaunchIfRequested()"),
+        )
+        self.assertLess(
+            launch.index("acknowledgeLegacyUpdateLaunchIfRequested()"),
+            launch.index("model.startUpdaterAndSynchronizeRuntime()"),
+        )
+        self.assertIn("DispatchQueue.main.async { [weak self]", launch)
+        stop_flow = source.split("func toggleBridge()", 1)[1].split(
+            "func setLoginAutostartEnabled", 1
+        )[0]
+        self.assertIn("synchronizeRuntimeIfReady()", stop_flow)
+
+    def test_runtime_quiesce_stops_intake_and_waits_for_every_lane(self):
+        bridge = BRIDGE_PATH.read_text(encoding="utf-8")
+        self.assertIn("signal.signal(signal.SIGUSR1, request_update_quiesce)", bridge)
+        self.assertIn("connect_update_quiesce_ack()", bridge)
+        self.assertIn("acknowledge_update_quiesce(", bridge)
+        self.assertIn("start_tracked_thread(", bridge)
+        readiness = bridge.split("def update_quiesce_volatile_idle", 1)[1].split(
+            "def stop(", 1
+        )[0]
+        self.assertIn("_consumer_reader_threads", readiness)
+        self.assertIn("_event_lanes", readiness)
+        self.assertIn("_active_runs", readiness)
+        self.assertIn("pending_inputs(state)", readiness)
+        self.assertIn('state.get("pending_replies", [])', readiness)
+        self.assertIn('state.get("pending_task_creations", {})', readiness)
 
     def test_all_app_install_paths_share_the_same_update_lock(self):
         for relative_path in (

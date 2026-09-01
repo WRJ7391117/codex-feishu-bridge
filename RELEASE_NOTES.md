@@ -4,7 +4,9 @@
 
 - Replaces the App's custom GitHub Release discovery loop with Sparkle 2.9.6, using a signed appcast and launch or Bridge-event-triggered checks, without scheduled polling.
 - Downloads verified updates automatically, but holds both automatic and interactive installation handlers until active runs and all durable Bridge queues are empty.
-- Migrates the existing automatic-update preference into Sparkle, keeps the old update assets for the one-time 1.11.12 transition, and retries bundled runtime synchronization after Bridge work becomes idle.
+- Migrates the existing automatic-update preference into Sparkle and keeps the new App installed during the one-time 1.11.12 transition even when its legacy runtime cannot safely drain; stopping Bridge once completes that first runtime sync.
+- Requires a one-shot launch acknowledgement from the new App before the legacy updater removes its rollback copy, and imports Developer ID plus App Store Connect credentials into an ephemeral CI keychain before signing and notarization.
+- Adds a nonce-based runtime quiesce handshake for later updates: event intake stops, in-flight lanes and durable queues drain, and only then may the installer replace and restart the background component.
 - Generates and validates `appcast.xml` in the tag Release workflow with a stable Ed25519 key whose private half is limited to GitHub Actions Secrets and the release Mac's login Keychain.
 
 ## 1.11.12 (build 91)
@@ -29,7 +31,7 @@
 
 - Restarts the complete Bridge through LaunchAgent recovery when any one of the three Feishu event consumers exits, preventing silent loss of message, card, or menu events.
 - Fails closed when the persisted Task state is corrupt, unreadable, or insecure, while retaining first-run initialization for a genuinely missing state file.
-- Serializes all macOS App installation paths, rechecks the installed version/build after waiting, and keeps the previous App/runtime until the new runtime passes a fresh health handshake.
+- Serializes all macOS App installation paths, rechecks the installed version/build before replacement, and keeps the previous App/runtime until the new runtime passes a fresh health handshake.
 - Retries one transient Feishu card-patch failure immediately before moving the update to the durable background retry queue.
 
 ## 1.11.8 (build 87)

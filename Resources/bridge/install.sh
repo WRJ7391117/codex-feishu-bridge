@@ -11,8 +11,36 @@ plist="${launch_agents_dir}/${label}.plist"
 legacy_plist="${launch_agents_dir}/${legacy_label}.plist"
 resource_dir="${0:A:h}"
 was_running=0
+quiesce_request="${HOME}/.codex/feishu-bridge/runtime-update-request.json"
+quiesce_nonce=""
+quiesce_helper_pid=""
 
 umask 077
+
+cleanup_quiesce_request() {
+    if [[ -n "${quiesce_helper_pid}" ]]; then
+        /bin/kill "${quiesce_helper_pid}" 2>/dev/null || true
+        wait "${quiesce_helper_pid}" 2>/dev/null || true
+        quiesce_helper_pid=""
+    fi
+    if [[ -z "${quiesce_nonce}" ]]; then
+        return
+    fi
+    /usr/bin/python3 - "${quiesce_request}" "${quiesce_nonce}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit(0)
+if isinstance(payload, dict) and payload.get("nonce") == sys.argv[2]:
+    path.unlink(missing_ok=True)
+PY
+}
+trap cleanup_quiesce_request EXIT HUP INT TERM
 
 # Preflight every source and existing destination before changing local state.
 if ! /usr/bin/python3 -B - \
@@ -274,6 +302,211 @@ fi
 if /bin/launchctl print "${domain}/${label}" >/dev/null 2>&1 || \
    /bin/launchctl print "${domain}/${legacy_label}" >/dev/null 2>&1; then
     was_running=1
+fi
+
+if (( was_running )); then
+    runtime_update_protocol="$(/usr/bin/python3 - \
+        "${HOME}/.codex/feishu-bridge/runtime-status.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    payload = {}
+print(payload.get("update_protocol", 0) if isinstance(payload, dict) else 0)
+PY
+    )"
+    if [[ "${runtime_update_protocol}" != "1" ]]; then
+        parent_command="$(/bin/ps -p "${PPID}" -o command= 2>/dev/null || true)"
+        if [[ "${CODEX_FEISHU_ALLOW_LEGACY_RUNTIME_DEFERRAL:-0}" == "1" || \
+              "${parent_command}" == *app_update.sh* ]]; then
+            print "app installed; legacy runtime sync deferred until a safe stop window"
+            exit 0
+        fi
+        print -u2 "running Bridge does not support safe runtime updates"
+        exit 75
+    fi
+    coproc {
+    /usr/bin/python3 - \
+        "${HOME}/.codex/feishu-bridge/runtime-status.json" \
+        "${quiesce_request}" \
+        "${domain}/${label}" \
+        "$$" <<'PY'
+import json
+import os
+from pathlib import Path
+import secrets
+import select
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+status_path = Path(sys.argv[1])
+request_path = Path(sys.argv[2])
+service_target = sys.argv[3]
+installer_pid = int(sys.argv[4])
+if installer_pid <= 1:
+    raise SystemExit("invalid runtime update installer process")
+try:
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    raise SystemExit("running Bridge status changed before quiesce") from exc
+if not isinstance(status, dict) or status.get("update_protocol") != 1:
+    raise SystemExit("running Bridge status changed before quiesce")
+request_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+request_path.parent.chmod(0o700)
+nonce = secrets.token_hex(16)
+ack_directory = Path("/tmp") / f"codex-feishu-bridge-{os.getuid()}"
+try:
+    ack_directory.mkdir(mode=0o700)
+except FileExistsError:
+    directory_stat = ack_directory.lstat()
+    if (
+        not ack_directory.is_dir()
+        or ack_directory.is_symlink()
+        or directory_stat.st_uid != os.getuid()
+        or directory_stat.st_mode & 0o077
+    ):
+        raise SystemExit("unsafe runtime update acknowledgement directory")
+ack_directory.chmod(0o700)
+ack_path = ack_directory / f"runtime-update-ack-{nonce}.sock"
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(request_path, flags, 0o600)
+except FileExistsError as exc:
+    try:
+        existing = json.loads(request_path.read_text(encoding="utf-8"))
+        created_at = float(existing.get("created_at")) if isinstance(existing, dict) else 0
+    except (OSError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        created_at = 0
+    if created_at <= 0 or time.time() - created_at <= 300:
+        raise SystemExit("another runtime update quiesce is in progress") from exc
+    request_path.unlink(missing_ok=True)
+    descriptor = os.open(request_path, flags, 0o600)
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+completed = False
+stopping = False
+active_connection = None
+
+def stop_listener(_signum, _frame):
+    global stopping, active_connection
+    stopping = True
+    listener.close()
+    if active_connection is not None:
+        active_connection.close()
+
+signal.signal(signal.SIGTERM, stop_listener)
+signal.signal(signal.SIGINT, stop_listener)
+installer_monitor = select.kqueue()
+installer_monitor.control(
+    [
+        select.kevent(
+            installer_pid,
+            filter=select.KQ_FILTER_PROC,
+            flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+            fflags=select.KQ_NOTE_EXIT,
+        )
+    ],
+    0,
+    0,
+)
+
+def watch_installer():
+    try:
+        installer_monitor.control(None, 1, None)
+    except OSError:
+        pass
+    stop_listener(0, None)
+
+threading.Thread(target=watch_installer, daemon=True).start()
+try:
+    listener.bind(str(ack_path))
+    ack_path.chmod(0o600)
+    listener.listen(1)
+    listener.settimeout(30)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "protocol": 1,
+                "nonce": nonce,
+                "created_at": time.time(),
+                "ack_path": str(ack_path),
+                "installer_pid": installer_pid,
+                "helper_pid": os.getpid(),
+            },
+            handle,
+            separators=(",", ":"),
+        )
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    subprocess.run(
+        ["/bin/launchctl", "kill", "SIGUSR1", service_target],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    announced = False
+    while True:
+        try:
+            connection, _address = listener.accept()
+        except socket.timeout:
+            if not announced:
+                raise
+            continue
+        except OSError:
+            if stopping:
+                break
+            raise
+        active_connection = connection
+        with connection:
+            connection.settimeout(300)
+            chunks = []
+            total = 0
+            while total <= 128:
+                chunk = connection.recv(129 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if b"\n" in chunk:
+                    break
+            acknowledgement = b"".join(chunks).split(b"\n", 1)[0].decode(
+                "ascii", "strict"
+            )
+        active_connection = None
+        if acknowledgement != nonce:
+            raise RuntimeError("runtime returned an invalid quiesce acknowledgement")
+        if not announced:
+            completed = True
+            announced = True
+            print(nonce, flush=True)
+            listener.settimeout(None)
+finally:
+    listener.close()
+    installer_monitor.close()
+    ack_path.unlink(missing_ok=True)
+    if not completed:
+        try:
+            payload = json.loads(request_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict) and payload.get("nonce") == nonce:
+            request_path.unlink(missing_ok=True)
+PY
+    }
+    quiesce_helper_pid="$!"
+    if ! IFS= read -r -p quiesce_nonce; then
+        wait "${quiesce_helper_pid}" 2>/dev/null || true
+        quiesce_helper_pid=""
+        print -u2 "runtime update deferred because Bridge did not quiesce"
+        exit 75
+    fi
 fi
 
 /usr/bin/python3 - \
@@ -653,7 +886,8 @@ PY
 if ! /usr/bin/python3 - \
     "${HOME}/.codex/feishu-bridge/state.json" \
     "${HOME}/.codex/feishu-bridge/runtime-status.json" \
-    "${was_running}" <<'PY'
+    "${was_running}" \
+    "${quiesce_nonce}" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -672,6 +906,7 @@ def read_required_mapping(path: Path):
 
 state = read_required_mapping(Path(sys.argv[1]))
 runtime = read_required_mapping(Path(sys.argv[2]))
+nonce = sys.argv[4]
 pending_inputs = state.get("pending_inputs", [])
 pending_replies = state.get("pending_replies", [])
 pending_creations = state.get("pending_task_creations", {})
@@ -686,6 +921,15 @@ if (
     or pending_replies
     or pending_creations
     or active_runs != 0
+    or (
+        int(sys.argv[3]) != 0
+        and (
+            not nonce
+            or runtime.get("update_protocol") != 1
+            or runtime.get("quiesced_nonce") != nonce
+            or runtime.get("active_consumers") != 0
+        )
+    )
 ):
     raise SystemExit("bridge became busy during installation")
 PY
@@ -694,18 +938,18 @@ then
 fi
 
 if /bin/launchctl print "${domain}/${legacy_label}" >/dev/null 2>&1; then
-    /bin/launchctl bootout "${domain}/${legacy_label}" || true
+    /bin/launchctl bootout "${domain}/${legacy_label}"
 fi
 if /bin/launchctl print "${domain}/${label}" >/dev/null 2>&1; then
-    /bin/launchctl bootout "${domain}/${label}" || true
+    /bin/launchctl bootout "${domain}/${label}"
 fi
-for _attempt in {1..100}; do
-    if ! /bin/launchctl print "${domain}/${legacy_label}" >/dev/null 2>&1 && \
-       ! /bin/launchctl print "${domain}/${label}" >/dev/null 2>&1; then
-        break
-    fi
-    /bin/sleep 0.1
-done
+if [[ -n "${quiesce_helper_pid}" ]]; then
+    /bin/kill "${quiesce_helper_pid}" 2>/dev/null || true
+    wait "${quiesce_helper_pid}" 2>/dev/null || true
+    quiesce_helper_pid=""
+fi
+cleanup_quiesce_request
+quiesce_nonce=""
 if [[ -f "${legacy_plist}" && ! -f "${legacy_plist}.migrated-backup" ]]; then
     /bin/mv "${legacy_plist}" "${legacy_plist}.migrated-backup"
 fi

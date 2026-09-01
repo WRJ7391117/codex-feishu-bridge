@@ -35,6 +35,53 @@ private enum PromLightCompatibility {
     static let legacyRelayAppVersion = "0.2.3"
 }
 
+private func acknowledgeLegacyUpdateLaunchIfRequested() {
+    let arguments = ProcessInfo.processInfo.arguments
+    guard let pathIndex = arguments.firstIndex(of: "--update-launch-ack-path"),
+          let nonceIndex = arguments.firstIndex(of: "--update-launch-ack-nonce"),
+          arguments.indices.contains(pathIndex + 1),
+          arguments.indices.contains(nonceIndex + 1) else {
+        return
+    }
+    let nonce = arguments[nonceIndex + 1]
+    guard nonce.count == 32,
+          nonce.allSatisfy({ $0.isHexDigit }) else {
+        return
+    }
+    let root = URL(fileURLWithPath: "/tmp", isDirectory: true)
+        .appendingPathComponent("codex-feishu-bridge-\(getuid())", isDirectory: true)
+    let directory = root.appendingPathComponent(
+        "app-launch-ack-\(nonce)",
+        isDirectory: true
+    )
+    let expected = directory.appendingPathComponent("ready.json")
+        .standardizedFileURL
+    let destination = URL(fileURLWithPath: arguments[pathIndex + 1])
+        .standardizedFileURL
+    guard destination == expected,
+          let attributes = try? FileManager.default.attributesOfItem(
+              atPath: directory.path
+          ),
+          let owner = attributes[.ownerAccountID] as? NSNumber,
+          owner.uint32Value == getuid(),
+          let permissions = attributes[.posixPermissions] as? NSNumber,
+          permissions.intValue & 0o077 == 0 else {
+        return
+    }
+    let payload: [String: String] = [
+        "nonce": nonce,
+        "version": Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "",
+        "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")
+            as? String ?? "",
+    ]
+    guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+        return
+    }
+    try? data.write(to: destination, options: .atomic)
+}
+
 private struct CommandResult {
     let status: Int32
     let output: String
@@ -909,6 +956,9 @@ private final class BridgeViewModel: ObservableObject {
         let result = bridge.updateRuntimeWithHealthRollback()
         if result.status == 0 {
             runtimeSynchronizationAttemptedWhileIdle = false
+        } else if result.status == 75 {
+            alertTitle = "App 已更新"
+            alertMessage = "当前后台组件来自旧版本，不能安全自动排空。App 已正常升级；请在方便时停止一次桥接运行，后台组件会自动同步。"
         } else {
             presentError(
                 title: "安装后台组件失败",
@@ -1020,6 +1070,11 @@ private final class BridgeViewModel: ObservableObject {
             )
         }
         refresh()
+        if action == "stop", result.status == 0 {
+            runtimeSynchronizationAttemptedWhileIdle = false
+            synchronizeRuntimeIfReady()
+            refresh()
+        }
     }
 
     func setLoginAutostartEnabled(_ enabled: Bool) {
@@ -3428,7 +3483,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildApplicationMenu()
         buildStatusItem()
-        model.startUpdaterAndSynchronizeRuntime()
         createWindowIfNeeded()
         showMainWindow()
         refreshStatus()
@@ -3442,6 +3496,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { [weak self] in
                 self?.model.prepareConnectionSetup()
             }
+        }
+        acknowledgeLegacyUpdateLaunchIfRequested()
+        DispatchQueue.main.async { [weak self] in
+            self?.model.startUpdaterAndSynchronizeRuntime()
         }
     }
 

@@ -43,7 +43,7 @@ DeepOri Bridge 是独立开源工具，并非 OpenAI、飞书或 Lark 官方产�
 - 菜单栏保留随时开启、关闭和快速打开控制中心的入口
 - 用户级 LaunchAgent 常驻，异常退出后自动重启
 - App 内置修复卡片回执的专用 `lark-cli`，避免项目或 Task 已选中但飞书仍提示 `108002`
-- App 使用 Sparkle 2，在启动或收到新的飞书事件时检查签名 appcast，不做定时轮询；事件检查按上次检查时间限频，也可在控制中心手动检查。发现新版本后默认自动下载，存在运行、排队或待补发工作时会等到 Bridge 空闲后再安装；新后台组件必须恢复到三个事件消费者后才完成，否则回滚旧 runtime
+- App 使用 Sparkle 2，在启动或收到新的飞书事件时检查签名 appcast，不做定时轮询；事件检查按上次检查时间限频，也可在控制中心手动检查。发现新版本后默认自动下载，存在运行、排队或待补发工作时会等到 Bridge 空闲后再安装；后台更新先停止接收新事件并通过 nonce 握手确认所有事件通道和队列已排空，新组件恢复到三个事件消费者后才完成，否则回滚旧 runtime。`1.11.12` 首次迁移到该机制时 App 本体会正常升级，但旧 runtime 无法参与握手，需要在方便时停止一次桥接运行来完成后台同步
 - 支持 Apple Silicon 和 Intel Mac
 
 ## 原理
@@ -242,7 +242,7 @@ NOTARY_PROFILE="codex-feishu-notary" \
 ./scripts/build-app.sh
 ```
 
-没有这两个凭证时构建脚本只生成 ad-hoc 包，不会伪装成已公证。每次构建同时生成 `.sha256` 和 `update.json`；Release 工作流再使用 GitHub Actions Secret 中的 Sparkle 私钥生成 `appcast.xml`。同一私钥的恢复副本只保存在发布 Mac 的登录 Keychain，不写入仓库或日志。
+没有这两个凭证时构建脚本只生成 ad-hoc 包，不会伪装成已公证。每次构建同时生成 `.sha256` 和 `update.json`；Release 工作流从 `MACOS_CERTIFICATE_P12_BASE64`、`MACOS_CERTIFICATE_PASSWORD`、`MACOS_CODE_SIGN_IDENTITY`、`APPLE_NOTARY_KEY_P8_BASE64`、`APPLE_NOTARY_KEY_ID`、`APPLE_NOTARY_ISSUER_ID` 导入一次性签名/公证 Keychain，再使用 `SPARKLE_PRIVATE_KEY` 生成 `appcast.xml`，结束时删除 runner 上的临时凭据。同一 Sparkle 私钥的恢复副本只保存在发布 Mac 的登录 Keychain，不写入仓库或日志。
 
 发布时由版本标签触发 `.github/workflows/release.yml`，该工作流是 GitHub Release 的唯一发布入口。发布者只提交并推送版本代码，再推送与 App 版本一致的 `vX.Y.Z` 标签；不要提前手动执行 `gh release create`。工作流在 Developer ID 或公证凭据不可用时直接失败；凭据齐备时先创建并校验草稿 Release，再公开，且拒绝覆盖同版本的签名资产。`update.json` 与旧更新助手暂时保留，用于 `1.11.12` 升级到首个 Sparkle 版本。
 

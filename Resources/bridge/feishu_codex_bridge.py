@@ -78,6 +78,10 @@ WORKFLOW_DECISION_INBOX_PATH = (
 )
 WORKFLOW_SOCKET_PATH = HOME / ".codex/feishu-bridge/workflow-notifications.sock"
 WORKFLOW_CONTROL_SOCKET_PATH = HOME / ".codex/feishu-bridge/workflow-control.sock"
+RUNTIME_UPDATE_REQUEST_PATH = HOME / ".codex/feishu-bridge/runtime-update-request.json"
+RUNTIME_UPDATE_PROTOCOL = 1
+RUNTIME_UPDATE_REQUEST_MAX_AGE = 300.0
+RUNTIME_UPDATE_QUIESCE_MAX_SECONDS = 300.0
 
 
 def load_config() -> dict[str, Any]:
@@ -108,6 +112,7 @@ _workflow_decision_inbox = (
 )
 _workflow_server_socket: socket.socket | None = None
 _workflow_control_socket: socket.socket | None = None
+_workflow_server_threads: list[threading.Thread] = []
 _workflow_delivery_lock = threading.Lock()
 
 
@@ -459,6 +464,19 @@ _state_lock = InterprocessStateLock()
 _event_lanes_lock = threading.Lock()
 _event_lanes: dict[str, queue.Queue[dict[str, Any]]] = {}
 _shutdown_event = threading.Event()
+_update_quiesce_requested = threading.Event()
+_consumer_reader_threads: list[threading.Thread] = []
+_quiesced_update_nonce = ""
+_tracked_operations_condition = threading.Condition()
+_tracked_operations = 0
+_tracked_operations_generation = 0
+_tracked_operation_context = threading.local()
+_update_quiesce_state = "running"
+_update_quiesce_producers_closed = False
+_update_quiesce_frozen = threading.Event()
+_update_quiesce_cancelled = threading.Event()
+_update_quiesce_ack_sent = threading.Event()
+_quiesce_service_threads: list[threading.Thread] = []
 _ui_intent_lock = threading.Lock()
 _ui_intent_sequences: dict[str, int] = {}
 _identity_refresh_condition = threading.Condition()
@@ -1202,14 +1220,25 @@ def process_promlight_work_once() -> bool:
 
 
 def promlight_worker_loop() -> None:
-    while not _shutdown_event.is_set():
+    while not _shutdown_event.is_set() and not _update_quiesce_frozen.is_set():
         with _promlight_work_condition:
-            if not _promlight_pending_statuses and not _promlight_pending_lamps:
+            while (
+                not _promlight_pending_statuses
+                and not _promlight_pending_lamps
+                and not _shutdown_event.is_set()
+                and not _update_quiesce_frozen.is_set()
+            ):
                 _promlight_work_condition.wait(timeout=0.5)
+            if _shutdown_event.is_set() or _update_quiesce_frozen.is_set():
+                return
+        if not tracked_operation_started(allow_quiescing_root=True):
+            return
         try:
             process_promlight_work_once()
         except Exception as exc:
             log(f"PromLight worker failed: {type(exc).__name__}: {exc}")
+        finally:
+            tracked_operation_finished()
 
 
 def reconcile_promlight_state() -> bool:
@@ -1383,6 +1412,152 @@ def runtime_status_path() -> Path:
     return Path(configured).expanduser() if configured else STATE_PATH.with_name("runtime-status.json")
 
 
+def runtime_update_request() -> tuple[str, Path, int, int] | None:
+    try:
+        payload = json.loads(RUNTIME_UPDATE_REQUEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    nonce = payload.get("nonce") if isinstance(payload, dict) else None
+    protocol = payload.get("protocol") if isinstance(payload, dict) else None
+    created_at = payload.get("created_at") if isinstance(payload, dict) else None
+    if (
+        protocol != RUNTIME_UPDATE_PROTOCOL
+        or not isinstance(nonce, str)
+        or not isinstance(created_at, (int, float))
+        or isinstance(created_at, bool)
+        or not 0 <= time.time() - float(created_at) <= RUNTIME_UPDATE_REQUEST_MAX_AGE
+    ):
+        return None
+    if not re.fullmatch(r"[0-9a-f]{32}", nonce):
+        return None
+    raw_ack_path = payload.get("ack_path")
+    installer_pid = payload.get("installer_pid")
+    helper_pid = payload.get("helper_pid")
+    if (
+        not isinstance(raw_ack_path, str)
+        or not isinstance(installer_pid, int)
+        or isinstance(installer_pid, bool)
+        or installer_pid <= 1
+        or not isinstance(helper_pid, int)
+        or isinstance(helper_pid, bool)
+        or helper_pid <= 1
+    ):
+        return None
+    ack_path = Path(raw_ack_path)
+    ack_directory = Path("/tmp") / f"codex-feishu-bridge-{os.getuid()}"
+    if (
+        ack_path.parent != ack_directory
+        or ack_path.name != f"runtime-update-ack-{nonce}.sock"
+    ):
+        return None
+    try:
+        directory_stat = ack_directory.lstat()
+        ack_stat = ack_path.lstat()
+    except OSError:
+        return None
+    if (
+        not stat.S_ISDIR(directory_stat.st_mode)
+        or directory_stat.st_uid != os.getuid()
+        or directory_stat.st_mode & 0o077
+        or not stat.S_ISSOCK(ack_stat.st_mode)
+        or ack_stat.st_uid != os.getuid()
+        or ack_stat.st_mode & 0o077
+    ):
+        return None
+    return nonce, ack_path, installer_pid, helper_pid
+
+
+def runtime_update_ack_directory() -> Path:
+    return Path("/tmp") / f"codex-feishu-bridge-{os.getuid()}"
+
+
+def requested_update_quiesce_nonce() -> str:
+    request = runtime_update_request()
+    return request[0] if request is not None else ""
+
+
+def tracked_operation_started(*, allow_quiescing_root: bool = False) -> bool:
+    global _tracked_operations, _tracked_operations_generation
+
+    with _tracked_operations_condition:
+        depth = int(getattr(_tracked_operation_context, "depth", 0))
+        if _update_quiesce_state == "ready":
+            return False
+        if (
+            _update_quiesce_state == "quiescing"
+            and depth == 0
+            and not allow_quiescing_root
+        ):
+            return False
+        _tracked_operations += 1
+        _tracked_operations_generation += 1
+        _tracked_operations_condition.notify_all()
+        return True
+
+
+def tracked_operation_finished() -> None:
+    global _tracked_operations, _tracked_operations_generation
+
+    with _tracked_operations_condition:
+        _tracked_operations -= 1
+        _tracked_operations_generation += 1
+        _tracked_operations_condition.notify_all()
+
+
+def run_tracked_operation(
+    target: Callable[..., Any],
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any] | None = None,
+    *,
+    allow_quiescing_root: bool = False,
+) -> Any:
+    if not tracked_operation_started(
+        allow_quiescing_root=allow_quiescing_root,
+    ):
+        return None
+    return run_registered_operation(target, args, kwargs)
+
+
+def run_registered_operation(
+    target: Callable[..., Any],
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any] | None = None,
+) -> Any:
+    previous_depth = int(getattr(_tracked_operation_context, "depth", 0))
+    _tracked_operation_context.depth = previous_depth + 1
+    try:
+        return target(*args, **(kwargs or {}))
+    finally:
+        _tracked_operation_context.depth = previous_depth
+        tracked_operation_finished()
+
+
+def start_tracked_thread(
+    *,
+    target: Callable[..., Any],
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any] | None = None,
+    name: str | None = None,
+    allow_quiescing_root: bool = False,
+) -> threading.Thread:
+    if not tracked_operation_started(
+        allow_quiescing_root=allow_quiescing_root,
+    ):
+        raise RuntimeError("runtime update quiesce rejects new background work")
+    thread = threading.Thread(
+        target=run_registered_operation,
+        args=(target, args, kwargs),
+        daemon=True,
+        name=name,
+    )
+    try:
+        thread.start()
+    except Exception:
+        tracked_operation_finished()
+        raise
+    return thread
+
+
 def write_runtime_status(active_runs: int | None = None) -> None:
     global _last_runtime_status_signature
 
@@ -1405,6 +1580,7 @@ def write_runtime_status(active_runs: int | None = None) -> None:
         consumers,
         MAX_CONCURRENT_RUNS,
         _last_feishu_event_at,
+        _quiesced_update_nonce,
         usage_signature,
     )
     with _runtime_status_lock:
@@ -1418,6 +1594,8 @@ def write_runtime_status(active_runs: int | None = None) -> None:
                 "active_consumers": consumers,
                 "max_concurrent_runs": MAX_CONCURRENT_RUNS,
                 "last_feishu_event_at": _last_feishu_event_at,
+                "update_protocol": RUNTIME_UPDATE_PROTOCOL,
+                "quiesced_nonce": _quiesced_update_nonce,
                 "codex_usage": codex_usage,
                 "updated_at": time.time(),
             }
@@ -5817,7 +5995,12 @@ def workflow_socket_loop(server: socket.socket) -> None:
                 return
             continue
         with connection:
-            handle_workflow_socket_connection(connection)
+            connection.settimeout(2)
+            run_tracked_operation(
+                handle_workflow_socket_connection,
+                (connection,),
+                allow_quiescing_root=True,
+            )
 
 
 def handle_workflow_control_connection(connection: socket.socket) -> None:
@@ -5872,7 +6055,12 @@ def workflow_control_socket_loop(server: socket.socket) -> None:
                 return
             continue
         with connection:
-            handle_workflow_control_connection(connection)
+            connection.settimeout(2)
+            run_tracked_operation(
+                handle_workflow_control_connection,
+                (connection,),
+                allow_quiescing_root=True,
+            )
 
 
 def bind_workflow_socket(path: Path) -> socket.socket | None:
@@ -5920,23 +6108,26 @@ def start_workflow_socket_server() -> bool:
         return False
     _workflow_server_socket = server
     _workflow_control_socket = control
-    threading.Thread(
+    workflow_thread = threading.Thread(
         target=workflow_socket_loop,
         args=(server,),
         daemon=True,
         name="codex-feishu-workflow-socket",
-    ).start()
-    threading.Thread(
+    )
+    control_thread = threading.Thread(
         target=workflow_control_socket_loop,
         args=(control,),
         daemon=True,
         name="codex-feishu-workflow-control",
-    ).start()
+    )
+    _workflow_server_threads.extend([workflow_thread, control_thread])
+    workflow_thread.start()
+    control_thread.start()
     log("workflow notification endpoint ready")
     return True
 
 
-def stop_workflow_socket_server() -> None:
+def stop_workflow_socket_server() -> bool:
     global _workflow_control_socket, _workflow_server_socket
 
     if _workflow_server_socket is not None:
@@ -5951,6 +6142,10 @@ def stop_workflow_socket_server() -> None:
                 path.unlink()
         except OSError:
             pass
+    for server_thread in _workflow_server_threads:
+        if server_thread is not threading.current_thread():
+            server_thread.join(timeout=2)
+    return not any(thread.is_alive() for thread in _workflow_server_threads)
 
 
 def elapsed_text(started_at: float) -> str:
@@ -10351,14 +10546,21 @@ def schedule_queued_card_refresh(task_id: str) -> None:
 
 
 def identity_refresh_loop() -> None:
-    while not _shutdown_event.is_set():
+    while not _shutdown_event.is_set() and not _update_quiesce_frozen.is_set():
         with _identity_refresh_condition:
-            if not _identity_refresh_pending and not _queued_card_refresh_pending:
+            while (
+                not _identity_refresh_pending
+                and not _queued_card_refresh_pending
+                and not _shutdown_event.is_set()
+                and not _update_quiesce_frozen.is_set()
+            ):
                 _identity_refresh_condition.wait(timeout=0.5)
             if _shutdown_event.is_set():
                 return
-            if not _identity_refresh_pending and not _queued_card_refresh_pending:
-                continue
+            if _update_quiesce_frozen.is_set():
+                return
+            if not tracked_operation_started(allow_quiescing_root=True):
+                return
             if _identity_refresh_pending:
                 user_id, (change, task, queued_at) = _identity_refresh_pending.popitem()
                 operation = "identity_refresh"
@@ -10379,6 +10581,8 @@ def identity_refresh_loop() -> None:
                 f"queue_ms={round((started - queued_at) * 1000)} "
                 f"duration_ms={round((time.monotonic() - started) * 1000)}"
             )
+        finally:
+            tracked_operation_finished()
 
 
 def task_card_for_state(
@@ -10858,12 +11062,11 @@ def request_run_interrupt(run: dict[str, Any]) -> bool:
         ):
             return False
         run["interrupt_started"] = True
-    threading.Thread(
+    start_tracked_thread(
         target=interrupt_run,
         args=(run,),
-        daemon=True,
         name=f"codex-feishu-stop-{str(run['run_id'])[:8]}",
-    ).start()
+    )
     return True
 
 
@@ -11677,14 +11880,12 @@ def start_claimed_run(
                 + "完成后会自动回复结果。",
                 "running",
             )
-    worker = threading.Thread(
+    worker = start_tracked_thread(
         target=process_message_run,
         args=(run, content, image_keys, file_keys, raw_content, message_type),
-        daemon=True,
         name=f"codex-feishu-run-{str(run['run_id'])[:8]}",
     )
     run["worker"] = worker
-    worker.start()
     update_current_status_card(str(run["user_id"]))
 
 
@@ -12054,7 +12255,7 @@ def task_subscription_approval_observer_loop() -> None:
     followed_users: dict[str, frozenset[str]] = {}
     next_refresh = 0.0
     next_connect = 0.0
-    while not _shutdown_event.is_set():
+    while not _shutdown_event.is_set() and not _update_quiesce_requested.is_set():
         now = time.monotonic()
         if now >= next_refresh:
             next_refresh = now + TASK_SUBSCRIPTION_POLL_SECONDS
@@ -13362,12 +13563,11 @@ def _handle_message_event_once(event: dict[str, Any]) -> None:
             f"正在项目“{pending_project}”中新建 Task…",
             "new-task-creating",
         )
-        threading.Thread(
+        start_tracked_thread(
             target=complete_task_creation,
             args=(message_id, user_id, pending_project, content),
-            daemon=True,
             name="codex-feishu-create-task",
-        ).start()
+        )
         return
 
     if not image_keys and not file_keys and content in {"帮助", "/help", "help"}:
@@ -13585,12 +13785,11 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
                 if action == "compact_current_task"
                 else refresh_task_settings_card
             )
-            threading.Thread(
+            start_tracked_thread(
                 target=target,
                 args=(user_id, message_id, task_id),
-                daemon=True,
                 name=f"codex-feishu-task-settings-{task_id[:8]}",
-            ).start()
+            )
             return
         if action in {
             "show_task_subscriptions",
@@ -13819,11 +14018,10 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
                         "正在刷新用量",
                     ),
                 )
-            threading.Thread(
+            start_tracked_thread(
                 target=refresh_codex_usage_card,
                 args=(message_id,),
-                daemon=True,
-            ).start()
+            )
             return
         if action == "show_codex_usage":
             with _state_lock:
@@ -13844,11 +14042,10 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
             scope = "daily" if action == "show_daily_task_usage_analysis" else "period"
             if message_id:
                 patch_card(message_id, build_task_usage_loading_card(scope))
-            threading.Thread(
+            start_tracked_thread(
                 target=refresh_task_usage_analysis_card,
                 args=(user_id, message_id, scope),
-                daemon=True,
-            ).start()
+            )
             return
         if action == "cancel_task_switch":
             with _state_lock:
@@ -14203,7 +14400,7 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
                         "resolving",
                     ),
                 )
-            threading.Thread(
+            start_tracked_thread(
                 target=handle_subscription_approval_action,
                 args=(
                     user_id,
@@ -14212,9 +14409,8 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
                     action == "subscription_approve_once",
                     event,
                 ),
-                daemon=True,
                 name=f"codex-feishu-subscription-approval-{request_id[:8]}",
-            ).start()
+            )
             return
         run = active_run(str(payload.get("run_id") or ""))
         if (
@@ -14240,12 +14436,11 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
                 approval = run.get("approvals", {}).get(request_id)
             if not isinstance(approval, dict) or approval.get("resolved"):
                 return
-            threading.Thread(
+            start_tracked_thread(
                 target=handle_approval_action,
                 args=(run, approval, action == "approve_once", event),
-                daemon=True,
                 name=f"codex-feishu-approval-{request_id[:8]}",
-            ).start()
+            )
         return
 
     selected_value = str(event.get("option") or "")
@@ -14325,7 +14520,7 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
         token = str(event.get("token") or "")
         if not (token and update_card(token, loading_card)) and message_id:
             patch_card(message_id, loading_card)
-        threading.Thread(
+        start_tracked_thread(
             target=complete_task_settings_operation,
             args=(user_id, message_id, task_id),
             kwargs=(
@@ -14335,9 +14530,8 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
                 if action_name == "task_effort_selector"
                 else {"service_tier": selected_value}
             ),
-            daemon=True,
             name=f"codex-feishu-task-settings-{task_id[:8]}",
-        ).start()
+        )
         return
     recognized_subscription_card = any(
         isinstance(element, dict)
@@ -14856,12 +15050,11 @@ def _handle_menu_event_once(event: dict[str, Any]) -> None:
                     "task_settings",
                 )
         if message_id:
-            threading.Thread(
+            start_tracked_thread(
                 target=refresh_task_settings_card,
                 args=(user_id, message_id, str(task["id"])),
-                daemon=True,
                 name=f"codex-feishu-task-settings-{str(task['id'])[:8]}",
-            ).start()
+            )
         log(f"menu handled key={event_key} result=task-settings-card")
         return
     if event_key == COMPACT_CONTEXT_MENU_EVENT_KEY:
@@ -15062,7 +15255,11 @@ def drain_event_lane(
             lane.task_done()
 
 
-def submit_event(event: dict[str, Any]) -> None:
+def submit_event(
+    event: dict[str, Any],
+    *,
+    accepted_before_quiesce: bool = False,
+) -> None:
     event.setdefault("_bridge_received_monotonic", time.monotonic())
     register_ui_intent(event)
     lane_key = event_lane_key(event)
@@ -15074,12 +15271,18 @@ def submit_event(event: dict[str, Any]) -> None:
             _event_lanes[lane_key] = lane
         lane.put(event)
     if should_start:
-        threading.Thread(
-            target=drain_event_lane,
-            args=(lane_key, lane),
-            daemon=True,
-            name="codex-feishu-event-lane",
-        ).start()
+        try:
+            start_tracked_thread(
+                target=drain_event_lane,
+                args=(lane_key, lane),
+                name="codex-feishu-event-lane",
+                allow_quiescing_root=accepted_before_quiesce,
+            )
+        except Exception:
+            with _event_lanes_lock:
+                if _event_lanes.get(lane_key) is lane:
+                    _event_lanes.pop(lane_key, None)
+            raise
 
 
 def tag_workflow_decision_inbox_event(event: dict[str, Any]) -> None:
@@ -15121,24 +15324,229 @@ def enqueue_events(stream: Any, events: queue.Queue[dict[str, Any]]) -> None:
             log(f"invalid event JSON: {exc}")
 
 
-def stop(_signum: int, _frame: Any) -> None:
+def request_update_quiesce(_signum: int, _frame: Any) -> None:
+    global _update_quiesce_state
+
+    _update_quiesce_requested.set()
+    with _tracked_operations_condition:
+        if _update_quiesce_state == "running":
+            _update_quiesce_state = "quiescing"
+        _tracked_operations_condition.notify_all()
+
+
+def request_update_quiesce_cancel() -> None:
+    global _update_quiesce_state
+
+    _update_quiesce_cancelled.set()
+    with _tracked_operations_condition:
+        if _update_quiesce_state != "stopping":
+            _update_quiesce_state = "cancelled"
+        _tracked_operations_condition.notify_all()
+
+
+def connect_update_quiesce_ack() -> tuple[str, socket.socket] | None:
+    request = runtime_update_request()
+    if request is None:
+        return None
+    nonce, ack_path, installer_pid, helper_pid = request
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        prepare_active_run_recovery()
-    except Exception as exc:
-        log(f"active run recovery preparation failed: {type(exc).__name__}: {exc}")
-    _shutdown_event.set()
-    with _identity_refresh_condition:
-        _identity_refresh_condition.notify_all()
-    stop_workflow_socket_server()
+        connection.connect(str(ack_path))
+    except OSError:
+        connection.close()
+        return None
+
+    try:
+        process_monitor = select.kqueue()
+        process_monitor.control(
+            [
+                select.kevent(
+                    process_id,
+                    filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                    fflags=select.KQ_NOTE_EXIT,
+                )
+                for process_id in (installer_pid, helper_pid)
+            ],
+            0,
+            0,
+        )
+    except (AttributeError, OSError):
+        connection.close()
+        return None
+
+    def watch_ack_connection() -> None:
+        try:
+            connection.recv(1)
+        except OSError:
+            pass
+        if not _update_quiesce_ack_sent.is_set():
+            request_update_quiesce_cancel()
+
+    def watch_installer_processes() -> None:
+        try:
+            process_monitor.control(None, 1, None)
+        except OSError:
+            pass
+        finally:
+            process_monitor.close()
+        if not _shutdown_event.is_set():
+            request_update_quiesce_cancel()
+
+    threading.Thread(
+        target=watch_ack_connection,
+        daemon=True,
+        name="codex-feishu-update-ack-watch",
+    ).start()
+    threading.Thread(
+        target=watch_installer_processes,
+        daemon=True,
+        name="codex-feishu-update-installer-watch",
+    ).start()
+    return nonce, connection
+
+
+def acknowledge_update_quiesce(
+    nonce: str,
+    connection: socket.socket,
+) -> bool:
+    global _quiesced_update_nonce
+
+    _quiesced_update_nonce = nonce
+    write_runtime_status()
+    _update_quiesce_ack_sent.set()
+    try:
+        connection.sendall((nonce + "\n").encode("ascii"))
+    except OSError:
+        _update_quiesce_ack_sent.clear()
+        request_update_quiesce_cancel()
+        return False
+    return True
+
+
+def stop_consumers() -> bool:
     for consumer in _consumers:
         if consumer.poll() is None:
-            consumer.terminate()
+            try:
+                os.killpg(os.getpgid(consumer.pid), signal.SIGTERM)
+            except OSError:
+                try:
+                    consumer.terminate()
+                except OSError:
+                    pass
     for consumer in _consumers:
         if consumer.poll() is None:
             try:
                 consumer.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                log("event consumer did not stop before bridge exit")
+                pass
+    for consumer in _consumers:
+        if consumer.poll() is None:
+            try:
+                os.killpg(os.getpgid(consumer.pid), signal.SIGKILL)
+            except OSError:
+                try:
+                    consumer.kill()
+                except OSError:
+                    pass
+    stopped = True
+    for consumer in _consumers:
+        if consumer.poll() is None:
+            try:
+                consumer.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                stopped = False
+                log("event consumer could not be stopped for runtime update")
+    for reader_thread in _consumer_reader_threads:
+        reader_thread.join(timeout=2)
+        if reader_thread.is_alive():
+            stopped = False
+            log("event consumer reader could not be stopped for runtime update")
+    return stopped
+
+
+def update_quiesce_volatile_idle(events: queue.Queue[dict[str, Any]]) -> bool:
+    if not events.empty() or any(thread.is_alive() for thread in _consumer_reader_threads):
+        return False
+    with _event_lanes_lock:
+        if _event_lanes:
+            return False
+    with _active_runs_lock:
+        if _active_runs:
+            return False
+    with _tracked_operations_condition:
+        return _tracked_operations == 0
+
+
+def update_quiesce_ready(events: queue.Queue[dict[str, Any]]) -> bool:
+    if not update_quiesce_volatile_idle(events):
+        return False
+    with _state_lock:
+        state = load_state()
+        durable_idle = not (
+            pending_inputs(state)
+            or state.get("pending_replies", [])
+            or state.get("pending_task_creations", {})
+        )
+    with _promlight_work_condition:
+        promlight_idle = not (
+            _promlight_pending_statuses or _promlight_pending_lamps
+        )
+    with _identity_refresh_condition:
+        identity_idle = not (
+            _identity_refresh_pending or _queued_card_refresh_pending
+        )
+    return durable_idle and promlight_idle and identity_idle
+
+
+def freeze_update_quiesce_if_ready(
+    events: queue.Queue[dict[str, Any]],
+) -> bool:
+    global _update_quiesce_state
+
+    with _tracked_operations_condition:
+        if (
+            _update_quiesce_state != "quiescing"
+            or not _update_quiesce_producers_closed
+            or _tracked_operations != 0
+        ):
+            return False
+        generation = _tracked_operations_generation
+    if not update_quiesce_ready(events):
+        return False
+    with _tracked_operations_condition:
+        if (
+            _update_quiesce_state != "quiescing"
+            or not _update_quiesce_producers_closed
+            or _tracked_operations != 0
+            or _tracked_operations_generation != generation
+        ):
+            return False
+        _update_quiesce_state = "ready"
+        _update_quiesce_frozen.set()
+        _tracked_operations_condition.notify_all()
+    with _promlight_work_condition:
+        _promlight_work_condition.notify_all()
+    with _identity_refresh_condition:
+        _identity_refresh_condition.notify_all()
+    return True
+
+
+def stop(_signum: int, _frame: Any) -> None:
+    global _update_quiesce_state
+
+    try:
+        prepare_active_run_recovery()
+    except Exception as exc:
+        log(f"active run recovery preparation failed: {type(exc).__name__}: {exc}")
+    _shutdown_event.set()
+    with _tracked_operations_condition:
+        _update_quiesce_state = "stopping"
+        _tracked_operations_condition.notify_all()
+    with _identity_refresh_condition:
+        _identity_refresh_condition.notify_all()
+    stop_workflow_socket_server()
+    stop_consumers()
     write_runtime_status(active_runs=0)
 
 
@@ -15256,8 +15664,41 @@ def maintenance_loop(events: queue.Queue[dict[str, Any]]) -> None:
     next_desktop_sync_retry = 0.0
     next_restart_recovery_retry = 0.0
     next_task_subscription_poll = 0.0
-    while not _shutdown_event.is_set():
+    while not _shutdown_event.is_set() and not _update_quiesce_frozen.is_set():
         now = time.time()
+        if _update_quiesce_requested.is_set():
+            with _state_lock:
+                state = load_state()
+                pending_work = bool(
+                    pending_inputs(state)
+                    or state.get("pending_replies", [])
+                    or state.get("pending_task_creations", {})
+                )
+            if not pending_work:
+                _shutdown_event.wait(0.2)
+                continue
+            if not tracked_operation_started(allow_quiescing_root=True):
+                return
+            if now >= next_runtime_status:
+                write_runtime_status()
+                next_runtime_status = now + 1
+            if now >= next_pending_retry:
+                try:
+                    retry_pending_replies(now)
+                except Exception as exc:
+                    log(f"pending reply loop failed: {type(exc).__name__}: {exc}")
+                next_pending_retry = now + 1
+            if now >= next_input_retry:
+                try:
+                    start_pending_inputs(now)
+                except Exception as exc:
+                    log(f"pending input loop failed: {type(exc).__name__}: {exc}")
+                next_input_retry = now + 1
+            tracked_operation_finished()
+            _shutdown_event.wait(0.2)
+            continue
+        if not tracked_operation_started(allow_quiescing_root=True):
+            return
         if now >= next_cli_fallback_expiry:
             try:
                 expire_cli_fallbacks(now)
@@ -15310,10 +15751,66 @@ def maintenance_loop(events: queue.Queue[dict[str, Any]]) -> None:
             except Exception as exc:
                 log(f"workflow loop failed: {type(exc).__name__}: {exc}")
             next_workflow_retry = now + 1
+        tracked_operation_finished()
         _shutdown_event.wait(0.2)
 
 
+def start_event_intake(events: queue.Queue[dict[str, Any]]) -> bool:
+    if workflow_notifications_enabled() and not start_workflow_socket_server():
+        log("bridge refused to start: workflow endpoint unavailable")
+        return False
+    if workflow_notifications_enabled():
+        try:
+            enqueue_workflow_decision_inbox(events)
+        except WorkflowStateError:
+            log("bridge refused to start: workflow decision inbox unavailable")
+            stop_workflow_socket_server()
+            return False
+    for event_key in EVENT_KEYS:
+        command = [
+            LARK_CLI,
+            "--profile",
+            LARK_PROFILE,
+            "event",
+            "consume",
+            event_key,
+            "--as",
+            "bot",
+        ]
+        consumer_environment = lark_environment()
+        if event_key == "card.action.trigger" and workflow_notifications_enabled():
+            consumer_environment["CODEX_FEISHU_WORKFLOW_DECISION_INBOX"] = str(
+                WORKFLOW_DECISION_INBOX_PATH
+            )
+        consumer = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=consumer_environment,
+            start_new_session=True,
+        )
+        _consumers.append(consumer)
+        assert consumer.stdout is not None and consumer.stderr is not None
+        threading.Thread(
+            target=log_consumer_stderr,
+            args=(consumer.stderr,),
+            daemon=True,
+        ).start()
+        reader = start_tracked_thread(
+            target=enqueue_events,
+            args=(consumer.stdout, events),
+            name="codex-feishu-event-reader",
+        )
+        _consumer_reader_threads.append(reader)
+    return True
+
+
 def main() -> int:
+    global _quiesced_update_nonce, _update_quiesce_producers_closed
+
     if sys.argv[1:] == ["--promlight-status-json"]:
         with _state_lock:
             state = load_state()
@@ -15411,97 +15908,146 @@ def main() -> int:
         return 2
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGUSR1, request_update_quiesce)
     events: queue.Queue[dict[str, Any]] = queue.Queue()
-    if workflow_notifications_enabled() and not start_workflow_socket_server():
-        log("bridge refused to start: workflow endpoint unavailable")
+    resuming_update_quiesce = runtime_update_request() is not None
+    if resuming_update_quiesce:
+        request_update_quiesce(0, None)
+    elif not start_event_intake(events):
         return 2
-    if workflow_notifications_enabled():
-        try:
-            enqueue_workflow_decision_inbox(events)
-        except WorkflowStateError:
-            log("bridge refused to start: workflow decision inbox unavailable")
-            stop_workflow_socket_server()
-            return 2
-    for event_key in EVENT_KEYS:
-        command = [
-            LARK_CLI,
-            "--profile",
-            LARK_PROFILE,
-            "event",
-            "consume",
-            event_key,
-            "--as",
-            "bot",
-        ]
-        consumer_environment = lark_environment()
-        if event_key == "card.action.trigger" and workflow_notifications_enabled():
-            consumer_environment["CODEX_FEISHU_WORKFLOW_DECISION_INBOX"] = str(
-                WORKFLOW_DECISION_INBOX_PATH
-            )
-        consumer = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=consumer_environment,
-        )
-        _consumers.append(consumer)
-        assert consumer.stdout is not None and consumer.stderr is not None
-        threading.Thread(
-            target=log_consumer_stderr,
-            args=(consumer.stderr,),
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=enqueue_events,
-            args=(consumer.stdout, events),
-            daemon=True,
-        ).start()
 
-    write_runtime_status()
+    if not resuming_update_quiesce:
+        write_runtime_status()
     _shutdown_event.clear()
-    threading.Thread(
+    promlight_thread = threading.Thread(
         target=promlight_worker_loop,
         daemon=True,
         name="codex-feishu-promlight",
-    ).start()
-    threading.Thread(
+    )
+    approval_observer_thread = threading.Thread(
         target=task_subscription_approval_observer_loop,
         daemon=True,
         name="codex-feishu-subscription-approvals",
-    ).start()
-    threading.Thread(
+    )
+    identity_thread = threading.Thread(
         target=identity_refresh_loop,
         daemon=True,
         name="codex-feishu-identity-refresh",
-    ).start()
-    threading.Thread(
+    )
+    _quiesce_service_threads.extend([promlight_thread, identity_thread])
+    for service_thread in [*_quiesce_service_threads, approval_observer_thread]:
+        service_thread.start()
+    maintenance_thread = threading.Thread(
         target=maintenance_loop,
         args=(events,),
         daemon=True,
         name="codex-feishu-maintenance",
-    ).start()
-    while event_consumer_exit_code(_consumers) is None:
+    )
+    maintenance_thread.start()
+    quiescing = False
+    while True:
+        if _update_quiesce_requested.is_set() and not quiescing:
+            quiescing = True
+            log("runtime update quiesce requested")
+            acknowledgement = connect_update_quiesce_ack()
+            if acknowledgement is None:
+                log("runtime update quiesce canceled before acknowledgement")
+                return 0
+            quiesce_nonce, quiesce_connection = acknowledgement
+            workflow_servers_stopped = stop_workflow_socket_server()
+            consumers_stopped = stop_consumers()
+            if not workflow_servers_stopped or not consumers_stopped:
+                quiesce_connection.close()
+                request_update_quiesce_cancel()
+                log("runtime update quiesce canceled; event intake did not stop")
+                return 0
+            approval_observer_thread.join()
+            with _tracked_operations_condition:
+                _update_quiesce_producers_closed = True
+                _tracked_operations_condition.notify_all()
+            last_wait_signature: tuple[int, int, int, int, int, int, int] | None = None
+            while True:
+                while True:
+                    try:
+                        queued_event = events.get_nowait()
+                    except queue.Empty:
+                        break
+                    submit_event(queued_event, accepted_before_quiesce=True)
+                if _update_quiesce_cancelled.is_set():
+                    quiesce_connection.close()
+                    log("runtime update quiesce canceled; restarting bridge")
+                    return 0
+                if freeze_update_quiesce_if_ready(events):
+                    for service_thread in _quiesce_service_threads:
+                        service_thread.join()
+                    maintenance_thread.join()
+                    if not acknowledge_update_quiesce(
+                        quiesce_nonce,
+                        quiesce_connection,
+                    ):
+                        quiesce_connection.close()
+                        log("runtime update acknowledgement failed")
+                        return 0
+                    cancellation_timer = threading.Timer(
+                        RUNTIME_UPDATE_QUIESCE_MAX_SECONDS,
+                        request_update_quiesce_cancel,
+                    )
+                    cancellation_timer.daemon = True
+                    cancellation_timer.start()
+                    log("runtime update quiesced")
+                    with _tracked_operations_condition:
+                        while (
+                            not _shutdown_event.is_set()
+                            and not _update_quiesce_cancelled.is_set()
+                        ):
+                            _tracked_operations_condition.wait()
+                    cancellation_timer.cancel()
+                    quiesce_connection.close()
+                    return 0
+                with _promlight_work_condition:
+                    promlight_pending = len(_promlight_pending_statuses) + len(
+                        _promlight_pending_lamps
+                    )
+                with _identity_refresh_condition:
+                    identity_pending = len(_identity_refresh_pending) + len(
+                        _queued_card_refresh_pending
+                    )
+                with _tracked_operations_condition:
+                    wait_signature = (
+                        _tracked_operations,
+                        sum(thread.is_alive() for thread in _consumer_reader_threads),
+                        events.qsize(),
+                        len(_event_lanes),
+                        len(_active_runs),
+                        promlight_pending,
+                        identity_pending,
+                    )
+                    if wait_signature != last_wait_signature:
+                        log(
+                            "runtime update drain waiting "
+                            f"tracked={wait_signature[0]} "
+                            f"readers={wait_signature[1]} "
+                            f"events={wait_signature[2]} "
+                            f"lanes={wait_signature[3]} "
+                            f"runs={wait_signature[4]} "
+                            f"promlight={wait_signature[5]} "
+                            f"identity={wait_signature[6]}"
+                        )
+                        last_wait_signature = wait_signature
+                    _tracked_operations_condition.wait()
         try:
             event = events.get(timeout=0.5)
         except queue.Empty:
-            continue
-        submit_event(event)
+            event = None
+        if event is not None:
+            submit_event(event, accepted_before_quiesce=True)
+        if event_consumer_exit_code(_consumers) is not None:
+            break
     exit_code = event_consumer_exit_code(_consumers) or 1
     log(f"event consumer exited; restarting bridge code={exit_code}")
     _shutdown_event.set()
     stop_workflow_socket_server()
-    for consumer in _consumers:
-        if consumer.poll() is None:
-            consumer.terminate()
-    for consumer in _consumers:
-        if consumer.poll() is None:
-            try:
-                consumer.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                log("event consumer did not stop before bridge exit")
+    stop_consumers()
     write_runtime_status(active_runs=0)
     return exit_code
 

@@ -14,6 +14,7 @@ frameworks_dir="${contents}/Frameworks"
 sdk="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 signing_identity="${CODE_SIGN_IDENTITY:--}"
 notary_profile="${NOTARY_PROFILE:-}"
+notary_keychain="${NOTARY_KEYCHAIN:-}"
 
 /bin/rm -rf "${build_dir}" "${dist_dir}"
 /bin/mkdir -p "${macos_dir}" "${resources_dir}" "${frameworks_dir}" "${dist_dir}"
@@ -112,9 +113,13 @@ if [[ -n "${notary_profile}" ]]; then
         print -u2 "NOTARY_PROFILE requires a Developer ID Application signature"
         exit 1
     fi
+    notary_args=(--keychain-profile "${notary_profile}")
+    if [[ -n "${notary_keychain}" ]]; then
+        notary_args+=(--keychain "${notary_keychain}")
+    fi
     /usr/bin/xcrun notarytool submit \
         "${dist_dir}/Codex-Feishu-Bridge-macOS-universal.zip" \
-        --keychain-profile "${notary_profile}" --wait
+        "${notary_args[@]}" --wait
     /usr/bin/xcrun stapler staple "${app_dir}"
     /usr/bin/codesign --verify --deep --strict "${app_dir}"
     /bin/rm -f "${dist_dir}/Codex-Feishu-Bridge-macOS-universal.zip"
