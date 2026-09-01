@@ -35,8 +35,12 @@ ACTION_FIELDS = frozenset(
 )
 ALLOWED_RESOLUTIONS = frozenset({"resume", "pause", "stop"})
 ORI_ONE_WORKFLOW_ID = "ori-one-mind"
+AGENT_MESH_WORKFLOW_ID = "deepori-agent-mesh"
+WORKFLOW_WORKBENCH_PATHS = {
+    ORI_ONE_WORKFLOW_ID: "/ori-one/workbench/automation/",
+    AGENT_MESH_WORKFLOW_ID: "/bridge/agent-mesh",
+}
 WORKBENCH_HOST = "deepori.cn"
-WORKBENCH_PATH = "/ori-one/workbench/automation/"
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 SAFE_PATH_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9._~-]+$")
 STATE_KEY_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -245,15 +249,25 @@ def _visible_text(payload: dict[str, Any], name: str, limit: int) -> str:
     return normalized
 
 
-def _workbench_url(payload: dict[str, Any]) -> str:
+def _workbench_url(payload: dict[str, Any], workflow_id: str) -> str:
     value = _text(payload, "workbench_url", 1000)
+    workbench_path = WORKFLOW_WORKBENCH_PATHS.get(workflow_id)
+    if workbench_path is None:
+        raise WorkflowNotificationError("workflow_id is not allowed")
     parsed = urlsplit(value)
     try:
         port = parsed.port
     except ValueError as exc:
         raise WorkflowNotificationError("workbench_url is not an allowed workbench URL") from exc
     decoded_path = unquote(parsed.path)
-    child_path = decoded_path.removeprefix(WORKBENCH_PATH)
+    path_matches = decoded_path == workbench_path or decoded_path.startswith(
+        workbench_path.rstrip("/") + "/"
+    )
+    child_path = (
+        decoded_path[len(workbench_path.rstrip("/")) :]
+        if path_matches
+        else decoded_path
+    )
     child_segments = [segment for segment in child_path.split("/") if segment]
     if (
         parsed.scheme != "https"
@@ -263,7 +277,7 @@ def _workbench_url(payload: dict[str, Any]) -> str:
         or parsed.password
         or parsed.query
         or parsed.fragment
-        or not decoded_path.startswith(WORKBENCH_PATH)
+        or not path_matches
         or "\\" in decoded_path
         or "//" in decoded_path
         or any(
@@ -327,7 +341,7 @@ def validate_payload(payload: Any) -> dict[str, Any]:
     if status not in ALLOWED_STATUSES:
         raise WorkflowNotificationError("status is not allowed")
     workflow_id = _identifier(payload, "workflow_id")
-    if workflow_id != ORI_ONE_WORKFLOW_ID:
+    if workflow_id not in WORKFLOW_WORKBENCH_PATHS:
         raise WorkflowNotificationError("workflow_id is not allowed")
     normalized = {
         "workflow_id": workflow_id,
@@ -335,7 +349,7 @@ def validate_payload(payload: Any) -> dict[str, Any]:
         "task_id": _identifier(payload, "task_id"),
         "status": status,
         "summary": _visible_text(payload, "summary", 2000),
-        "workbench_url": _workbench_url(payload),
+        "workbench_url": _workbench_url(payload, workflow_id),
     }
     normalized["actions"] = _actions(payload, status)
     return normalized
@@ -511,7 +525,11 @@ class WorkflowStore:
             or recovery.get("selected_action_id") != selected.get("id")
             or recovery.get("selected_action_label") != selected.get("label")
             or recovery.get("resolution") != selected.get("resolution")
-            or recovery.get("marker") != f"ori-one-workflow-recovery:{key}"
+            or recovery.get("marker")
+            not in {
+                f"ori-one-workflow-recovery:{key}",
+                f"workflow-recovery:{key}",
+            }
             or recovery.get("status")
             not in {"pending", "delivered", "delivery_unknown"}
             or not isinstance(recovery.get("attempts"), int)
@@ -684,11 +702,16 @@ class WorkflowStore:
     def enqueue(
         self,
         payload: dict[str, Any],
-        allowed_workflow_id: str,
+        allowed_workflow_ids: str | set[str] | frozenset[str],
         now: float | None = None,
     ) -> str:
         normalized = validate_payload(payload)
-        if normalized["workflow_id"] != allowed_workflow_id:
+        allowed = (
+            {allowed_workflow_ids}
+            if isinstance(allowed_workflow_ids, str)
+            else set(allowed_workflow_ids)
+        )
+        if normalized["workflow_id"] not in allowed:
             raise WorkflowNotificationError("workflow_id is not allowed")
         timestamp = time.time() if now is None else now
         key = event_key(normalized["workflow_id"], normalized["event_id"])
@@ -875,7 +898,7 @@ class WorkflowStore:
             "selected_action_id": action["id"],
             "selected_action_label": action["label"],
             "resolution": action["resolution"],
-            "marker": f"ori-one-workflow-recovery:{key}",
+            "marker": f"workflow-recovery:{key}",
             "status": "pending",
             "attempts": 0,
             "next_attempt_at": now,

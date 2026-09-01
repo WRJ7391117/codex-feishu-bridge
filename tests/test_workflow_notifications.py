@@ -99,6 +99,19 @@ def workflow_payload(status="user_action_required", event_id="evt-1"):
     }
 
 
+def agent_mesh_payload(event_id="mesh-gate-1"):
+    payload = workflow_payload(event_id=event_id)
+    payload.update(
+        {
+            "workflow_id": "deepori-agent-mesh",
+            "task_id": "MESH-010",
+            "summary": "需要扩大修改范围后继续。",
+            "workbench_url": "https://deepori.cn/bridge/agent-mesh",
+        }
+    )
+    return payload
+
+
 def workflow_card_envelope(event_id="card-event-1"):
     return {
         "schema": "2.0",
@@ -158,6 +171,39 @@ class WorkflowStoreTests(unittest.TestCase):
         payload["workflow_id"] = "ori-one-mind-automation"
         with self.assertRaises(self.workflow.WorkflowNotificationError):
             self.workflow.validate_payload(payload)
+
+    def test_agent_mesh_workflow_uses_its_own_workbench_boundary(self):
+        payload = agent_mesh_payload()
+        self.assertEqual(
+            self.workflow.validate_payload(payload)["workflow_id"],
+            "deepori-agent-mesh",
+        )
+        payload["workbench_url"] = (
+            "https://deepori.cn/ori-one/workbench/automation/"
+        )
+        with self.assertRaises(self.workflow.WorkflowNotificationError):
+            self.workflow.validate_payload(payload)
+
+        ori_one = workflow_payload()
+        ori_one["workbench_url"] = "https://deepori.cn/bridge/agent-mesh"
+        with self.assertRaises(self.workflow.WorkflowNotificationError):
+            self.workflow.validate_payload(ori_one)
+
+    def test_store_accepts_only_configured_workflow_bindings(self):
+        self.assertEqual(
+            self.store.enqueue(
+                agent_mesh_payload(),
+                {"ori-one-mind", "deepori-agent-mesh"},
+                now=100,
+            ),
+            "queued",
+        )
+        with self.assertRaises(self.workflow.WorkflowNotificationError):
+            self.store.enqueue(
+                agent_mesh_payload(event_id="mesh-gate-2"),
+                {"ori-one-mind"},
+                now=101,
+            )
 
     def test_workbench_url_allows_only_private_automation_page(self):
         payload = workflow_payload()
@@ -627,6 +673,10 @@ class WorkflowConfigToolTests(unittest.TestCase):
         self.assertEqual(workflow["recipient_open_id"], "ou_legacy")
         self.assertEqual(workflow["recipient_chat_id"], "")
         self.assertEqual(workflow["codex_task_id"], task_id)
+        self.assertEqual(
+            workflow["workflows"]["ori-one-mind"]["codex_task_id"],
+            task_id,
+        )
         self.assertEqual(self.tool.status(self.config_path), "configured")
         self.assertEqual(self.config_path.stat().st_mode & 0o777, 0o600)
         self.assertGreaterEqual(fsync.call_count, 2)
@@ -652,6 +702,68 @@ class WorkflowConfigToolTests(unittest.TestCase):
         self.assertNotIn("ou_", self.tool.status(self.config_path))
         self.assertNotIn("oc_", self.tool.status(self.config_path))
         self.assertNotIn("11111111", self.tool.status(self.config_path))
+
+    def test_set_workflow_adds_agent_mesh_without_replacing_ori_one(self):
+        ori_task = "11111111-1111-1111-1111-111111111111"
+        mesh_task = "22222222-2222-2222-2222-222222222222"
+        self.tool.enable(self.config_path, ori_task)
+
+        self.tool.set_workflow(
+            self.config_path,
+            "deepori-agent-mesh",
+            mesh_task,
+        )
+
+        updated = json.loads(self.config_path.read_text(encoding="utf-8"))
+        workflows = updated["workflow_notifications"]["workflows"]
+        self.assertEqual(workflows["ori-one-mind"]["codex_task_id"], ori_task)
+        self.assertEqual(
+            workflows["deepori-agent-mesh"]["codex_task_id"],
+            mesh_task,
+        )
+        self.assertEqual(self.tool.status(self.config_path), "configured")
+
+    def test_set_workflow_migrates_legacy_ori_one_binding(self):
+        ori_task = "11111111-1111-1111-1111-111111111111"
+        mesh_task = "22222222-2222-2222-2222-222222222222"
+        workflow = self.config["workflow_notifications"]
+        workflow.update(
+            {
+                "enabled": True,
+                "recipient_open_id": "ou_legacy",
+                "codex_task_id": ori_task,
+            }
+        )
+        self._write(self.config)
+
+        self.tool.set_workflow(
+            self.config_path,
+            "deepori-agent-mesh",
+            mesh_task,
+        )
+
+        updated = json.loads(self.config_path.read_text(encoding="utf-8"))
+        workflows = updated["workflow_notifications"]["workflows"]
+        self.assertEqual(workflows["ori-one-mind"]["codex_task_id"], ori_task)
+        self.assertEqual(
+            workflows["deepori-agent-mesh"]["codex_task_id"],
+            mesh_task,
+        )
+        self.assertEqual(self.tool.status(self.config_path), "configured")
+
+    def test_set_workflow_rejects_unknown_workflow_without_changing_config(self):
+        task_id = "11111111-1111-1111-1111-111111111111"
+        self.tool.enable(self.config_path, task_id)
+        original = self.config_path.read_bytes()
+
+        with self.assertRaises(self.tool.WorkflowConfigError):
+            self.tool.set_workflow(
+                self.config_path,
+                "unknown-workflow",
+                task_id,
+            )
+
+        self.assertEqual(self.config_path.read_bytes(), original)
 
     def test_enable_fails_closed_when_legacy_sender_is_not_allowlisted(self):
         self.config["allowed_sender_id"] = "ou_missing"
@@ -1002,6 +1114,14 @@ class WorkflowBridgeTests(unittest.TestCase):
                         "recipient_open_id": "ou_admin",
                         "recipient_chat_id": "oc_private",
                         "codex_task_id": "11111111-1111-1111-1111-111111111111",
+                        "workflows": {
+                            "ori-one-mind": {
+                                "codex_task_id": "11111111-1111-1111-1111-111111111111"
+                            },
+                            "deepori-agent-mesh": {
+                                "codex_task_id": "22222222-2222-2222-2222-222222222222"
+                            },
+                        },
                     },
                 }
             ),
@@ -1208,6 +1328,21 @@ class WorkflowBridgeTests(unittest.TestCase):
             "ori-one-mind-automation"
         )
         self.assertFalse(self.bridge.workflow_configuration_valid())
+
+    def test_workflow_config_routes_each_workflow_to_its_fixed_task(self):
+        self.assertTrue(self.bridge.workflow_configuration_valid())
+        self.assertEqual(
+            self.bridge.workflow_codex_task_id("ori-one-mind"),
+            "11111111-1111-1111-1111-111111111111",
+        )
+        self.assertEqual(
+            self.bridge.workflow_codex_task_id("deepori-agent-mesh"),
+            "22222222-2222-2222-2222-222222222222",
+        )
+        self.assertEqual(
+            self.bridge.workflow_allowed_ids(),
+            frozenset({"ori-one-mind", "deepori-agent-mesh"}),
+        )
 
     def test_send_target_comes_only_from_local_config(self):
         record = workflow_payload(status="milestone_completed")
@@ -1784,6 +1919,31 @@ class WorkflowBridgeTests(unittest.TestCase):
         self.assertNotIn(str(recovery["marker"]), prompt)
         self.assertNotIn(str(record["decision_token"]), prompt)
 
+    def test_agent_mesh_recovery_returns_to_task_without_product_integration(self):
+        payload = agent_mesh_payload()
+        self.bridge._workflow_store.enqueue(
+            payload,
+            {"ori-one-mind", "deepori-agent-mesh"},
+            now=100,
+        )
+        record = self.bridge._workflow_store.record_for_event(
+            payload["workflow_id"], payload["event_id"]
+        )
+        _outcome, recovery = self.bridge._workflow_store.consume_token_decision(
+            payload["workflow_id"],
+            payload["event_id"],
+            record["decision_token"],
+            "recommended",
+            now=110,
+        )
+
+        prompt = self.bridge.workflow_recovery_prompt(recovery)
+        self.assertIn("Agent Mesh 自动研发 Task 的人工门", prompt)
+        self.assertIn("不是 Agent Mesh 产品功能", prompt)
+        self.assertIn("Bridge 不直接修改 Mesh 控制器", prompt)
+        self.assertNotIn("resolve-attention", prompt)
+        self.assertNotIn("bin/orchestrator.mjs", prompt)
+
     def test_roundtrip_recovery_only_reports_receipt_without_research_side_effects(self):
         payload = workflow_payload()
         payload["event_id"] = "test-roundtrip-event"
@@ -2194,12 +2354,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.11.11")
-        self.assertEqual(info["CFBundleVersion"], "90")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.11.12")
+        self.assertEqual(info["CFBundleVersion"], "91")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.11.11 (build 90)", readme)
-        self.assertIn("1.11.11 (build 90", release_notes)
+        self.assertIn("1.11.12 (build 91)", readme)
+        self.assertIn("1.11.12 (build 91", release_notes)
 
 
 class AppPromLightHomeTests(unittest.TestCase):

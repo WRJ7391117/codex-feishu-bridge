@@ -17,6 +17,10 @@ DEFAULT_CONFIG_PATH = (
     Path.home() / "Library/Application Support/Codex Feishu Bridge/config.json"
 )
 ORI_ONE_WORKFLOW_ID = "ori-one-mind"
+AGENT_MESH_WORKFLOW_ID = "deepori-agent-mesh"
+ALLOWED_WORKFLOW_IDS = frozenset(
+    {ORI_ONE_WORKFLOW_ID, AGENT_MESH_WORKFLOW_ID}
+)
 MAX_TASK_ID_BYTES = 128
 
 
@@ -176,6 +180,14 @@ def enable(path: Path, raw_task_id: str) -> None:
         "recipient_open_id": recipient,
         "recipient_chat_id": chat_id,
         "codex_task_id": task_id,
+        "workflows": {
+            **(
+                existing_workflow.get("workflows")
+                if isinstance(existing_workflow.get("workflows"), dict)
+                else {}
+            ),
+            ORI_ONE_WORKFLOW_ID: {"codex_task_id": task_id},
+        },
     }
     _write_config(path, config)
 
@@ -195,6 +207,31 @@ def disable(path: Path) -> None:
     _write_config(path, config)
 
 
+def set_workflow(path: Path, workflow_id: str, raw_task_id: str) -> None:
+    if workflow_id not in ALLOWED_WORKFLOW_IDS:
+        raise WorkflowConfigError("invalid")
+    config = load_config(path)
+    workflow = config.get("workflow_notifications")
+    if not isinstance(workflow, dict) or workflow.get("enabled") is not True:
+        raise WorkflowConfigError("invalid")
+    _allowlisted_legacy_sender(config)
+    task_id = _task_id(raw_task_id)
+    bindings = workflow.get("workflows")
+    if not isinstance(bindings, dict):
+        bindings = {}
+    legacy_workflow_id = str(workflow.get("allowed_workflow_id") or "")
+    legacy_task_id = str(workflow.get("codex_task_id") or "")
+    if legacy_workflow_id in ALLOWED_WORKFLOW_IDS:
+        bindings.setdefault(
+            legacy_workflow_id,
+            {"codex_task_id": _task_id(legacy_task_id)},
+        )
+    bindings[workflow_id] = {"codex_task_id": task_id}
+    workflow["workflows"] = bindings
+    config["workflow_notifications"] = workflow
+    _write_config(path, config)
+
+
 def status(path: Path) -> str:
     try:
         config = load_config(path)
@@ -209,7 +246,7 @@ def status(path: Path) -> str:
         return "invalid"
     try:
         recipient = _allowlisted_legacy_sender(config)
-        _task_id(str(workflow.get("codex_task_id") or ""))
+        task_id = _task_id(str(workflow.get("codex_task_id") or ""))
     except WorkflowConfigError:
         return "invalid"
     chat_id = workflow.get("recipient_chat_id")
@@ -220,6 +257,30 @@ def status(path: Path) -> str:
         or (chat_id and not chat_id.startswith("oc_"))
     ):
         return "invalid"
+    workflows = workflow.get("workflows")
+    if workflows is not None:
+        if not isinstance(workflows, dict):
+            return "invalid"
+        if any(
+            workflow_id not in ALLOWED_WORKFLOW_IDS
+            or not isinstance(entry, dict)
+            or set(entry) != {"codex_task_id"}
+            for workflow_id, entry in workflows.items()
+        ):
+            return "invalid"
+        try:
+            for entry in workflows.values():
+                _task_id(str(entry.get("codex_task_id") or ""))
+        except WorkflowConfigError:
+            return "invalid"
+        ori_one = workflows.get(ORI_ONE_WORKFLOW_ID)
+        if not isinstance(ori_one, dict) or set(ori_one) != {"codex_task_id"}:
+            return "invalid"
+        try:
+            if _task_id(str(ori_one.get("codex_task_id") or "")) != task_id:
+                return "invalid"
+        except WorkflowConfigError:
+            return "invalid"
     return "configured"
 
 
@@ -244,6 +305,26 @@ def main() -> int:
             return 1
         try:
             enable(DEFAULT_CONFIG_PATH, raw.decode("utf-8"))
+        except (UnicodeDecodeError, WorkflowConfigError):
+            print("invalid")
+            return 1
+        print("configured")
+        return 0
+    if (
+        len(arguments) == 2
+        and arguments[0] == "--set-workflow"
+        and arguments[1] in ALLOWED_WORKFLOW_IDS
+    ):
+        raw = sys.stdin.buffer.read(MAX_TASK_ID_BYTES + 1)
+        if not raw or len(raw) > MAX_TASK_ID_BYTES:
+            print("invalid")
+            return 1
+        try:
+            set_workflow(
+                DEFAULT_CONFIG_PATH,
+                arguments[1],
+                raw.decode("utf-8"),
+            )
         except (UnicodeDecodeError, WorkflowConfigError):
             print("invalid")
             return 1

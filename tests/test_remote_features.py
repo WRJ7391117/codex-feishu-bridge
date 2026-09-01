@@ -364,6 +364,56 @@ class RemoteFeatureTests(unittest.TestCase):
             ["task-a", "task-b"],
         )
 
+    def test_task_selectors_put_the_distinguishing_title_before_the_project(self):
+        tasks = [
+            {
+                "id": "task-mac",
+                "title": "codex_feishu_bridge-for macOS",
+                "project": "Codex-Feishu-Bridge",
+            },
+            {
+                "id": "task-win",
+                "title": "codex_feishu_bridge-for win11",
+                "project": "Codex-Feishu-Bridge",
+            },
+        ]
+
+        cards = (
+            self.bridge.build_task_card(tasks, "task-mac", "Codex-Feishu-Bridge"),
+            self.bridge.build_task_card(
+                tasks,
+                "task-mac",
+                "Codex-Feishu-Bridge",
+                archived=True,
+            ),
+            self.bridge.build_task_subscriptions_card(
+                tasks,
+                {},
+                "task-mac",
+                "Codex-Feishu-Bridge",
+            ),
+        )
+        selector_names = (
+            "task_selector",
+            "archived_task_selector",
+            "subscription_task_selector",
+        )
+
+        for card, selector_name in zip(cards, selector_names):
+            with self.subTest(selector=selector_name):
+                selector = next(
+                    item
+                    for item in card["body"]["elements"]
+                    if item.get("name") == selector_name
+                )
+                self.assertEqual(
+                    [option["text"]["content"] for option in selector["options"]],
+                    [
+                        "codex_feishu_bridge-for macOS · Codex-Feishu-Bridge",
+                        "codex_feishu_bridge-for win11 · Codex-Feishu-Bridge",
+                    ],
+                )
+
     def test_task_card_defaults_to_first_project_without_an_all_projects_option(self):
         card = self.bridge.build_task_card(self.tasks(), None, "__all__")
         selectors = {

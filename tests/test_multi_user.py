@@ -228,6 +228,70 @@ class MultiUserTests(unittest.TestCase):
         self.assertEqual([task["id"] for task in active], ["task-active"])
         self.assertEqual([task["id"] for task in archived], ["task-archived"])
 
+    def test_named_sidebar_task_is_listed_before_its_first_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.db"
+            state_db = Path(directory) / "state.db"
+            project_root = Path(directory) / "evolution"
+            project_root.mkdir()
+            with sqlite3.connect(catalog) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE local_thread_catalog (
+                        thread_id TEXT,
+                        display_title TEXT,
+                        project_id TEXT,
+                        cwd TEXT,
+                        host_id TEXT,
+                        missing_candidate INTEGER,
+                        source_recency_at INTEGER
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO local_thread_catalog VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "task-empty",
+                        "Bridge 运行诊断与可靠性",
+                        "project-1",
+                        str(project_root),
+                        "local",
+                        0,
+                        1,
+                    ),
+                )
+            with sqlite3.connect(state_db) as connection:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT, archived INTEGER, preview TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES (?, ?, ?)",
+                    ("task-empty", 0, ""),
+                )
+            self.bridge.DESKTOP_CATALOG_DB = catalog
+            self.bridge.state_db_path = lambda: state_db
+            self.bridge.desktop_project_names = lambda: {}
+            self.bridge.desktop_projects = lambda: [
+                {
+                    "id": "project-1",
+                    "name": "Evolution",
+                    "root": str(project_root.resolve()),
+                }
+            ]
+
+            tasks = self.bridge.recent_tasks("ou_admin")
+
+        self.assertEqual(
+            tasks,
+            [
+                {
+                    "id": "task-empty",
+                    "title": "Bridge 运行诊断与可靠性",
+                    "project": "Evolution",
+                }
+            ],
+        )
+
     def test_unauthorized_user_events_are_ignored(self):
         self.bridge.load_state = lambda: self.fail("unauthorized event read state")
         self.bridge.handle_message_event(

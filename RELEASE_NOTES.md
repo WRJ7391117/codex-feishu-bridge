@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.11.12 (build 91)
+
+- Includes named Codex Desktop sidebar Tasks before their first message, so newly created empty Tasks are immediately available in Feishu Task switching, subscriptions, archives, and PromLight associations.
+- Puts the complete Task title before the project name in every native Feishu Task selector, keeping similar Tasks distinguishable when the mobile selector truncates long option text.
+- Extends the optional local development-workflow notification module to route allowlisted Ori One and Agent Mesh human gates to their own fixed Codex Tasks, while keeping that private module out of the public App package and keeping controller state outside the Bridge.
+
 ## 1.11.11 (build 90)
 
 - Preserves the original numeric or string Desktop approval request ID when returning a subscribed user's decision, while retaining a stable string key for Feishu card deduplication.

@@ -344,6 +344,38 @@ class PromLightTests(unittest.TestCase):
             ["task-x"],
         )
 
+    def test_promlight_task_selector_puts_the_task_title_before_the_project(self):
+        self.tasks["ou_admin"] = [
+            {
+                "id": "task-mac",
+                "title": "codex_feishu_bridge-for macOS",
+                "project": "Codex-Feishu-Bridge",
+            },
+            {
+                "id": "task-win",
+                "title": "codex_feishu_bridge-for win11",
+                "project": "Codex-Feishu-Bridge",
+            },
+        ]
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+
+        card = self.bridge.build_promlight_task_card(
+            "ou_admin", lamp, self.bridge.load_state()
+        )
+        selector = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("name") == "promlight_task_selector"
+        )
+
+        self.assertEqual(
+            [option["text"]["content"] for option in selector["options"]],
+            [
+                "codex_feishu_bridge-for macOS · Codex-Feishu-Bridge",
+                "codex_feishu_bridge-for win11 · Codex-Feishu-Bridge",
+            ],
+        )
+
     def test_status_aggregation_uses_fixed_priority(self):
         statuses = self.bridge.aggregate_promlight_status
         self.assertEqual(statuses([]), "idle")

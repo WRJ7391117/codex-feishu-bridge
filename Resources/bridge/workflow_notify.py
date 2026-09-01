@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Submit one Ori One workflow event to the local bridge over its Unix socket."""
+"""Submit one allowlisted workflow event to the local bridge over its Unix socket."""
 
 from __future__ import annotations
 

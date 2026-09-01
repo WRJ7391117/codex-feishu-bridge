@@ -37,6 +37,7 @@ if str(BRIDGE_RESOURCE_DIR) not in sys.path:
 
 try:
     from workflow_notifications import (  # noqa: E402
+        AGENT_MESH_WORKFLOW_ID,
         ORI_ONE_WORKFLOW_ID,
         WorkflowNotificationError,
         WorkflowDecisionInbox,
@@ -49,6 +50,7 @@ except ModuleNotFoundError as exc:
     if exc.name != "workflow_notifications":
         raise
     ORI_ONE_WORKFLOW_ID = ""
+    AGENT_MESH_WORKFLOW_ID = ""
     WorkflowNotificationError = ValueError
     WorkflowStateError = RuntimeError
     WorkflowDecisionInbox = None
@@ -532,14 +534,20 @@ def workflow_configuration_valid() -> bool:
         return False
     recipient = str(WORKFLOW_CONFIG.get("recipient_open_id") or "").strip()
     chat_id = str(WORKFLOW_CONFIG.get("recipient_chat_id") or "").strip()
-    allowed_workflow_id = str(
-        WORKFLOW_CONFIG.get("allowed_workflow_id") or ""
-    ).strip()
-    codex_task_id = str(WORKFLOW_CONFIG.get("codex_task_id") or "").strip()
-    try:
-        normalized_task_id = str(uuid.UUID(codex_task_id))
-    except (ValueError, AttributeError):
-        normalized_task_id = ""
+    workflows = workflow_task_bindings()
+    configured_workflows = WORKFLOW_CONFIG.get("workflows")
+    workflow_entries_valid = configured_workflows is None or (
+        isinstance(configured_workflows, dict)
+        and all(
+            isinstance(workflow_id, str)
+            and workflow_id in {ORI_ONE_WORKFLOW_ID, AGENT_MESH_WORKFLOW_ID}
+            and isinstance(entry, dict)
+            and set(entry) == {"codex_task_id"}
+            and workflow_task_bindings().get(workflow_id)
+            == str(entry.get("codex_task_id") or "").strip()
+            for workflow_id, entry in configured_workflows.items()
+        )
+    )
     return (
         stat.S_ISREG(config_stat.st_mode)
         and not CONFIG_PATH.is_symlink()
@@ -547,8 +555,11 @@ def workflow_configuration_valid() -> bool:
         and (config_stat.st_mode & 0o777) == 0o600
         and recipient in ALLOWED_USERS
         and (not chat_id or chat_id.startswith("oc_"))
-        and allowed_workflow_id == ORI_ONE_WORKFLOW_ID
-        and normalized_task_id == codex_task_id.lower()
+        and workflow_entries_valid
+        and bool(workflows)
+        and set(workflows).issubset(
+            {ORI_ONE_WORKFLOW_ID, AGENT_MESH_WORKFLOW_ID}
+        )
         and Path(LARK_CLI) == APP_SUPPORT / "lark-cli"
     )
 
@@ -560,12 +571,39 @@ def workflow_recipient() -> tuple[str, str]:
     )
 
 
-def workflow_allowed_id() -> str:
-    return str(WORKFLOW_CONFIG.get("allowed_workflow_id") or "").strip()
+def workflow_task_bindings() -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    configured = WORKFLOW_CONFIG.get("workflows")
+    if isinstance(configured, dict):
+        for workflow_id, entry in configured.items():
+            if not isinstance(workflow_id, str) or not isinstance(entry, dict):
+                continue
+            task_id = str(entry.get("codex_task_id") or "").strip()
+            try:
+                normalized = str(uuid.UUID(task_id))
+            except (ValueError, AttributeError):
+                continue
+            if normalized == task_id.lower():
+                bindings[workflow_id.strip()] = task_id
+    legacy_workflow_id = str(
+        WORKFLOW_CONFIG.get("allowed_workflow_id") or ""
+    ).strip()
+    legacy_task_id = str(WORKFLOW_CONFIG.get("codex_task_id") or "").strip()
+    try:
+        normalized_legacy = str(uuid.UUID(legacy_task_id))
+    except (ValueError, AttributeError):
+        normalized_legacy = ""
+    if normalized_legacy == legacy_task_id.lower() and legacy_workflow_id:
+        bindings.setdefault(legacy_workflow_id, legacy_task_id)
+    return bindings
 
 
-def workflow_codex_task_id() -> str:
-    return str(WORKFLOW_CONFIG.get("codex_task_id") or "").strip()
+def workflow_allowed_ids() -> frozenset[str]:
+    return frozenset(workflow_task_bindings())
+
+
+def workflow_codex_task_id(workflow_id: str = ORI_ONE_WORKFLOW_ID) -> str:
+    return workflow_task_bindings().get(workflow_id, "")
 
 
 def allowed_projects_for(open_id: str) -> set[str]:
@@ -1500,7 +1538,6 @@ def _read_tasks_by_archive_state(archived: bool) -> list[sqlite3.Row]:
             WHERE catalog.host_id = 'local'
               AND catalog.missing_candidate = 0
               AND state.threads.archived = ?
-              AND state.threads.preview <> ''
             ORDER BY catalog.source_recency_at DESC, catalog.thread_id DESC
             """,
             (int(archived),),
@@ -4988,9 +5025,10 @@ def workflow_task_label(
 
 def workflow_task_route(
     user_id: str,
+    workflow_id: str,
 ) -> tuple[dict[str, str] | None, dict[str, str] | None]:
     try:
-        target_task = task_by_id(workflow_codex_task_id(), user_id)
+        target_task = task_by_id(workflow_codex_task_id(workflow_id), user_id)
         current_task = selected_task(user_id, load_state())
     except (OSError, sqlite3.Error):
         return None, None
@@ -5087,7 +5125,10 @@ def build_workflow_card(
         )
 
     if requires_action and user_id:
-        target_task, current_task = workflow_task_route(user_id)
+        target_task, current_task = workflow_task_route(
+            user_id,
+            str(record.get("workflow_id") or ""),
+        )
         target_label = workflow_task_label(target_task, "工作流专用 Task")
         current_label = workflow_task_label(current_task, "尚未选择")
         same_task = bool(
@@ -5301,6 +5342,21 @@ def workflow_recovery_prompt(recovery: dict[str, Any]) -> str:
             "不得调用外部业务系统、编排器或正式恢复命令；不得读取或修改仓库文件；"
             "不得租用、推进或改变任何正式研发任务。"
         )
+    if recovery.get("workflow_id") == AGENT_MESH_WORKFLOW_ID:
+        return (
+            "用户已通过飞书处理 Agent Mesh 自动研发 Task 的人工门。\n"
+            f"{workflow_recovery_signature(recovery)}\n"
+            f"任务：{recovery.get('task_id')}\n"
+            f"选择：{action_label}\n"
+            f"事项：{summary}\n"
+            f"工作台：{recovery.get('workbench_url')}\n\n"
+            "这是一次已完成飞书用户身份、卡片会话关联和单次消费检查的响应。"
+            "该通知属于当前 Codex 研发 Task，不是 Agent Mesh 产品功能。"
+            "请根据当前仓库的自动研发控制器状态处理该选择；"
+            "Bridge 不直接修改 Mesh 控制器。"
+            "resolution 为 pause 或 stop 时不得继续自动研发；"
+            "不得重复消费、重复提交或绕过仍然存在的人工门。"
+        )
     command = " ".join(
         [
             "node",
@@ -5342,8 +5398,13 @@ def workflow_recovery_signature(recovery: dict[str, Any]) -> str:
             f"selected_action_id: {recovery.get('selected_action_id')}\n"
             f"resolution: {recovery.get('resolution')}"
         )
+    workflow_label = (
+        "Agent Mesh 自动研发"
+        if recovery.get("workflow_id") == AGENT_MESH_WORKFLOW_ID
+        else "自动化工作流"
+    )
     return (
-        "自动化工作流飞书人工门响应\n"
+        f"{workflow_label}飞书人工门响应\n"
         f"attention_request_id: {recovery.get('attention_request_id')}\n"
         f"selected_action_id: {recovery.get('selected_action_id')}\n"
         f"resolution: {recovery.get('resolution')}"
@@ -5394,7 +5455,9 @@ def workflow_recovery_in_rollout(
 def submit_workflow_recovery(
     recovery: dict[str, Any],
 ) -> tuple[str, str]:
-    thread_id = workflow_codex_task_id()
+    thread_id = workflow_codex_task_id(str(recovery.get("workflow_id") or ""))
+    if not thread_id:
+        return "retry", "工作流对应的 Codex Task 未配置"
     if workflow_recovery_in_rollout(thread_id, recovery):
         return "accepted", "reconciled"
     if active_run_for_task(thread_id) is not None:
@@ -5469,8 +5532,12 @@ def retry_workflow_recoveries(now: float | None = None) -> bool:
     if not _workflow_delivery_lock.acquire(blocking=False):
         return False
     try:
-        thread_id = workflow_codex_task_id()
         for key, recovery in _workflow_store.unknown_recoveries():
+            thread_id = workflow_codex_task_id(
+                str(recovery.get("workflow_id") or "")
+            )
+            if not thread_id:
+                continue
             if workflow_recovery_in_rollout(thread_id, recovery):
                 _workflow_store.recovery_succeeded(key, "reconciled", now)
                 log("workflow decision delivery reconciled from dedicated Codex Task")
@@ -5574,7 +5641,7 @@ def handle_workflow_card_action(
             return True
         user_id = str(event.get("operator_id") or "")
         target_task_id = str(payload.get("task_id") or "")
-        if target_task_id != workflow_codex_task_id():
+        if target_task_id != workflow_codex_task_id(workflow_id):
             log("workflow route ignored reason=target-mismatch")
             return True
         if action == "workflow_switch_task":
@@ -5720,7 +5787,7 @@ def handle_workflow_socket_connection(connection: socket.socket) -> None:
         if not raw or len(raw) > 64 * 1024:
             raise WorkflowNotificationError("invalid request size")
         payload = validate_workflow_payload(json.loads(raw))
-        result = _workflow_store.enqueue(payload, workflow_allowed_id())
+        result = _workflow_store.enqueue(payload, workflow_allowed_ids())
         response = {"ok": True, "result": result}
     except WorkflowStateError:
         response = {"ok": False, "error": "workflow_state_unavailable"}
@@ -7131,6 +7198,10 @@ def option_text(task: dict[str, str]) -> str:
     return f"{task['project']} · {task['title']}"
 
 
+def task_selector_option_text(task: dict[str, str]) -> str:
+    return f"{task['title']} · {task['project']}"
+
+
 def build_task_card(
     tasks: list[dict[str, str]],
     selected_id: str | None,
@@ -7269,7 +7340,10 @@ def build_task_card(
         },
         "options": [
             {
-                "text": {"tag": "plain_text", "content": option_text(task)},
+                "text": {
+                    "tag": "plain_text",
+                    "content": task_selector_option_text(task),
+                },
                 "value": task["id"],
             }
             for task in visible_tasks
@@ -7559,7 +7633,10 @@ def build_task_subscriptions_card(
             "placeholder": {"tag": "plain_text", "content": "选择一个 Task"},
             "options": [
                 {
-                    "text": {"tag": "plain_text", "content": option_text(task)},
+                    "text": {
+                        "tag": "plain_text",
+                        "content": task_selector_option_text(task),
+                    },
                     "value": task["id"],
                 }
                 for task in visible_tasks
@@ -8045,7 +8122,10 @@ def build_promlight_task_card(
                 "placeholder": {"tag": "plain_text", "content": "选择 Task"},
                 "options": [
                     {
-                        "text": {"tag": "plain_text", "content": option_text(task)},
+                        "text": {
+                            "tag": "plain_text",
+                            "content": task_selector_option_text(task),
+                        },
                         "value": task["id"],
                     }
                     for task in project_tasks[:TASKS_PER_PAGE]
@@ -15133,7 +15213,7 @@ def self_test() -> int:
         option["text"]["content"]
         for option in selectors["task_selector"]["options"]
     ] == [
-        option_text(task)
+        task_selector_option_text(task)
         for task in tasks
         if task["project"] == tasks[0]["project"]
     ]
