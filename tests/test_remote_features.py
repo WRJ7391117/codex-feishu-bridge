@@ -4112,6 +4112,25 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(calls[0][1], 1)
         self.assertEqual(calls[0][2]["decision"], "accept")
 
+    def test_numeric_desktop_approval_id_keeps_its_protocol_type(self):
+        approval = self.bridge.approval_from_request(
+            {
+                "id": 11914,
+                "method": "item/commandExecution/requestApproval",
+                "params": {"command": "echo test"},
+            }
+        )
+
+        self.assertIsNotNone(approval)
+        self.assertEqual(approval["request_id"], "11914")
+        self.assertEqual(approval["protocol_request_id"], 11914)
+        _method, params = self.bridge.approval_response_request(
+            "task-a",
+            approval,
+            True,
+        )
+        self.assertEqual(params["requestId"], 11914)
+
     def test_interrupt_uses_expected_turn_guard(self):
         calls = []
         self.bridge.send_run_ipc_request = lambda run, method, version, params: calls.append(

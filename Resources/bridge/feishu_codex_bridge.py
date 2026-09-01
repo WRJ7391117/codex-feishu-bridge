@@ -10817,18 +10817,21 @@ def approval_response_request(
     request_id = str(approval.get("request_id") or "")
     if not request_id:
         raise ValueError("missing approval request id")
+    protocol_request_id = approval.get("protocol_request_id")
+    if protocol_request_id is None:
+        protocol_request_id = int(request_id) if request_id.isdigit() else request_id
     if approval_type == "command":
         method = "thread-follower-command-approval-decision"
         params: dict[str, Any] = {
             "conversationId": task_id,
-            "requestId": request_id,
+            "requestId": protocol_request_id,
             "decision": "accept" if approved else "decline",
         }
     elif approval_type == "file":
         method = "thread-follower-file-approval-decision"
         params = {
             "conversationId": task_id,
-            "requestId": request_id,
+            "requestId": protocol_request_id,
             "decision": "accept" if approved else "decline",
         }
     elif approval_type == "permission":
@@ -10836,7 +10839,7 @@ def approval_response_request(
         requested = approval.get("params", {}).get("permissions")
         params = {
             "conversationId": task_id,
-            "requestId": request_id,
+            "requestId": protocol_request_id,
             "response": {
                 "permissions": requested if approved and isinstance(requested, dict) else {},
                 "scope": "turn",
@@ -11823,7 +11826,10 @@ def set_run_progress(
 
 
 def approval_from_request(request: dict[str, Any]) -> dict[str, Any] | None:
-    request_id = str(request.get("id") or request.get("requestId") or "")
+    protocol_request_id = request.get("id")
+    if protocol_request_id is None:
+        protocol_request_id = request.get("requestId")
+    request_id = str(protocol_request_id or "")
     method = str(request.get("method") or "")
     params = request.get("params") if isinstance(request.get("params"), dict) else {}
     if not request_id:
@@ -11841,6 +11847,7 @@ def approval_from_request(request: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "request_id": request_id,
+        "protocol_request_id": protocol_request_id,
         "type": request_type,
         "detail": " ".join(detail.split())[:1200],
         "params": params,

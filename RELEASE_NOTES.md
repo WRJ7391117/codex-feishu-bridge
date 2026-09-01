@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.11.11 (build 90)
+
+- Preserves the original numeric or string Desktop approval request ID when returning a subscribed user's decision, while retaining a stable string key for Feishu card deduplication.
+- Fixes the case where Feishu showed “已允许” but Codex Desktop remained at the same command, file-change, or permission human gate.
+
 ## 1.11.10 (build 89)
 
 - Sends an actionable Feishu card when a subscribed Codex Desktop Task reaches a command, file-change, or temporary-permission human gate.
