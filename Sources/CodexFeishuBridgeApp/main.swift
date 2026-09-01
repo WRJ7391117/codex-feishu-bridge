@@ -1804,11 +1804,15 @@ private struct MainView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button(model.isRunning ? "停止本次运行…" : "立即开启") {
+            Button {
                 model.toggleBridge()
+            } label: {
+                Text(model.isRunning ? "停止本次运行…" : "立即开启")
+                    .frame(minWidth: 90)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+            .fixedSize(horizontal: true, vertical: false)
             .tint(model.isRunning ? .red : .accentColor)
         }
         .padding(18)
