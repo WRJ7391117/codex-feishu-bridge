@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\DeepOriBridge\Models\CodexAppServerModels.cs" Link="Production\CodexAppServerModels.cs" />
+    <Compile Include="..\DeepOriBridge\Models\BridgeRuntimeSnapshot.cs" Link="Production\BridgeRuntimeSnapshot.cs" />
+    <Compile Include="..\DeepOriBridge\Models\FeishuEventRuntimeModels.cs" Link="Production\FeishuEventRuntimeModels.cs" />
+    <Compile Include="..\DeepOriBridge\Services\CodexAppServerClient.cs" Link="Production\CodexAppServerClient.cs" />
+    <Compile Include="..\DeepOriBridge\Services\BridgeRuntime.cs" Link="Production\BridgeRuntime.cs" />
+    <Compile Include="..\DeepOriBridge\Services\CodexExecutableLocator.cs" Link="Production\CodexExecutableLocator.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuEventSafetyPolicy.cs" Link="Production\FeishuEventSafetyPolicy.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuRouteGateCoordinator.cs" Link="Production\FeishuRouteGateCoordinator.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuRouteClaimProjection.cs" Link="Production\FeishuRouteClaimProjection.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuArmExpiryScheduler.cs" Link="Production\FeishuArmExpiryScheduler.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuEventSnapshotStore.cs" Link="Production\FeishuEventSnapshotStore.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuSidecarProtocol.cs" Link="Production\FeishuSidecarProtocol.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "DeepOriBridge (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "DeepOriBridge (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

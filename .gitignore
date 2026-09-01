@@ -5,3 +5,26 @@ build/
 dist/
 .build/
 *.migrated-backup
+
+# Windows / WinUI generated output
+windows/**/bin/
+windows/**/obj/
+windows/**/AppPackages/
+windows/**/.vs/
+windows/DeepOriBridge/Tools/*.exe
+
+# Local bridge state and sensitive runtime material
+windows/**/config.json
+windows/**/state.json
+windows/**/*.db
+windows/**/*.sqlite
+windows/**/*.sqlite3
+windows/**/*.log
+
+# Credentials and signing material must stay outside the repository
+.env
+.env.*
+*.pfx
+*.p12
+*.key
+*.pem
