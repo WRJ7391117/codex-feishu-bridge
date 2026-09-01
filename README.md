@@ -106,7 +106,7 @@ App 已内置桥接所需的专用 `lark-cli`；普通用户无需先安装命�
 lark-cli --profile codex-notify doctor
 ```
 
-App 运行时优先使用随安装包提供的 `1.0.89-codex-feishu.3`，它在官方 `v1.0.89` 基础上修复 `card.action.trigger` 的 WebSocket 回执类型并同步显示“正在处理…”反馈；Profile 和 Keychain 凭据仍与系统 `lark-cli` 共用。
+App 运行时优先使用随安装包提供的 `1.0.92-codex-feishu.3`，它在官方 `v1.0.92` 基础上修复 `card.action.trigger` 的 WebSocket 回执类型并同步显示“正在处理…”反馈；Profile 和 Keychain 凭据仍与系统 `lark-cli` 共用。
 
 ### 4. 配置飞书开发者后台
 
@@ -225,7 +225,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 ## 从源码构建
 
-需要 Xcode Command Line Tools、Go 和网络连接。构建脚本通过 SwiftPM 固定 Sparkle `2.9.6`，校验官方 `lark-cli v1.0.89` 的固定提交和应用仓库中的最小补丁，运行对应 Go 单测，并生成 Apple Silicon + Intel 通用二进制：
+需要 Xcode Command Line Tools、Go 和网络连接。构建脚本通过 SwiftPM 固定 Sparkle `2.9.6`，校验官方 `lark-cli v1.0.92` 的固定提交和应用仓库中的最小补丁，运行对应 Go 单测，并生成 Apple Silicon + Intel 通用二进制：
 
 ```bash
 ./scripts/build-app.sh

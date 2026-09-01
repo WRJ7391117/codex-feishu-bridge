@@ -2782,7 +2782,7 @@ class DiagnosticScriptTests(unittest.TestCase):
         lark_cli.write_text(
             "#!/bin/sh\n"
             "case \"$*\" in\n"
-            "  *--version*) printf '%s\\n' '1.0.89-codex-feishu.3' ;;\n"
+            "  *--version*) printf '%s\\n' '1.0.92-codex-feishu.3' ;;\n"
             f"  *doctor*) printf '%s\\n' '{json.dumps(doctor_payload)}' ;;\n"
             "  *'event status'*) printf '%s\\n' "
             "'{\"apps\":[{\"active_consumers\":3}]}' ;;\n"
@@ -2814,12 +2814,12 @@ class DiagnosticScriptTests(unittest.TestCase):
                 {
                     "name": "cli_version",
                     "status": "pass",
-                    "message": "1.0.89-codex-feishu.3",
+                    "message": "1.0.92-codex-feishu.3",
                 },
                 {
                     "name": "cli_update",
                     "status": "warn",
-                    "message": "1.0.89-codex-feishu.3 → 1.0.89 available",
+                    "message": "1.0.92-codex-feishu.3 → 1.0.92 available",
                 },
                 {
                     "name": "user_identity",
@@ -2841,12 +2841,12 @@ class DiagnosticScriptTests(unittest.TestCase):
                 {
                     "name": "cli_version",
                     "status": "pass",
-                    "message": "1.0.89-codex-feishu.3",
+                    "message": "1.0.92-codex-feishu.3",
                 },
                 {
                     "name": "cli_update",
                     "status": "warn",
-                    "message": "1.0.89-codex-feishu.3 → 1.0.90 available",
+                    "message": "1.0.92-codex-feishu.3 → 1.0.93 available",
                 },
             ],
             "ok": True,
@@ -2855,7 +2855,7 @@ class DiagnosticScriptTests(unittest.TestCase):
         result = self._run_diagnose(payload)
 
         self.assertIn('"name": "cli_update"', result.stdout)
-        self.assertIn("1.0.90 available", result.stdout)
+        self.assertIn("1.0.93 available", result.stdout)
 
     def test_diagnose_does_not_require_unconfigured_private_extension(self):
         payload = {"checks": [], "ok": True}

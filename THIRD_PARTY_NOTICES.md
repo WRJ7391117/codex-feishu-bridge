@@ -33,7 +33,7 @@ SOFTWARE.
 
 ## lark-cli
 
-This product bundles a modified build of [larksuite/cli](https://github.com/larksuite/cli), based on tag `v1.0.89` and commit `423e81fcc666c721f27c22be53086739d87d0f3e`.
+This product bundles a modified build of [larksuite/cli](https://github.com/larksuite/cli), based on tag `v1.0.92` and commit `6646386e0996b1ff5df640bccff834a20bcb203b`.
 
 Copyright (c) 2026 Lark Technologies Pte. Ltd.
 

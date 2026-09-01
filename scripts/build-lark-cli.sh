@@ -4,9 +4,9 @@ set -euo pipefail
 
 project_dir="${0:A:h:h}"
 output_path="${1:-${project_dir}/build/vendor/lark-cli}"
-source_tag="v1.0.89"
-source_commit="423e81fcc666c721f27c22be53086739d87d0f3e"
-patched_version="1.0.89-codex-feishu.3"
+source_tag="v1.0.92"
+source_commit="6646386e0996b1ff5df640bccff834a20bcb203b"
+patched_version="1.0.92-codex-feishu.3"
 patch_file="${project_dir}/patches/lark-cli-v1.0.89-card-action-response.patch"
 work_dir="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/codex-feishu-lark-cli.XXXXXX")"
 trap '/bin/rm -rf -- "${work_dir}"' EXIT
@@ -37,7 +37,7 @@ fi
         internal/event/adapter/lark/websocket/feishu_ingress_test.go
     "${go_bin}" test ./internal/event/adapter/lark/websocket
 
-    ldflags="-s -w -X github.com/larksuite/cli/internal/build.Version=${patched_version} -X github.com/larksuite/cli/internal/build.Date=2026-08-22"
+    ldflags="-s -w -X github.com/larksuite/cli/internal/build.Version=${patched_version} -X github.com/larksuite/cli/internal/build.Date=2026-09-02"
     CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 "${go_bin}" build \
         -trimpath -ldflags "${ldflags}" -o "${work_dir}/lark-cli-arm64" .
     CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 "${go_bin}" build \

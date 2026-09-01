@@ -1266,19 +1266,22 @@ private final class BridgeViewModel: ObservableObject {
             || unsuccessfulCheck("app_resolved") != nil {
             return "没有找到可用的本机连接。请重新输入 App ID 和 App Secret。"
         }
+        if unsuccessfulCheck("endpoint_open") != nil {
+            return "无法连接飞书服务。请检查当前网络后重新检查。"
+        }
         if let botCheck = unsuccessfulCheck("bot_identity") {
             let diagnostic = [botCheck["message"], botCheck["hint"]]
                 .compactMap { $0 as? String }
                 .joined(separator: " ")
                 .lowercased()
-            let networkMarkers = [" eof", "timeout", "timed out", "network", "connection"]
+            let networkMarkers = [
+                "eof", "timeout", "timed out", "network", "connection",
+                "dial tcp", "lookup ", "no such host", "tls",
+            ]
             if networkMarkers.contains(where: diagnostic.contains) {
                 return "无法连接飞书身份服务。请检查网络后重新检查；如果持续失败，再核对 App ID 和 App Secret。"
             }
-            return "Bot 身份验证失败。请核对 App ID、App Secret，并确认飞书应用已启用机器人能力。"
-        }
-        if unsuccessfulCheck("endpoint_open") != nil {
-            return "无法连接飞书服务。请检查当前网络后重新检查。"
+            return "Bot 身份验证失败。请核对 App ID 和 App Secret。"
         }
         return fallback
     }
@@ -2174,7 +2177,12 @@ private struct ConnectionSetupView: View {
                 setupPathFooter
             }
         }
-        .frame(width: 1120, height: 760)
+        .frame(
+            minWidth: 820,
+            idealWidth: 1120,
+            minHeight: 620,
+            idealHeight: 760
+        )
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $showConfigurationChecklist) {
             ConfigurationChecklistView(model: model)

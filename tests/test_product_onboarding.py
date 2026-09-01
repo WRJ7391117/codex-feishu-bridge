@@ -82,6 +82,13 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('unsuccessfulCheck("bot_identity")', summary)
         self.assertIn('unsuccessfulCheck("endpoint_open")', summary)
         self.assertIn("无法连接飞书身份服务", summary)
+        self.assertLess(
+            summary.index('unsuccessfulCheck("endpoint_open")'),
+            summary.index('unsuccessfulCheck("bot_identity")'),
+        )
+        for marker in ("dial tcp", "lookup ", "no such host", "tls"):
+            self.assertIn(marker, summary)
+        self.assertNotIn("确认飞书应用已启用机器人能力", summary)
         self.assertNotIn("return result.output", summary)
 
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
@@ -97,6 +104,9 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("if model.setupUsesExistingProfile", status_panel)
         self.assertIn('Button(model.isConfiguringProfile ? "正在检查…" : "重新检查")', status_panel)
         self.assertIn("现有连接需要重新检查", setup)
+        self.assertNotIn(".frame(width: 1120, height: 760)", setup)
+        self.assertIn("minWidth: 820", setup)
+        self.assertIn("idealHeight: 760", setup)
 
     def test_setup_has_explicit_close_and_reconfigure_actions(self):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(

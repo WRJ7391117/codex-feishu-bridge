@@ -9,6 +9,7 @@
 - Adds a nonce-based runtime quiesce handshake for later updates: event intake stops, in-flight lanes and durable queues drain, and only then may the installer replace and restart the background component.
 - Generates and validates `appcast.xml` in the tag Release workflow with a stable Ed25519 key whose private half is limited to GitHub Actions Secrets and the release Mac's login Keychain.
 - Turns manual-setup `lark-cli doctor` failures into concise guidance, keeps saved credentials selected after transient network errors, and prevents raw diagnostic JSON from overflowing the setup window.
+- Upgrades the bundled patched `lark-cli` base to official `v1.0.92` while retaining the typed card-action acknowledgement and durable workflow-decision inbox required by Bridge.
 
 ## 1.11.12 (build 91)
 
