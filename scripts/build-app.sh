@@ -10,25 +10,31 @@ app_dir="${build_dir}/${app_name}"
 contents="${app_dir}/Contents"
 macos_dir="${contents}/MacOS"
 resources_dir="${contents}/Resources"
+frameworks_dir="${contents}/Frameworks"
 sdk="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 signing_identity="${CODE_SIGN_IDENTITY:--}"
 notary_profile="${NOTARY_PROFILE:-}"
 
 /bin/rm -rf "${build_dir}" "${dist_dir}"
-/bin/mkdir -p "${macos_dir}" "${resources_dir}" "${dist_dir}"
+/bin/mkdir -p "${macos_dir}" "${resources_dir}" "${frameworks_dir}" "${dist_dir}"
 
 bundled_lark_cli="${build_dir}/vendor/lark-cli"
 "${project_dir}/scripts/build-lark-cli.sh" "${bundled_lark_cli}"
 
-source_file="${project_dir}/Sources/CodexFeishuBridgeApp/main.swift"
-/usr/bin/xcrun swiftc -O -target arm64-apple-macos13.0 -sdk "${sdk}" \
-    "${source_file}" -o "${build_dir}/CodexFeishuBridge-arm64"
-/usr/bin/xcrun swiftc -O -target x86_64-apple-macos13.0 -sdk "${sdk}" \
-    "${source_file}" -o "${build_dir}/CodexFeishuBridge-x86_64"
+/usr/bin/swift build --package-path "${project_dir}" \
+    -c release --arch arm64 --product CodexFeishuBridge
+/usr/bin/swift build --package-path "${project_dir}" \
+    -c release --arch x86_64 --product CodexFeishuBridge
 /usr/bin/lipo -create \
-    "${build_dir}/CodexFeishuBridge-arm64" \
-    "${build_dir}/CodexFeishuBridge-x86_64" \
+    "${project_dir}/.build/arm64-apple-macosx/release/CodexFeishuBridge" \
+    "${project_dir}/.build/x86_64-apple-macosx/release/CodexFeishuBridge" \
     -output "${macos_dir}/CodexFeishuBridge"
+sparkle_framework="${project_dir}/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+if [[ ! -d "${sparkle_framework}" ]]; then
+    print -u2 "Sparkle.framework was not resolved by SwiftPM"
+    exit 1
+fi
+/usr/bin/ditto "${sparkle_framework}" "${frameworks_dir}/Sparkle.framework"
 
 /bin/cp "${project_dir}/Resources/Info.plist" "${contents}/Info.plist"
 /bin/cp "${project_dir}/THIRD_PARTY_NOTICES.md" "${resources_dir}/THIRD_PARTY_NOTICES.md"
@@ -78,12 +84,24 @@ for size in 16 32 128 256 512; do
 done
 /usr/bin/iconutil -c icns "${iconset}" -o "${resources_dir}/AppIcon.icns"
 
-codesign_args=(--force --deep --sign "${signing_identity}" \
-    --identifier "com.deepori.codex-feishu-bridge")
+codesign_args=(--force --sign "${signing_identity}")
 if [[ "${signing_identity}" != "-" ]]; then
     codesign_args+=(--options runtime --timestamp)
 fi
-/usr/bin/codesign "${codesign_args[@]}" "${app_dir}"
+/usr/bin/codesign "${codesign_args[@]}" "${resources_dir}/bridge/lark-cli"
+/usr/bin/codesign "${codesign_args[@]}" "${resources_dir}/bridge/promlight-helper"
+sparkle_version="${frameworks_dir}/Sparkle.framework/Versions/B"
+for nested_bundle in \
+    "${sparkle_version}/XPCServices/Downloader.xpc" \
+    "${sparkle_version}/XPCServices/Installer.xpc" \
+    "${sparkle_version}/Updater.app"; do
+    /usr/bin/codesign "${codesign_args[@]}" \
+        --preserve-metadata=entitlements "${nested_bundle}"
+done
+/usr/bin/codesign "${codesign_args[@]}" "${sparkle_version}/Autoupdate"
+/usr/bin/codesign "${codesign_args[@]}" "${frameworks_dir}/Sparkle.framework"
+/usr/bin/codesign "${codesign_args[@]}" \
+    --identifier "com.deepori.codex-feishu-bridge" "${app_dir}"
 /usr/bin/plutil -lint "${contents}/Info.plist" >/dev/null
 /usr/bin/codesign --verify --deep --strict "${app_dir}"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent \

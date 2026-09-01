@@ -1,5 +1,12 @@
 # Release Notes
 
+## 1.11.13 (build 92)
+
+- Replaces the App's custom GitHub Release discovery loop with Sparkle 2.9.6, using a signed appcast and launch or Bridge-event-triggered checks, without scheduled polling.
+- Downloads verified updates automatically, but holds both automatic and interactive installation handlers until active runs and all durable Bridge queues are empty.
+- Migrates the existing automatic-update preference into Sparkle, keeps the old update assets for the one-time 1.11.12 transition, and retries bundled runtime synchronization after Bridge work becomes idle.
+- Generates and validates `appcast.xml` in the tag Release workflow with a stable Ed25519 key whose private half is limited to GitHub Actions Secrets and the release Mac's login Keychain.
+
 ## 1.11.12 (build 91)
 
 - Includes named Codex Desktop sidebar Tasks before their first message, so newly created empty Tasks are immediately available in Feishu Task switching, subscriptions, archives, and PromLight associations.

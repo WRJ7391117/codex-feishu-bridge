@@ -19,12 +19,24 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-	<string>1.11.12</string>
+	<string>1.11.13</string>
     <key>CFBundleVersion</key>
-	<string>91</string>
+	<string>92</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>SUFeedURL</key>
+    <string>https://github.com/WRJ7391117/codex-feishu-bridge/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>KlD6COBI9hfRfj8cge5hvkU4LPMqWWXdctiGRoJg19E=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <false/>
+    <key>SUAllowsAutomaticUpdates</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
     <true/>
 </dict>
 </plist>

@@ -22,6 +22,8 @@ INFO_PLIST = ROOT / "Resources/Info.plist"
 SETUP_SKILL = ROOT / "skills/deepori-bridge-setup/SKILL.md"
 SETUP_SKILL_AGENT = ROOT / "skills/deepori-bridge-setup/agents/openai.yaml"
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release.yml"
+APPCAST_SCRIPT = ROOT / "scripts/generate-appcast.sh"
+PACKAGE_MANIFEST = ROOT / "Package.swift"
 
 
 class ProductOnboardingTests(unittest.TestCase):
@@ -191,13 +193,30 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('"${project_dir}/skills/deepori-bridge-setup"', build)
         self.assertIn('"${resources_dir}/CodexSkills/deepori-bridge-setup"', build)
 
-    def test_release_workflow_is_the_idempotent_release_owner(self):
+    def test_release_workflow_publishes_immutable_signed_drafts(self):
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn('gh release view "$GITHUB_REF_NAME"', workflow)
-        self.assertIn('gh release upload "$GITHUB_REF_NAME"', workflow)
-        self.assertIn("--clobber", workflow)
         self.assertIn('gh release create "$GITHUB_REF_NAME"', workflow)
+        self.assertIn("MACOS_CODE_SIGN_IDENTITY", workflow)
+        self.assertIn("MACOS_NOTARY_PROFILE", workflow)
+        self.assertIn("--draft", workflow)
+        self.assertIn("--draft=false", workflow)
+        self.assertNotIn("--clobber", workflow)
         self.assertIn('title="DeepOri Bridge ${GITHUB_REF_NAME#v} for macOS"', workflow)
+
+    def test_sparkle_is_pinned_embedded_and_signed_by_release_workflow(self):
+        package = PACKAGE_MANIFEST.read_text(encoding="utf-8")
+        build = BUILD_SCRIPT.read_text(encoding="utf-8")
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        appcast = APPCAST_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('exact: "2.9.6"', package)
+        self.assertIn('"${frameworks_dir}/Sparkle.framework"', build)
+        self.assertIn('@executable_path/../Frameworks', package)
+        self.assertNotIn("--deep --sign", build)
+        self.assertIn("SPARKLE_PRIVATE_KEY", workflow)
+        self.assertIn("dist/appcast.xml", workflow)
+        self.assertIn("--ed-key-file -", appcast)
+        self.assertIn("SPARKLE_PUBLIC_KEY", appcast)
 
     def test_app_update_and_local_repair_are_clearly_separated(self):
         management = self.source.split("private var actionsCard", 1)[1].split(
@@ -206,8 +225,9 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("App 更新", management)
         self.assertIn("检查更新", management)
         self.assertIn("自动安装 App 更新", management)
-        self.assertIn("桥接空闲时自动安装，不中断 Task", management)
-        self.assertIn("更新源：GitHub", management)
+        self.assertIn("不定时轮询", management)
+        self.assertIn("桥接空闲时安装", management)
+        self.assertIn("更新源：签名的 GitHub appcast", management)
         self.assertIn("请连接 VPN", management)
         self.assertIn("高级维护", management)
         advanced = management.split("DisclosureGroup", 1)[1]
@@ -227,11 +247,14 @@ class ProductOnboardingTests(unittest.TestCase):
         )[0]
         self.assertIn(".padding(.top, 20)", header)
 
-        update_check = self.source.split("func checkForUpdates", 1)[1].split(
-            "func installUpdate", 1
+        update_check = self.source.split("private final class SparkleUpdateCoordinator", 1)[1].split(
+            "private final class BridgeViewModel", 1
         )[0]
-        self.assertIn("无法访问 GitHub Releases", update_check)
-        self.assertIn("连接 VPN 后重试", update_check)
+        self.assertIn("controller.checkForUpdates(nil)", update_check)
+        self.assertIn("makeFileSystemObjectSource", update_check)
+        self.assertIn("lastUpdateCheckDate", update_check)
+        self.assertIn("bridgeActivityCheckMinimumInterval", update_check)
+        self.assertNotIn("URLSession", update_check)
 
     def test_setup_keeps_technical_connection_details_out_of_the_main_path(self):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(

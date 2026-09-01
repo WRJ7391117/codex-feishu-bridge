@@ -1,6 +1,8 @@
 import AppKit
 import Combine
+import Darwin
 import Foundation
+import Sparkle
 import SwiftUI
 
 private enum ProductBrand {
@@ -169,6 +171,14 @@ private final class BridgeController: @unchecked Sendable {
     func install() -> CommandResult {
         guard let script = bundledBridgeDirectory?.appendingPathComponent("install.sh") else {
             return CommandResult(status: 1, output: "安装资源不存在")
+        }
+        return run(script.path, [])
+    }
+
+    @discardableResult
+    func updateRuntimeWithHealthRollback() -> CommandResult {
+        guard let script = bundledBridgeDirectory?.appendingPathComponent("runtime_update.sh") else {
+            return CommandResult(status: 1, output: "后台组件更新资源不存在")
         }
         return run(script.path, [])
     }
@@ -507,110 +517,32 @@ private final class BridgeController: @unchecked Sendable {
         )
     }
 
-    func stageAppUpdate(
-        downloadedArchive: URL,
-        expectedSHA256: String,
-        expectedVersion: String
-    ) throws -> URL {
-        let health = healthSnapshot()
-        guard health.activeRuns == 0,
-              health.pendingInputs == 0,
-              health.pendingDeliveries == 0,
-              health.pendingTaskCreations == 0 else {
-            throw BridgeUpdateError.message("仍有运行队列、待补发结果或新建 Task 请求，请处理完成后再更新。")
+    func isUpdateInstallationSafe() -> Bool {
+        let fileManager = FileManager.default
+        let bridgeRunning = isRunning()
+        if fileManager.fileExists(atPath: stateURL.path) {
+            guard let data = try? Data(contentsOf: stateURL),
+                  let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (state["pending_inputs"] == nil || state["pending_inputs"] is [Any]),
+                  (state["pending_replies"] == nil || state["pending_replies"] is [Any]),
+                  (state["pending_task_creations"] == nil
+                    || state["pending_task_creations"] is [String: Any]),
+                  (state["pending_inputs"] as? [Any] ?? []).isEmpty,
+                  (state["pending_replies"] as? [Any] ?? []).isEmpty,
+                  (state["pending_task_creations"] as? [String: Any] ?? [:]).isEmpty else {
+                return false
+            }
+        } else if bridgeRunning {
+            return false
         }
-        let cleanDigest = expectedSHA256
-            .lowercased()
-            .replacingOccurrences(of: "sha256:", with: "")
-        guard cleanDigest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
-            throw BridgeUpdateError.message("GitHub Release 没有提供有效的 SHA-256，已停止更新。")
+        guard bridgeRunning else { return true }
+        guard let data = try? Data(contentsOf: runtimeStatusURL),
+              let runtime = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let activeRuns = runtime["active_runs"] as? NSNumber,
+              CFGetTypeID(activeRuns) != CFBooleanGetTypeID() else {
+            return false
         }
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("CodexFeishuBridgeUpdate-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
-        let archive = staging.appendingPathComponent("update.zip")
-        try FileManager.default.copyItem(at: downloadedArchive, to: archive)
-        let digestResult = run("/usr/bin/shasum", ["-a", "256", archive.path])
-        let actualDigest = digestResult.output.split(separator: " ").first.map(String.init) ?? ""
-        guard digestResult.status == 0, actualDigest.lowercased() == cleanDigest else {
-            throw BridgeUpdateError.message("更新包 SHA-256 校验失败，已停止安装。")
-        }
-        let expanded = staging.appendingPathComponent("expanded", isDirectory: true)
-        try FileManager.default.createDirectory(at: expanded, withIntermediateDirectories: false)
-        let extract = run("/usr/bin/ditto", ["-x", "-k", archive.path, expanded.path])
-        guard extract.status == 0 else {
-            throw BridgeUpdateError.message("无法解压更新包。")
-        }
-        let app = expanded.appendingPathComponent("Codex 飞书桥接.app", isDirectory: true)
-        guard let bundle = Bundle(url: app),
-              bundle.bundleIdentifier == "com.deepori.codex-feishu-bridge",
-              (bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
-                == expectedVersion else {
-            throw BridgeUpdateError.message("更新包中的 App 身份或版本不匹配。")
-        }
-        let signature = run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
-        guard signature.status == 0 else {
-            throw BridgeUpdateError.message("更新包签名验证失败。")
-        }
-        let architectures = run(
-            "/usr/bin/lipo",
-            [
-                app.appendingPathComponent("Contents/MacOS/CodexFeishuBridge").path,
-                "-verify_arch", "arm64", "x86_64",
-            ]
-        )
-        guard architectures.status == 0 else {
-            throw BridgeUpdateError.message("更新包不是完整的 Universal App。")
-        }
-        let helperArchitectures = run(
-            "/usr/bin/lipo",
-            [
-                app.appendingPathComponent(
-                    "Contents/Resources/bridge/promlight-helper"
-                ).path,
-                "-verify_arch", "arm64", "x86_64",
-            ]
-        )
-        guard helperArchitectures.status == 0 else {
-            throw BridgeUpdateError.message("更新包没有包含完整的 Universal PromLight Helper。")
-        }
-        return app
-    }
-
-    func launchAppUpdate(stagedApp: URL, expectedVersion: String) -> CommandResult {
-        guard let helper = bundledBridgeDirectory?.appendingPathComponent("app_update.sh") else {
-            return CommandResult(status: 1, output: "更新助手不存在")
-        }
-        let destination = Bundle.main.bundleURL.standardizedFileURL
-        let allowedDestinations = [
-            URL(fileURLWithPath: "/Applications/Codex 飞书桥接.app").standardizedFileURL,
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Applications/Codex 飞书桥接.app")
-                .standardizedFileURL,
-        ]
-        guard allowedDestinations.contains(destination),
-              FileManager.default.isWritableFile(
-                atPath: destination.deletingLastPathComponent().path
-              ) else {
-            return CommandResult(
-                status: 1,
-                output: "当前 App 不在可更新的 Applications 目录，或目录不可写。请下载正式安装包后再打开。"
-            )
-        }
-        let process = Process()
-        process.executableURL = helper
-        process.arguments = [
-            stagedApp.path,
-            destination.path,
-            String(ProcessInfo.processInfo.processIdentifier),
-            expectedVersion,
-        ]
-        do {
-            try process.run()
-            return CommandResult(status: 0, output: "")
-        } catch {
-            return CommandResult(status: 1, output: error.localizedDescription)
-        }
+        return activeRuns.intValue == 0
     }
 
     private func readJSONObject(at url: URL) -> [String: Any] {
@@ -689,12 +621,159 @@ private final class BridgeController: @unchecked Sendable {
 }
 
 @MainActor
-private final class BridgeViewModel: ObservableObject {
-    private static let automaticUpdatesPreferenceKey = "automaticAppUpdatesEnabled"
-    private static let automaticUpdateRetryInterval: TimeInterval = 60 * 60
+private final class SparkleUpdateCoordinator: NSObject, SPUUpdaterDelegate {
+    private static let legacyPreferenceKey = "automaticAppUpdatesEnabled"
+    private static let bridgeActivityCheckMinimumInterval: TimeInterval = 6 * 60 * 60
 
     private let bridge: BridgeController
-    private var lastAutomaticUpdateAttemptAt: Date?
+    private var pendingInstallationHandlers: [() -> Void] = []
+    private var lastObservedBridgeEventAt: Date?
+    private var lastObservedUpdateSafe: Bool?
+    private var bridgeStateWatcher: DispatchSourceFileSystemObject?
+    var onBridgeBecameIdle: (() -> Void)?
+    var shouldHoldPendingInstallation: (() -> Bool)?
+    private lazy var controller = SPUStandardUpdaterController(
+        startingUpdater: false,
+        updaterDelegate: self,
+        userDriverDelegate: nil
+    )
+
+    init(bridge: BridgeController) {
+        self.bridge = bridge
+        super.init()
+    }
+
+    var automaticUpdatesEnabled: Bool {
+        controller.updater.automaticallyDownloadsUpdates
+    }
+
+    var hasPendingInstallation: Bool {
+        !pendingInstallationHandlers.isEmpty
+    }
+
+    func start() -> String? {
+        do {
+            try controller.updater.start()
+        } catch {
+            return error.localizedDescription
+        }
+        controller.updater.automaticallyChecksForUpdates = false
+        let defaults = UserDefaults.standard
+        if let legacyPreference = defaults.object(
+            forKey: Self.legacyPreferenceKey
+        ) as? Bool {
+            controller.updater.automaticallyDownloadsUpdates = legacyPreference
+            defaults.removeObject(forKey: Self.legacyPreferenceKey)
+        }
+        lastObservedBridgeEventAt = bridge.healthSnapshot().lastFeishuEventAt
+        lastObservedUpdateSafe = bridge.isUpdateInstallationSafe()
+        startBridgeStateWatcher()
+        if controller.updater.canCheckForUpdates {
+            controller.updater.checkForUpdatesInBackground()
+        }
+        return nil
+    }
+
+    func setAutomaticUpdatesEnabled(_ enabled: Bool) {
+        controller.updater.automaticallyDownloadsUpdates = enabled
+    }
+
+    func checkForUpdates() {
+        controller.checkForUpdates(nil)
+    }
+
+    func waitForBridgeToBecomeIdle() {
+        lastObservedUpdateSafe = false
+    }
+
+    private func startBridgeStateWatcher() {
+        guard bridgeStateWatcher == nil else { return }
+        let stateDirectory = bridge.stateURL.deletingLastPathComponent()
+        let descriptor = Darwin.open(stateDirectory.path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+        let watcher = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor,
+            eventMask: [.write, .rename, .delete],
+            queue: .main
+        )
+        watcher.setEventHandler { [weak self] in
+            self?.bridgeStateDidChange()
+        }
+        watcher.setCancelHandler {
+            Darwin.close(descriptor)
+        }
+        bridgeStateWatcher = watcher
+        watcher.resume()
+    }
+
+    private func bridgeStateDidChange() {
+        let installationSafe = bridge.isUpdateInstallationSafe()
+        let becameIdle = installationSafe && lastObservedUpdateSafe == false
+        lastObservedUpdateSafe = installationSafe
+        if becameIdle {
+            onBridgeBecameIdle?()
+        }
+        if !pendingInstallationHandlers.isEmpty,
+           installationSafe,
+           shouldHoldPendingInstallation?() != true {
+            let handlers = pendingInstallationHandlers
+            pendingInstallationHandlers.removeAll()
+            DispatchQueue.main.async {
+                guard self.bridge.isUpdateInstallationSafe() else {
+                    self.pendingInstallationHandlers.append(contentsOf: handlers)
+                    return
+                }
+                handlers.forEach { $0() }
+            }
+        }
+
+        guard let eventAt = bridge.healthSnapshot().lastFeishuEventAt,
+              eventAt != lastObservedBridgeEventAt else { return }
+        lastObservedBridgeEventAt = eventAt
+        guard controller.updater.canCheckForUpdates,
+              !controller.updater.sessionInProgress,
+              controller.updater.lastUpdateCheckDate.map({
+                  Date().timeIntervalSince($0)
+                    >= Self.bridgeActivityCheckMinimumInterval
+              }) ?? true else { return }
+        controller.updater.checkForUpdatesInBackground()
+    }
+
+    private func releasePendingInstallationIfSafe() {
+        if bridge.isUpdateInstallationSafe() {
+            bridgeStateDidChange()
+        }
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        willInstallUpdateOnQuit item: SUAppcastItem,
+        immediateInstallationBlock immediateInstallHandler: @escaping () -> Void
+    ) -> Bool {
+        pendingInstallationHandlers.append(immediateInstallHandler)
+        releasePendingInstallationIfSafe()
+        return true
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        shouldPostponeRelaunchForUpdate item: SUAppcastItem,
+        untilInvokingBlock installHandler: @escaping () -> Void
+    ) -> Bool {
+        guard !bridge.isUpdateInstallationSafe() else { return false }
+        pendingInstallationHandlers.append(installHandler)
+        return true
+    }
+}
+
+@MainActor
+private final class BridgeViewModel: ObservableObject {
+    private let bridge: BridgeController
+    private let updater: SparkleUpdateCoordinator
+    private var runtimeSynchronizationEnabled = false
+    private var runtimeSynchronizationAttemptedWhileIdle = false
+    private var pendingApplicationTerminationReply: (() -> Void)?
+    private var applicationTerminationApproved = false
 
     @Published var isRunning = false
     @Published var loginAutostartEnabled = false
@@ -710,11 +789,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var diagnosisText = ""
     @Published var alertTitle = ""
     @Published var alertMessage: String?
-    @Published var availableVersion = ""
-    @Published var updateURL: URL?
-    @Published var updateSHA256 = ""
-    @Published var isUpdating = false
-    @Published var automaticUpdatesEnabled: Bool
+    @Published var automaticUpdatesEnabled = true
 
     @Published var draftProfile = "codex-notify"
     @Published var draftUsers = [AuthorizedUserDraft()]
@@ -759,10 +834,33 @@ private final class BridgeViewModel: ObservableObject {
 
     init(bridge: BridgeController) {
         self.bridge = bridge
-        self.automaticUpdatesEnabled = UserDefaults.standard.bool(
-            forKey: Self.automaticUpdatesPreferenceKey
-        )
+        self.updater = SparkleUpdateCoordinator(bridge: bridge)
+        self.updater.onBridgeBecameIdle = { [weak self] in
+            guard let self else { return }
+            if let reply = self.pendingApplicationTerminationReply {
+                self.applicationTerminationApproved = true
+                self.pendingApplicationTerminationReply = nil
+                reply()
+                return
+            }
+            self.runtimeSynchronizationAttemptedWhileIdle = false
+            self.synchronizeRuntimeIfReady()
+        }
+        self.updater.shouldHoldPendingInstallation = { [weak self] in
+            guard let self else { return false }
+            return self.pendingApplicationTerminationReply != nil
+                || self.applicationTerminationApproved
+        }
         refresh()
+    }
+
+    func startUpdaterAndSynchronizeRuntime() {
+        runtimeSynchronizationEnabled = true
+        synchronizeRuntimeIfReady()
+        if let error = updater.start() {
+            presentError(title: "无法启动更新服务", message: error)
+        }
+        automaticUpdatesEnabled = updater.automaticUpdatesEnabled
     }
 
     func refresh() {
@@ -775,18 +873,47 @@ private final class BridgeViewModel: ObservableObject {
         promLightOwners = users
         pendingAccessRequests = bridge.pendingAccessRequests()
         health = bridge.healthSnapshot()
-        attemptAutomaticUpdateIfReady()
     }
 
     func setAutomaticUpdatesEnabled(_ enabled: Bool) {
-        automaticUpdatesEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: Self.automaticUpdatesPreferenceKey)
-        guard enabled else { return }
-        lastAutomaticUpdateAttemptAt = nil
-        if availableVersion.isEmpty {
-            checkForUpdates()
+        updater.setAutomaticUpdatesEnabled(enabled)
+        automaticUpdatesEnabled = updater.automaticUpdatesEnabled
+    }
+
+    func checkForUpdates() {
+        updater.checkForUpdates()
+    }
+
+    func delayApplicationTerminationForPendingUpdate(
+        _ reply: @escaping () -> Void
+    ) -> Bool {
+        guard !applicationTerminationApproved else { return false }
+        if pendingApplicationTerminationReply != nil {
+            return true
+        }
+        guard updater.hasPendingInstallation,
+              !bridge.isUpdateInstallationSafe() else { return false }
+        pendingApplicationTerminationReply = reply
+        updater.waitForBridgeToBecomeIdle()
+        return true
+    }
+
+    private func synchronizeRuntimeIfReady() {
+        guard runtimeSynchronizationEnabled, !bridge.isInstalled else { return }
+        guard bridge.isUpdateInstallationSafe() else {
+            runtimeSynchronizationAttemptedWhileIdle = false
+            return
+        }
+        guard !runtimeSynchronizationAttemptedWhileIdle else { return }
+        runtimeSynchronizationAttemptedWhileIdle = true
+        let result = bridge.updateRuntimeWithHealthRollback()
+        if result.status == 0 {
+            runtimeSynchronizationAttemptedWhileIdle = false
         } else {
-            attemptAutomaticUpdateIfReady()
+            presentError(
+                title: "安装后台组件失败",
+                message: result.output.isEmpty ? "请稍后在 Bridge 空闲时重试。" : result.output
+            )
         }
     }
 
@@ -872,148 +999,6 @@ private final class BridgeViewModel: ObservableObject {
         promLightName = ""
         promLightStatus = "提示灯已归属到选定用户。Task 关联与重命名提示灯可继续在飞书卡片中完成。"
         refreshPromLightDevices()
-    }
-
-    func checkForUpdates(manual: Bool = false) {
-        guard let url = URL(string: "https://api.github.com/repos/WRJ7391117/codex-feishu-bridge/releases/latest") else {
-            return
-        }
-        var request = URLRequest(url: url)
-        request.setValue("Codex-Feishu-Bridge", forHTTPHeaderField: "User-Agent")
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
-            guard let self else { return }
-            guard error == nil,
-                  let data,
-                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let rawTag = payload["tag_name"] as? String else {
-                if manual {
-                    Task { @MainActor in
-                        self.presentError(
-                            title: "检查更新失败",
-                            message: "无法访问 GitHub Releases。请检查网络；如当前网络无法访问 GitHub，请先连接 VPN 后重试。"
-                        )
-                    }
-                }
-                return
-            }
-            let latest = rawTag.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
-            let current = Bundle.main.object(
-                forInfoDictionaryKey: "CFBundleShortVersionString"
-            ) as? String ?? "0.0.0"
-            let assets = payload["assets"] as? [[String: Any]] ?? []
-            let assetURL = assets.first(where: {
-                ($0["name"] as? String) == "Codex-Feishu-Bridge-macOS-universal.zip"
-            })?["browser_download_url"] as? String
-            let asset = assets.first(where: {
-                ($0["name"] as? String) == "Codex-Feishu-Bridge-macOS-universal.zip"
-            })
-            let digest = asset?["digest"] as? String ?? ""
-            Task { @MainActor in
-                if latest.compare(current, options: .numeric) == .orderedDescending {
-                    self.availableVersion = latest
-                    self.updateURL = assetURL.flatMap(URL.init(string:))
-                    self.updateSHA256 = digest
-                    if manual {
-                        self.alertTitle = "发现新版本 v\(latest)"
-                        self.alertMessage = "已找到经过 SHA-256 标记的 Universal 安装包，可直接下载安装。"
-                    }
-                    self.attemptAutomaticUpdateIfReady()
-                } else if manual {
-                    self.alertTitle = "已是最新版本"
-                    self.alertMessage = "当前版本 v\(current)。"
-                }
-            }
-        }.resume()
-    }
-
-    private func attemptAutomaticUpdateIfReady() {
-        guard automaticUpdatesEnabled,
-              !availableVersion.isEmpty,
-              updateURL != nil,
-              !updateSHA256.isEmpty,
-              !isUpdating,
-              health.activeRuns == 0,
-              health.pendingInputs == 0,
-              health.pendingDeliveries == 0,
-              health.pendingTaskCreations == 0 else { return }
-        let now = Date()
-        if let lastAutomaticUpdateAttemptAt,
-           now.timeIntervalSince(lastAutomaticUpdateAttemptAt)
-             < Self.automaticUpdateRetryInterval {
-            return
-        }
-        lastAutomaticUpdateAttemptAt = now
-        installUpdate(automatic: true)
-    }
-
-    func installUpdate(automatic: Bool = false) {
-        guard !isUpdating else { return }
-        health = bridge.healthSnapshot()
-        guard health.activeRuns == 0,
-              health.pendingInputs == 0,
-              health.pendingDeliveries == 0,
-              health.pendingTaskCreations == 0 else {
-            if !automatic {
-                presentError(
-                    title: "暂不能更新",
-                    message: "仍有运行中的 Task、排队消息、待补发结果或新建 Task 请求。全部处理完成后再更新，避免打断飞书任务。"
-                )
-            }
-            return
-        }
-        guard let updateURL, !availableVersion.isEmpty, !updateSHA256.isEmpty else {
-            if !automatic {
-                checkForUpdates(manual: true)
-            }
-            return
-        }
-        isUpdating = true
-        let version = availableVersion
-        let digest = updateSHA256
-        let updater = bridge
-        URLSession.shared.downloadTask(with: updateURL) { [weak self] temporaryURL, _, error in
-            guard let self else { return }
-            guard error == nil, let temporaryURL else {
-                Task { @MainActor in
-                    self.isUpdating = false
-                    if !automatic {
-                        self.presentError(
-                            title: "更新失败",
-                            message: "无法从 GitHub 下载安装包。请检查网络；如当前网络无法访问 GitHub，请先连接 VPN 后重试。"
-                        )
-                    }
-                }
-                return
-            }
-            do {
-                let staged = try updater.stageAppUpdate(
-                    downloadedArchive: temporaryURL,
-                    expectedSHA256: digest,
-                    expectedVersion: version
-                )
-                Task { @MainActor in
-                    let result = updater.launchAppUpdate(
-                        stagedApp: staged,
-                        expectedVersion: version
-                    )
-                    if result.status == 0 {
-                        NSApplication.shared.terminate(nil)
-                    } else {
-                        self.isUpdating = false
-                        if !automatic {
-                            self.presentError(title: "更新失败", message: result.output)
-                        }
-                    }
-                }
-            } catch {
-                Task { @MainActor in
-                    self.isUpdating = false
-                    if !automatic {
-                        self.presentError(title: "更新失败", message: error.localizedDescription)
-                    }
-                }
-            }
-        }.resume()
     }
 
     func toggleBridge() {
@@ -1650,7 +1635,6 @@ private struct MainView: View {
         .onAppear {
             model.refresh()
             model.refreshPromLightDevices()
-            model.checkForUpdates()
         }
         .onReceive(refreshTimer) { _ in
             model.refresh()
@@ -1983,29 +1967,16 @@ private struct MainView: View {
                 Label("App 更新", systemImage: "arrow.down.app")
                 Spacer(minLength: 8)
                 Text(
-                    model.availableVersion.isEmpty
-                        ? "v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")"
-                        : "可更新至 v\(model.availableVersion)"
+                    "v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")"
                 )
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button(
-                    model.isUpdating
-                        ? "更新中…"
-                        : model.availableVersion.isEmpty
-                        ? "检查更新"
-                        : "安装 v\(model.availableVersion)"
-                ) {
-                    if model.availableVersion.isEmpty {
-                        model.checkForUpdates(manual: true)
-                    } else {
-                        model.installUpdate()
-                    }
+                Button("检查更新") {
+                    model.checkForUpdates()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .fixedSize()
-                .disabled(model.isUpdating)
             }
 
             Divider()
@@ -2023,16 +1994,15 @@ private struct MainView: View {
                 )
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .disabled(model.isUpdating)
             }
 
-            Text("桥接空闲时自动安装，不中断 Task。")
+            Text("启动或新的飞书事件触发检查，不定时轮询；桥接空闲时安装。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.leading, 28)
 
             Label(
-                "更新源：GitHub；无法访问时请连接 VPN。",
+                "更新源：签名的 GitHub appcast；无法访问时请连接 VPN。",
                 systemImage: "network"
             )
             .font(.caption)
@@ -3458,13 +3428,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildApplicationMenu()
         buildStatusItem()
-        if !bridge.isInstalled {
-            let installResult = bridge.install()
-            if installResult.status != 0 {
-                model.alertTitle = "安装后台组件失败"
-                model.alertMessage = installResult.output
-            }
-        }
+        model.startUpdaterAndSynchronizeRuntime()
         createWindowIfNeeded()
         showMainWindow()
         refreshStatus()
@@ -3488,6 +3452,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        let delayed = model.delayApplicationTerminationForPendingUpdate {
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return delayed ? .terminateLater : .terminateNow
     }
 
     private func createWindowIfNeeded() {

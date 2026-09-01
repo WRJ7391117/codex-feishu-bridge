@@ -2354,12 +2354,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.11.12")
-        self.assertEqual(info["CFBundleVersion"], "91")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.11.13")
+        self.assertEqual(info["CFBundleVersion"], "92")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.11.12 (build 91)", readme)
-        self.assertIn("1.11.12 (build 91", release_notes)
+        self.assertIn("1.11.13 (build 92)", readme)
+        self.assertIn("1.11.13 (build 92", release_notes)
 
 
 class AppPromLightHomeTests(unittest.TestCase):
@@ -2416,17 +2416,6 @@ class AppUpdaterSafetyTests(unittest.TestCase):
             "-verify_arch arm64 x86_64",
             helper,
         )
-        source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(
-            encoding="utf-8"
-        )
-        architecture_check = source.split("let architectures = run", 1)[1].split(
-            "guard architectures.status", 1
-        )[0]
-        self.assertLess(
-            architecture_check.index('app.appendingPathComponent("Contents/MacOS/CodexFeishuBridge").path'),
-            architecture_check.index('"-verify_arch"'),
-        )
-        self.assertIn("Contents/Resources/bridge/promlight-helper", source)
 
     def test_helper_refuses_destination_outside_applications(self):
         helper = ROOT / "Resources/bridge/app_update.sh"
@@ -2454,6 +2443,36 @@ class AppUpdaterSafetyTests(unittest.TestCase):
         self.assertIn("new runtime failed health handshake", helper)
         self.assertIn("previous runtime restored", helper)
 
+    def test_sparkle_runtime_sync_keeps_health_rollback(self):
+        wrapper = (ROOT / "Resources/bridge/runtime_update.sh").read_text(
+            encoding="utf-8"
+        )
+        installer = (ROOT / "Resources/bridge/install.sh").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("feishu-bridge-app-update.lock", wrapper)
+        self.assertIn('payload.get("active_consumers") == 3', wrapper)
+        self.assertIn("current_update > previous_update", wrapper)
+        self.assertIn("previous runtime restored", wrapper)
+        self.assertIn('control_hook="${HOME}/.codex/hooks/feishu_bridge_control.sh"', wrapper)
+        self.assertIn('"${backup_dir}/control-hook.sh"', wrapper)
+        deferred = wrapper.split("if (( install_status == 75 )); then", 1)[1].split(
+            'print -u2 "runtime update deferred', 1
+        )[0]
+        self.assertIn("restore_previous_files", deferred)
+        self.assertNotIn("restore_previous_runtime", deferred)
+        install_failure = wrapper.split("if (( install_status == 75 )); then", 1)[1].split(
+            'print -u2 "runtime installation failed', 1
+        )[0]
+        self.assertIn("restore_previous_runtime", install_failure)
+        self.assertGreaterEqual(installer.count("exit 75"), 2)
+        self.assertIn("Close the idle-check race", installer)
+        self.assertIn('or active_runs != 0', installer)
+        self.assertIn("updateRuntimeWithHealthRollback", source)
+
     def test_all_app_install_paths_share_the_same_update_lock(self):
         for relative_path in (
             "Resources/bridge/app_update.sh",
@@ -2464,35 +2483,59 @@ class AppUpdaterSafetyTests(unittest.TestCase):
             self.assertIn("feishu-bridge-app-update.lock", source)
             self.assertIn("/usr/bin/shlock", source)
 
-    def test_app_checks_destination_and_all_pending_queues_before_update(self):
+    def test_sparkle_installation_waits_for_all_bridge_work_to_clear(self):
         source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(encoding="utf-8")
-        self.assertIn('URL(fileURLWithPath: "/Applications/Codex 飞书桥接.app")', source)
-        self.assertGreaterEqual(source.count("health.activeRuns == 0"), 2)
-        self.assertIn("health.pendingInputs == 0", source)
-        self.assertIn("health.pendingDeliveries == 0", source)
-        self.assertIn("health.pendingTaskCreations == 0", source)
-        self.assertIn('appendingPathComponent("app_update.sh")', source)
-
-    def test_automatic_updates_are_opt_in_persisted_and_wait_for_idle(self):
-        source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(encoding="utf-8")
-        self.assertIn(
-            'automaticUpdatesPreferenceKey = "automaticAppUpdatesEnabled"',
-            source,
-        )
-        self.assertIn("UserDefaults.standard.bool", source)
-        self.assertIn("UserDefaults.standard.set(enabled", source)
-        automatic = source.split("private func attemptAutomaticUpdateIfReady", 1)[1].split(
-            "func installUpdate", 1
+        readiness = source.split("func isUpdateInstallationSafe", 1)[1].split(
+            "private func readJSONObject", 1
         )[0]
-        for condition in (
-            "automaticUpdatesEnabled",
-            "health.activeRuns == 0",
-            "health.pendingInputs == 0",
-            "health.pendingDeliveries == 0",
-            "health.pendingTaskCreations == 0",
-            "automaticUpdateRetryInterval",
+        for field in (
+            'state["pending_inputs"]',
+            'state["pending_replies"]',
+            'state["pending_task_creations"]',
+            'runtime["active_runs"]',
         ):
-            self.assertIn(condition, automatic)
+            self.assertIn(field, readiness)
+        self.assertIn("else if bridgeRunning", readiness)
+        coordinator = source.split("private final class SparkleUpdateCoordinator", 1)[1].split(
+            "private final class BridgeViewModel", 1
+        )[0]
+        self.assertIn("willInstallUpdateOnQuit", coordinator)
+        self.assertIn("shouldPostponeRelaunchForUpdate", coordinator)
+        self.assertGreaterEqual(coordinator.count("bridge.isUpdateInstallationSafe()"), 3)
+        self.assertIn("pendingInstallationHandlers", coordinator)
+        self.assertIn("makeFileSystemObjectSource", coordinator)
+        self.assertIn("bridgeStateDidChange", coordinator)
+        self.assertIn("lastObservedUpdateSafe", coordinator)
+        self.assertIn("onBridgeBecameIdle", coordinator)
+        self.assertIn("shouldHoldPendingInstallation", coordinator)
+        self.assertIn("hasPendingInstallation", coordinator)
+        self.assertIn("applicationShouldTerminate", source)
+        self.assertIn(".terminateLater", source)
+        self.assertIn("reply(toApplicationShouldTerminate: true)", source)
+
+    def test_launch_only_update_discovery_and_automatic_install_are_owned_by_sparkle(self):
+        source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(encoding="utf-8")
+        package = (ROOT / "Package.swift").read_text(encoding="utf-8")
+        with (ROOT / "Resources/Info.plist").open("rb") as handle:
+            info = plistlib.load(handle)
+        self.assertIn("import Sparkle", source)
+        self.assertIn("SPUStandardUpdaterController", source)
+        self.assertIn("checkForUpdatesInBackground", source)
+        self.assertIn("automaticallyChecksForUpdates = false", source)
+        self.assertIn("automaticallyDownloadsUpdates", source)
+        self.assertIn("lastUpdateCheckDate", source)
+        self.assertNotIn("api.github.com/repos/WRJ7391117", source)
+        self.assertNotIn("stageAppUpdate", source)
+        self.assertIn('exact: "2.9.6"', package)
+        self.assertEqual(
+            info["SUFeedURL"],
+            "https://github.com/WRJ7391117/codex-feishu-bridge/releases/latest/download/appcast.xml",
+        )
+        self.assertFalse(info["SUEnableAutomaticChecks"])
+        self.assertTrue(info["SUAllowsAutomaticUpdates"])
+        self.assertTrue(info["SUAutomaticallyUpdate"])
+        self.assertTrue(info["SUVerifyUpdateBeforeExtraction"])
+        self.assertNotIn("SUScheduledCheckInterval", info)
 
     def test_configuration_sheet_has_one_scroll_region_and_labeled_user_cards(self):
         source = (ROOT / "Sources/CodexFeishuBridgeApp/main.swift").read_text(encoding="utf-8")

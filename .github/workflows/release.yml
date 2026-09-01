@@ -23,14 +23,42 @@ jobs:
           test "${GITHUB_REF_NAME}" = "v${version}"
       - name: Run test suite
         run: python3 -m unittest discover -s tests -p 'test_*.py'
-      - name: Build ad-hoc Universal package
+      - name: Require Developer ID and notarization credentials
+        env:
+          CODE_SIGN_IDENTITY: ${{ secrets.MACOS_CODE_SIGN_IDENTITY }}
+          NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
+        run: |
+          test -n "$CODE_SIGN_IDENTITY"
+          test -n "$NOTARY_PROFILE"
+          security find-identity -v -p codesigning | grep -F "$CODE_SIGN_IDENTITY"
+          xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null
+      - name: Build Universal package
+        env:
+          CODE_SIGN_IDENTITY: ${{ secrets.MACOS_CODE_SIGN_IDENTITY }}
+          NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
         run: ./scripts/build-app.sh
+      - name: Generate signed Sparkle appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          test -n "$SPARKLE_PRIVATE_KEY"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | \
+            ./scripts/generate-appcast.sh "$GITHUB_REF_NAME"
       - name: Verify package
         run: |
           app="build/Codex 飞书桥接.app"
           codesign --verify --deep --strict "$app"
+          spctl -a -t exec -vv "$app"
+          xcrun stapler validate "$app"
           lipo "$app/Contents/MacOS/CodexFeishuBridge" -verify_arch arm64 x86_64
+          lipo "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" \
+            -verify_arch arm64 x86_64
+          otool -L "$app/Contents/MacOS/CodexFeishuBridge" | \
+            grep -F '@rpath/Sparkle.framework/Versions/B/Sparkle'
+          otool -l "$app/Contents/MacOS/CodexFeishuBridge" | \
+            grep -F '@executable_path/../Frameworks'
           (cd dist && shasum -a 256 -c Codex-Feishu-Bridge-macOS-universal.zip.sha256)
+          xmllint --noout dist/appcast.xml
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -39,15 +67,15 @@ jobs:
             dist/Codex-Feishu-Bridge-macOS-universal.zip
             dist/Codex-Feishu-Bridge-macOS-universal.zip.sha256
             dist/update.json
+            dist/appcast.xml
           )
           title="DeepOri Bridge ${GITHUB_REF_NAME#v} for macOS"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
-            gh release edit "$GITHUB_REF_NAME" \
-              --title "$title" \
-              --notes-file RELEASE_NOTES.md
-          else
-            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-              --title "$title" \
-              --notes-file RELEASE_NOTES.md
+            echo "release already exists; refusing to replace signed assets" >&2
+            exit 1
           fi
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --draft \
+            --title "$title" \
+            --notes-file RELEASE_NOTES.md
+          gh release edit "$GITHUB_REF_NAME" --draft=false

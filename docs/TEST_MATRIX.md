@@ -2,7 +2,7 @@
 
 Status: Working Draft
 
-Updated: 2026-08-28
+Updated: 2026-09-01
 
 | Surface | Target | Current evidence | Status |
 | --- | --- | --- | --- |
@@ -16,6 +16,7 @@ Updated: 2026-08-28
 | Codex-assisted setup | bundled local Skill, copyable prompt, no Feishu plugin or secret in Task | source, Skill, and package tests pass | Pass |
 | Package | arm64 + x86_64 | Universal Mach-O verified by `lipo` | Pass |
 | Package integrity | ZIP | generated SHA-256 manifest verifies from `dist/` | Pass |
+| Sparkle integration | macOS App bundle | pinned 2.9.6 framework, Universal binary, rpath, signed appcast generation, and idle-install callbacks | Pass locally; real upgrade pending |
 | Code signature | local build | deep/strict verification passes; signature is ad-hoc | Pass with limitation |
 | Public/private boundary | general App payload | private workflow components are absent from the App, installer inputs, example config, main README, and public skill | Pass |
 | First connection | existing Roger tenant/profile | code and static tests only; current App UI capture unavailable | Not accepted |
@@ -40,7 +41,7 @@ Updated: 2026-08-28
 4. Prove text, image, native Opus audio, fallback audio attachment, file, progress card, one card action, final reply, and current-Task persistence with a real round trip.
 5. Stop/start, reboot, keep-data uninstall, reinstall, and state recovery.
 6. Repeat the install/launch/stop/recover subset on an Intel Mac or a real x86_64 macOS environment.
-7. Push a versioned commit, observe CI, create the matching tag, and verify the published ZIP, SHA-256, `update.json`, and in-App update path.
+7. Push a versioned commit, observe CI, create the matching tag, and verify the published ZIP, SHA-256, `update.json`, signed `appcast.xml`, and in-App update path.
 
 No code-only or local-source check substitutes for the new Feishu app and second-Mac acceptance above.
 

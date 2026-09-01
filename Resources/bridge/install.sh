@@ -15,7 +15,7 @@ was_running=0
 umask 077
 
 # Preflight every source and existing destination before changing local state.
-/usr/bin/python3 -B - \
+if ! /usr/bin/python3 -B - \
     --resources \
     "${resource_dir}/feishu_codex_bridge.py" \
     "${resource_dir}/control.sh" \
@@ -267,6 +267,9 @@ if runtime_path is not None:
                 "bridge has active Feishu runs; wait for them to finish before updating"
             )
 PY
+then
+    exit 75
+fi
 
 if /bin/launchctl print "${domain}/${label}" >/dev/null 2>&1 || \
    /bin/launchctl print "${domain}/${legacy_label}" >/dev/null 2>&1; then
@@ -645,6 +648,50 @@ finally:
 PY
 /bin/chmod 600 "${plist}"
 /usr/bin/plutil -lint "${plist}" >/dev/null
+
+# Close the idle-check race immediately before changing the running service.
+if ! /usr/bin/python3 - \
+    "${HOME}/.codex/feishu-bridge/state.json" \
+    "${HOME}/.codex/feishu-bridge/runtime-status.json" \
+    "${was_running}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+if int(sys.argv[3]) == 0:
+    raise SystemExit(0)
+
+def read_required_mapping(path: Path):
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("bridge status changed during installation") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit("bridge status changed during installation")
+    return payload
+
+state = read_required_mapping(Path(sys.argv[1]))
+runtime = read_required_mapping(Path(sys.argv[2]))
+pending_inputs = state.get("pending_inputs", [])
+pending_replies = state.get("pending_replies", [])
+pending_creations = state.get("pending_task_creations", {})
+active_runs = runtime.get("active_runs")
+if (
+    not isinstance(pending_inputs, list)
+    or not isinstance(pending_replies, list)
+    or not isinstance(pending_creations, dict)
+    or not isinstance(active_runs, int)
+    or isinstance(active_runs, bool)
+    or pending_inputs
+    or pending_replies
+    or pending_creations
+    or active_runs != 0
+):
+    raise SystemExit("bridge became busy during installation")
+PY
+then
+    exit 75
+fi
 
 if /bin/launchctl print "${domain}/${legacy_label}" >/dev/null 2>&1; then
     /bin/launchctl bootout "${domain}/${legacy_label}" || true

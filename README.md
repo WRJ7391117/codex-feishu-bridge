@@ -4,7 +4,7 @@
 
 DeepOri Bridge 是独立开源工具，并非 OpenAI、飞书或 Lark 官方产品。
 
-版本说明：当前源码和本机构建为 `1.11.12 (build 91)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.11.13 (build 92)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
 
 面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
@@ -43,7 +43,7 @@ DeepOri Bridge 是独立开源工具，并非 OpenAI、飞书或 Lark 官方产�
 - 菜单栏保留随时开启、关闭和快速打开控制中心的入口
 - 用户级 LaunchAgent 常驻，异常退出后自动重启
 - App 内置修复卡片回执的专用 `lark-cli`，避免项目或 Task 已选中但飞书仍提示 `108002`
-- App 启动时自动检查 GitHub Releases；用户可在控制中心选择是否自动安装更新，开关默认关闭并在重启后保留。自动或手动安装都会校验 SHA-256、App 身份、签名和 Universal 架构，存在运行、排队或待补发工作时不会升级
+- App 使用 Sparkle 2，在启动或收到新的飞书事件时检查签名 appcast，不做定时轮询；事件检查按上次检查时间限频，也可在控制中心手动检查。发现新版本后默认自动下载，存在运行、排队或待补发工作时会等到 Bridge 空闲后再安装；新后台组件必须恢复到三个事件消费者后才完成，否则回滚旧 runtime
 - 支持 Apple Silicon 和 Intel Mac
 
 ## 原理
@@ -225,7 +225,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 ## 从源码构建
 
-需要 Xcode Command Line Tools、Go 和网络连接。构建脚本会校验官方 `lark-cli v1.0.89` 的固定提交、应用仓库中的最小补丁、运行对应 Go 单测，并生成 Apple Silicon + Intel 通用二进制：
+需要 Xcode Command Line Tools、Go 和网络连接。构建脚本通过 SwiftPM 固定 Sparkle `2.9.6`，校验官方 `lark-cli v1.0.89` 的固定提交和应用仓库中的最小补丁，运行对应 Go 单测，并生成 Apple Silicon + Intel 通用二进制：
 
 ```bash
 ./scripts/build-app.sh
@@ -242,14 +242,15 @@ NOTARY_PROFILE="codex-feishu-notary" \
 ./scripts/build-app.sh
 ```
 
-没有这两个凭证时构建脚本只生成 ad-hoc 包，不会伪装成已公证。每次构建同时生成 `.sha256` 和 `update.json`。
+没有这两个凭证时构建脚本只生成 ad-hoc 包，不会伪装成已公证。每次构建同时生成 `.sha256` 和 `update.json`；Release 工作流再使用 GitHub Actions Secret 中的 Sparkle 私钥生成 `appcast.xml`。同一私钥的恢复副本只保存在发布 Mac 的登录 Keychain，不写入仓库或日志。
 
-发布时由版本标签触发 `.github/workflows/release.yml`，该工作流是 GitHub Release 的唯一发布入口。发布者只提交并推送版本代码，再推送与 App 版本一致的 `vX.Y.Z` 标签；不要提前手动执行 `gh release create`。若同名 Release 已存在，工作流会用重新构建并校验过的 ZIP、SHA-256 和 `update.json` 覆盖资产并更新发布说明，不会重复创建或直接失败。
+发布时由版本标签触发 `.github/workflows/release.yml`，该工作流是 GitHub Release 的唯一发布入口。发布者只提交并推送版本代码，再推送与 App 版本一致的 `vX.Y.Z` 标签；不要提前手动执行 `gh release create`。工作流在 Developer ID 或公证凭据不可用时直接失败；凭据齐备时先创建并校验草稿 Release，再公开，且拒绝覆盖同版本的签名资产。`update.json` 与旧更新助手暂时保留，用于 `1.11.12` 升级到首个 Sparkle 版本。
 
 构建产物：
 
 - `build/Codex 飞书桥接.app`
 - `dist/Codex-Feishu-Bridge-macOS-universal.zip`
+- `dist/appcast.xml`（仅 Release 签名步骤生成）
 
 ## 安全边界
 

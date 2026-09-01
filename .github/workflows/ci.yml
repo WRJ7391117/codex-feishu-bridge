@@ -22,9 +22,7 @@ jobs:
       - name: Run Python tests
         run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Type-check macOS App
-        run: |
-          sdk="$(xcrun --sdk macosx --show-sdk-path)"
-          xcrun swiftc -typecheck -target arm64-apple-macos13.0 -sdk "$sdk" Sources/CodexFeishuBridgeApp/main.swift
+        run: swift build -c release --arch arm64 --product CodexFeishuBridge
       - name: Build Universal App
         run: ./scripts/build-app.sh
       - name: Verify package
@@ -32,4 +30,10 @@ jobs:
           app="build/Codex 飞书桥接.app"
           codesign --verify --deep --strict "$app"
           lipo "$app/Contents/MacOS/CodexFeishuBridge" -verify_arch arm64 x86_64
+          lipo "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" \
+            -verify_arch arm64 x86_64
+          otool -L "$app/Contents/MacOS/CodexFeishuBridge" | \
+            grep -F '@rpath/Sparkle.framework/Versions/B/Sparkle'
+          otool -l "$app/Contents/MacOS/CodexFeishuBridge" | \
+            grep -F '@executable_path/../Frameworks'
           (cd dist && shasum -a 256 -c Codex-Feishu-Bridge-macOS-universal.zip.sha256)
