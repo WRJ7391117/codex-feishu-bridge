@@ -4300,6 +4300,386 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(approvals[0]["request_id"], "req-1")
         self.assertEqual(approvals[0]["type"], "command")
 
+    def test_subscription_card_explains_results_and_human_gates(self):
+        card = self.bridge.build_task_subscriptions_card(
+            self.tasks(),
+            {},
+            "task-a",
+            "deepori",
+        )
+
+        content = json.dumps(card, ensure_ascii=False)
+        self.assertIn("新运行结果和需要你处理的人工门", content)
+        self.assertIn("订阅不会改变当前 Task", content)
+
+    def test_subscription_stream_sends_all_three_approval_types_to_each_subscriber(self):
+        task = self.tasks()[0]
+        self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
+        self.bridge.send_card = mock.Mock(
+            side_effect=lambda user_id, _card, kind: (
+                True,
+                f"oc_{user_id}",
+                f"om_{kind}",
+            )
+        )
+        targets = {
+            "task-a": {"task": task, "users": {"ou_admin", "ou_miller"}}
+        }
+        methods = {
+            "req-command": "item/commandExecution/requestApproval",
+            "req-file": "item/fileChange/requestApproval",
+            "req-permission": "item/permissions/requestApproval",
+        }
+
+        for request_id, method in methods.items():
+            handled = self.bridge.handle_subscription_approval_frame(
+                {
+                    "type": "broadcast",
+                    "method": "thread-stream-state-changed",
+                    "params": {
+                        "conversationId": "task-a",
+                        "change": {
+                            "type": "patches",
+                            "patches": [
+                                {
+                                    "op": "add",
+                                    "path": ["requests", request_id],
+                                    "value": {
+                                        "id": request_id,
+                                        "method": method,
+                                        "params": {"reason": request_id},
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                },
+                targets,
+            )
+            self.assertTrue(handled)
+
+        self.assertEqual(self.bridge.send_card.call_count, 6)
+        entries = self.bridge.load_state()["subscription_approvals"]
+        self.assertEqual(len(entries), 3)
+        self.assertTrue(
+            all(set(entry["recipients"]) == {"ou_admin", "ou_miller"} for entry in entries.values())
+        )
+
+    def test_bridge_run_owner_does_not_receive_a_duplicate_subscription_card(self):
+        task = self.tasks()[0]
+        self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
+        self.bridge.active_run_for_task = mock.Mock(
+            return_value={"user_id": "ou_admin"}
+        )
+        self.bridge.send_card = mock.Mock(
+            return_value=(True, "oc_miller", "om_miller")
+        )
+
+        self.bridge.publish_subscription_approval(
+            task,
+            {"type": "command", "request_id": "req-owner", "detail": "test"},
+            {"ou_admin", "ou_miller"},
+        )
+
+        self.bridge.send_card.assert_called_once()
+        self.assertEqual(self.bridge.send_card.call_args.args[0], "ou_miller")
+
+    def test_duplicate_subscription_snapshot_does_not_send_duplicate_cards(self):
+        task = self.tasks()[0]
+        self.bridge.send_card = mock.Mock(
+            return_value=(True, "oc_admin", "om_approval")
+        )
+        targets = {"task-a": {"task": task, "users": {"ou_admin"}}}
+        frame = {
+            "type": "broadcast",
+            "method": "thread-stream-state-changed",
+            "params": {
+                "conversationId": "task-a",
+                "change": {
+                    "type": "snapshot",
+                    "conversationState": {
+                        "requests": {
+                            "req-snapshot": {
+                                "id": "req-snapshot",
+                                "method": "item/commandExecution/requestApproval",
+                                "params": {"command": "echo test"},
+                            }
+                        }
+                    },
+                },
+            },
+        }
+
+        self.bridge.handle_subscription_approval_frame(frame, targets)
+        self.bridge.handle_subscription_approval_frame(frame, targets)
+
+        self.bridge.send_card.assert_called_once()
+
+    def test_failed_subscription_card_delivery_retries_without_duplication(self):
+        task = self.tasks()[0]
+        approval = {
+            "type": "permission",
+            "request_id": "req-retry",
+            "detail": "test",
+        }
+        self.bridge.send_card = mock.Mock(
+            side_effect=[
+                (False, None, None),
+                (True, "oc_admin", "om_approval"),
+            ]
+        )
+
+        self.bridge.publish_subscription_approval(task, approval, {"ou_admin"})
+        self.bridge.publish_subscription_approval(task, approval, {"ou_admin"})
+        self.bridge.publish_subscription_approval(task, approval, {"ou_admin"})
+
+        self.assertEqual(self.bridge.send_card.call_count, 2)
+        entry = self.bridge.load_state()["subscription_approvals"][
+            "task-a:req-retry"
+        ]
+        self.assertEqual(entry["recipients"]["ou_admin"]["message_id"], "om_approval")
+
+    def test_first_subscription_approval_action_wins_for_all_subscribers(self):
+        task = self.tasks()[0]
+        approval = {
+            "type": "command",
+            "request_id": "req-first",
+            "detail": "test",
+        }
+        self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
+        self.bridge.save_state(
+            {
+                "task_subscriptions": {
+                    "ou_admin": {"task-a": {"task_id": "task-a"}},
+                    "ou_miller": {"task-a": {"task_id": "task-a"}},
+                },
+                "subscription_approvals": {
+                    "task-a:req-first": {
+                        "task": task,
+                        "approval": approval,
+                        "recipients": {
+                            "ou_admin": {"message_id": "om_admin"},
+                            "ou_miller": {"message_id": "om_miller"},
+                        },
+                        "resolved": False,
+                    }
+                },
+            }
+        )
+        self.bridge.task_by_id = mock.Mock(return_value=task)
+        self.bridge.desktop_task_request = mock.Mock(
+            return_value={"resultType": "success"}
+        )
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        workers = [
+            threading.Thread(
+                target=self.bridge.handle_subscription_approval_action,
+                args=(
+                    user_id,
+                    "task-a",
+                    "req-first",
+                    approved,
+                    {"message_id": message_id},
+                ),
+            )
+            for user_id, approved, message_id in (
+                ("ou_admin", True, "om_admin"),
+                ("ou_miller", False, "om_miller"),
+            )
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+
+        self.bridge.desktop_task_request.assert_called_once()
+        entry = self.bridge.load_state()["subscription_approvals"][
+            "task-a:req-first"
+        ]
+        self.assertTrue(entry["resolved"])
+        decision = self.bridge.desktop_task_request.call_args.args[2]["decision"]
+        self.assertEqual(
+            entry["resolution"],
+            "approved" if decision == "accept" else "declined",
+        )
+        patched = [json.dumps(call.args[1], ensure_ascii=False) for call in self.bridge.patch_card.call_args_list]
+        self.assertTrue(
+            any(
+                ("已允许" if decision == "accept" else "已拒绝") in card
+                for card in patched
+            )
+        )
+
+    def test_subscription_action_settles_the_bridge_owned_approval_card(self):
+        task = self.tasks()[0]
+        approval = {
+            "type": "command",
+            "request_id": "req-shared",
+            "detail": "test",
+            "message_id": "om_bridge_approval",
+        }
+        self.bridge.ALLOWED_USERS["ou_miller"] = {"*"}
+        self.bridge.save_state(
+            {
+                "task_subscriptions": {
+                    "ou_miller": {"task-a": {"task_id": "task-a"}}
+                },
+                "subscription_approvals": {
+                    "task-a:req-shared": {
+                        "task": task,
+                        "approval": approval,
+                        "recipients": {
+                            "ou_miller": {"message_id": "om_miller"}
+                        },
+                        "resolved": False,
+                    }
+                },
+            }
+        )
+        run = self.bridge.new_run(
+            "ou_admin",
+            "oc_admin",
+            "om_source",
+            task,
+            [],
+            [],
+        )
+        run["approvals"] = {"req-shared": approval}
+        self.assertTrue(self.bridge.claim_active_run(run))
+        self.bridge.task_by_id = mock.Mock(return_value=task)
+        self.bridge.desktop_task_request = mock.Mock(
+            return_value={"resultType": "success"}
+        )
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_subscription_approval_action(
+            "ou_miller",
+            "task-a",
+            "req-shared",
+            True,
+            {"message_id": "om_miller"},
+        )
+
+        self.assertTrue(run["approvals"]["req-shared"]["resolved"])
+        self.assertEqual(run["outcome"], "running")
+        patched_message_ids = {
+            call.args[0] for call in self.bridge.patch_card.call_args_list
+        }
+        self.assertEqual(
+            patched_message_ids,
+            {"om_miller", "om_bridge_approval"},
+        )
+
+    def test_unsubscribed_user_cannot_use_an_old_approval_card(self):
+        task = self.tasks()[0]
+        approval = {
+            "type": "permission",
+            "request_id": "req-old",
+            "detail": "test",
+        }
+        self.bridge.save_state(
+            {
+                "task_subscriptions": {"ou_admin": {}},
+                "subscription_approvals": {
+                    "task-a:req-old": {
+                        "task": task,
+                        "approval": approval,
+                        "recipients": {"ou_admin": {"message_id": "om_old"}},
+                        "resolved": False,
+                    }
+                },
+            }
+        )
+        self.bridge.desktop_task_request = mock.Mock()
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_subscription_approval_action(
+            "ou_admin",
+            "task-a",
+            "req-old",
+            True,
+            {"message_id": "om_old"},
+        )
+
+        self.bridge.desktop_task_request.assert_not_called()
+        self.assertIn(
+            "订阅已失效",
+            json.dumps(self.bridge.patch_card.call_args.args[1], ensure_ascii=False),
+        )
+
+    def test_desktop_request_removal_closes_subscription_approval_card(self):
+        task = self.tasks()[0]
+        approval = {
+            "type": "file",
+            "request_id": "req-removed",
+            "detail": "test",
+        }
+        self.bridge.save_state(
+            {
+                "subscription_approvals": {
+                    "task-a:req-removed": {
+                        "task": task,
+                        "approval": approval,
+                        "recipients": {"ou_admin": {"message_id": "om_removed"}},
+                        "resolved": False,
+                    }
+                }
+            }
+        )
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge.handle_subscription_approval_frame(
+            {
+                "type": "broadcast",
+                "method": "thread-stream-state-changed",
+                "params": {
+                    "conversationId": "task-a",
+                    "change": {
+                        "type": "patches",
+                        "patches": [
+                            {
+                                "op": "remove",
+                                "path": ["requests", "req-removed"],
+                            }
+                        ],
+                    },
+                },
+            },
+            {"task-a": {"task": task, "users": {"ou_admin"}}},
+        )
+
+        entry = self.bridge.load_state()["subscription_approvals"][
+            "task-a:req-removed"
+        ]
+        self.assertEqual(entry["resolution"], "handled_elsewhere")
+        self.assertIn(
+            "已在桌面处理",
+            json.dumps(self.bridge.patch_card.call_args.args[1], ensure_ascii=False),
+        )
+
+    def test_resolved_subscription_approval_tombstones_are_bounded(self):
+        self.bridge.save_state(
+            {
+                "subscription_approvals": {
+                    "task-a:bad-time": {
+                        "resolved": True,
+                        "resolved_at": "not-a-time",
+                    },
+                    "task-a:recent": {
+                        "resolved": True,
+                        "resolved_at": time.time(),
+                    },
+                }
+            }
+        )
+
+        self.bridge.reconcile_subscription_approval_recipients({})
+
+        entries = self.bridge.load_state()["subscription_approvals"]
+        self.assertNotIn("task-a:bad-time", entries)
+        self.assertIn("task-a:recent", entries)
+
 
 if __name__ == "__main__":
     unittest.main()

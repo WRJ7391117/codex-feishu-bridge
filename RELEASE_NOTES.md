@@ -1,5 +1,12 @@
 # Release Notes
 
+## 1.11.10 (build 89)
+
+- Sends an actionable Feishu card when a subscribed Codex Desktop Task reaches a command, file-change, or temporary-permission human gate.
+- Revalidates the subscriber's Task access before accepting a decision, invalidates old cards after unsubscribe or permission revocation, and keeps multiple users and Tasks isolated.
+- Submits only the first valid decision to Codex Desktop, then settles every matching subscriber and Bridge-owned approval card to prevent duplicate approval responses.
+- Observes Desktop stream snapshots and request removal events, retries failed card delivery, restores pending approvals after restart, and bounds resolved approval state to seven days.
+
 ## 1.11.9 (build 88)
 
 - Restarts the complete Bridge through LaunchAgent recovery when any one of the three Feishu event consumers exits, preventing silent loss of message, card, or menu events.

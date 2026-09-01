@@ -376,6 +376,7 @@ _last_reply_failure_reason = ""
 _reply_failure_context = threading.local()
 
 _consumers: list[subprocess.Popen[str]] = []
+_approval_resolution_lock = threading.Lock()
 _promlight_delivery_lock = threading.RLock()
 _promlight_work_condition = threading.Condition()
 _promlight_pending_statuses: dict[
@@ -7009,6 +7010,93 @@ def completed_approval_card(
     return card
 
 
+def build_subscription_approval_card(
+    task: dict[str, str],
+    approval: dict[str, Any],
+    status: str = "pending",
+) -> dict[str, Any]:
+    card = build_approval_card(
+        {
+            "run_id": "subscription",
+            "task": task,
+            "is_current_task": False,
+        },
+        approval,
+    )
+    card["config"]["summary"]["content"] = "订阅 Task 等待人工确认"
+    card["header"]["text_tag_list"][0] = task_role_tag(False, "订阅 Task")
+    if status == "resolving":
+        card["header"]["text_tag_list"][1] = {
+            "tag": "text_tag",
+            "text": {"tag": "plain_text", "content": "正在处理"},
+            "color": "yellow",
+        }
+        card["body"]["elements"] = [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"{task_identity_markdown(task)}\n\n"
+                    "正在把你的决定发送到 Codex Desktop…"
+                ),
+            }
+        ]
+        return card
+    for element in card["body"]["elements"]:
+        if not isinstance(element, dict) or element.get("tag") != "button":
+            continue
+        value = element.get("behaviors", [{}])[0].get("value", {})
+        if not isinstance(value, dict):
+            continue
+        value.pop("run_id", None)
+        value["task_id"] = str(task["id"])
+        value["action"] = (
+            "subscription_approve_once"
+            if value.get("action") == "approve_once"
+            else "subscription_decline"
+        )
+    return card
+
+
+def completed_subscription_approval_card(
+    task: dict[str, str],
+    approval: dict[str, Any],
+    resolution: str,
+) -> dict[str, Any]:
+    approved = resolution == "approved"
+    card = build_subscription_approval_card(task, approval)
+    card["header"]["template"] = "green" if approved else "grey"
+    label = (
+        "已允许"
+        if approved
+        else "已拒绝"
+        if resolution == "declined"
+        else "已在桌面处理"
+        if resolution == "handled_elsewhere"
+        else "订阅已失效"
+    )
+    card["header"]["text_tag_list"] = [
+        task_role_tag(False, "订阅 Task"),
+        {
+            "tag": "text_tag",
+            "text": {"tag": "plain_text", "content": label},
+            "color": "green" if approved else "neutral",
+        },
+    ]
+    detail = {
+        "approved": "本次请求已允许，Codex 将继续运行。",
+        "declined": "本次请求已拒绝，Codex 将按拒绝结果继续处理。",
+        "handled_elsewhere": "这项人工门已在 Codex Desktop 或另一张授权卡片中处理。",
+        "unsubscribed": "你已取消订阅或失去该 Task 的访问权限，这张卡片不能再操作。",
+    }.get(resolution, "这项人工门已经结束。")
+    card["body"]["elements"] = [
+        {
+            "tag": "markdown",
+            "content": f"{task_identity_markdown(task)}\n\n{detail}",
+        }
+    ]
+    return card
+
+
 def normalized_content(content: str) -> str:
     return re.sub(r"^@\S+\s*", "", content.strip()).strip()
 
@@ -7442,7 +7530,7 @@ def build_task_subscriptions_card(
             "tag": "markdown",
             "content": (
                 (f"✅ **{card_markdown_escape(change)}**\n\n" if change else "")
-                + "订阅后，这个 Task 在 Codex Desktop 完成新的运行时，结果会自动推送到你的飞书。"
+                + "订阅后，这个 Task 的新运行结果和需要你处理的人工门，都会自动推送到飞书。"
                 "订阅不会改变当前 Task，也不会补发订阅前已经完成的结果。"
             ),
         }
@@ -7584,7 +7672,10 @@ def build_task_subscriptions_card(
                 ],
                 "confirm": {
                     "title": {"tag": "plain_text", "content": "取消全部 Task 订阅？"},
-                    "text": {"tag": "plain_text", "content": "之后不会再自动推送这些 Task 的桌面结果。"},
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "之后不会再自动推送这些 Task 的运行结果或人工门。",
+                    },
                 },
             }
         )
@@ -8812,6 +8903,244 @@ def new_task_subscription(task: dict[str, str]) -> dict[str, Any]:
         "images": list(snapshot.get("images") or []) if running else [],
         "created_at": time.time(),
     }
+
+
+def subscription_approval_entries(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    entries = state.setdefault("subscription_approvals", {})
+    if not isinstance(entries, dict):
+        entries = {}
+        state["subscription_approvals"] = entries
+    return entries
+
+
+def subscription_approval_key(task_id: str, request_id: str) -> str:
+    return f"{task_id}:{request_id}"
+
+
+def subscribed_approval_targets() -> dict[str, dict[str, Any]]:
+    with _state_lock:
+        state = load_state()
+        pending = [
+            (user_id, task_id)
+            for user_id, values in task_subscriptions(state).items()
+            if authorized_user(user_id) and isinstance(values, dict)
+            for task_id, entry in values.items()
+            if isinstance(entry, dict)
+        ]
+    targets: dict[str, dict[str, Any]] = {}
+    for user_id, task_id in pending:
+        try:
+            task = task_by_id(task_id, user_id)
+        except (OSError, sqlite3.Error):
+            continue
+        if task is None:
+            continue
+        target = targets.setdefault(task_id, {"task": task, "users": set()})
+        target["users"].add(user_id)
+    return targets
+
+
+def publish_subscription_approval(
+    task: dict[str, str],
+    approval: dict[str, Any],
+    users: set[str],
+) -> None:
+    task_id = str(task["id"])
+    request_id = str(approval["request_id"])
+    key = subscription_approval_key(task_id, request_id)
+    active = active_run_for_task(task_id)
+    bridge_owner = str(active.get("user_id") or "") if active else ""
+    with _state_lock:
+        state = load_state()
+        entries = subscription_approval_entries(state)
+        entry = entries.get(key)
+        if isinstance(entry, dict) and entry.get("resolved"):
+            return
+        if not isinstance(entry, dict):
+            entry = {
+                "task": dict(task),
+                "approval": dict(approval),
+                "recipients": {},
+                "created_at": time.time(),
+                "resolved": False,
+            }
+            entries[key] = entry
+        else:
+            entry["task"] = dict(task)
+            entry["approval"] = dict(approval)
+        recipients = entry.setdefault("recipients", {})
+        if not isinstance(recipients, dict):
+            recipients = {}
+            entry["recipients"] = recipients
+        to_send = [
+            user_id
+            for user_id in sorted(users)
+            if user_id != bridge_owner and user_id not in recipients
+        ]
+        save_state(state)
+    for user_id in to_send:
+        delivered, chat_id, message_id = send_card(
+            user_id,
+            build_subscription_approval_card(task, approval),
+            f"subscription-approval-{user_id}-{task_id}-{request_id}",
+        )
+        if not delivered or not message_id:
+            continue
+        resolved_while_sending = False
+        with _state_lock:
+            state = load_state()
+            entry = subscription_approval_entries(state).get(key)
+            if not isinstance(entry, dict) or entry.get("resolved"):
+                resolved_while_sending = True
+            else:
+                recipients = entry.setdefault("recipients", {})
+                if isinstance(recipients, dict):
+                    recipients[user_id] = {
+                        "message_id": message_id,
+                        "chat_id": chat_id or "",
+                    }
+                if chat_id:
+                    authorize_chat(state, user_id, chat_id)
+                save_state(state)
+        if resolved_while_sending:
+            patch_card(
+                message_id,
+                completed_subscription_approval_card(
+                    task,
+                    approval,
+                    "handled_elsewhere",
+                ),
+            )
+            continue
+        log("subscription approval card delivered")
+
+
+def finalize_subscription_approval(
+    task: dict[str, str],
+    approval: dict[str, Any],
+    resolution: str,
+) -> None:
+    task_id = str(task["id"])
+    request_id = str(approval["request_id"])
+    key = subscription_approval_key(task_id, request_id)
+    with _state_lock:
+        state = load_state()
+        entries = subscription_approval_entries(state)
+        entry = entries.get(key)
+        if not isinstance(entry, dict):
+            entry = {
+                "task": dict(task),
+                "approval": dict(approval),
+                "recipients": {},
+                "created_at": time.time(),
+            }
+            entries[key] = entry
+        if entry.get("resolved"):
+            return
+        entry["resolved"] = True
+        entry["resolution"] = resolution
+        entry["resolved_at"] = time.time()
+        recipients = dict(entry.get("recipients", {}))
+        save_state(state)
+    card = completed_subscription_approval_card(task, approval, resolution)
+    for recipient in recipients.values():
+        if not isinstance(recipient, dict):
+            continue
+        message_id = str(recipient.get("message_id") or "")
+        if message_id:
+            patch_card(message_id, card)
+
+
+def subscription_approval_is_resolved(task_id: str, request_id: str) -> bool:
+    return bool(subscription_approval_resolution(task_id, request_id))
+
+
+def subscription_approval_resolution(task_id: str, request_id: str) -> str:
+    with _state_lock:
+        entry = subscription_approval_entries(load_state()).get(
+            subscription_approval_key(task_id, request_id)
+        )
+        return (
+            str(entry.get("resolution") or "handled_elsewhere")
+            if isinstance(entry, dict) and entry.get("resolved") is True
+            else ""
+        )
+
+
+def reconcile_subscription_approval_recipients(
+    targets: dict[str, dict[str, Any]],
+) -> None:
+    stale_cards: list[tuple[str, dict[str, str], dict[str, Any]]] = []
+    with _state_lock:
+        state = load_state()
+        entries = subscription_approval_entries(state)
+        changed = False
+        for key, entry in list(entries.items()):
+            if not isinstance(entry, dict):
+                entries.pop(key, None)
+                changed = True
+                continue
+            if entry.get("resolved"):
+                try:
+                    resolved_at = float(entry.get("resolved_at") or 0)
+                except (TypeError, ValueError):
+                    resolved_at = 0
+                if time.time() - resolved_at > 7 * 24 * 60 * 60:
+                    entries.pop(key, None)
+                    changed = True
+                continue
+            task = entry.get("task")
+            approval = entry.get("approval")
+            if not isinstance(task, dict) or not isinstance(approval, dict):
+                entries.pop(key, None)
+                changed = True
+                continue
+            task_id = str(task.get("id") or "")
+            valid_users = set(targets.get(task_id, {}).get("users", set()))
+            recipients = entry.get("recipients")
+            if not isinstance(recipients, dict):
+                recipients = {}
+                entry["recipients"] = recipients
+            for user_id in set(recipients) - valid_users:
+                recipient = recipients.pop(user_id)
+                if isinstance(recipient, dict):
+                    message_id = str(recipient.get("message_id") or "")
+                    if message_id:
+                        stale_cards.append((message_id, task, approval))
+                changed = True
+            if not valid_users:
+                entries.pop(key, None)
+                changed = True
+        if changed:
+            save_state(state)
+    for message_id, task, approval in stale_cards:
+        patch_card(
+            message_id,
+            completed_subscription_approval_card(task, approval, "unsubscribed"),
+        )
+
+
+def retry_subscription_approval_cards(
+    targets: dict[str, dict[str, Any]],
+) -> None:
+    with _state_lock:
+        entries = [
+            dict(entry)
+            for entry in subscription_approval_entries(load_state()).values()
+            if isinstance(entry, dict) and not entry.get("resolved")
+        ]
+    for entry in entries:
+        task = entry.get("task")
+        approval = entry.get("approval")
+        if not isinstance(task, dict) or not isinstance(approval, dict):
+            continue
+        target = targets.get(str(task.get("id") or ""))
+        if target:
+            publish_subscription_approval(
+                target["task"],
+                approval,
+                set(target["users"]),
+            )
 
 
 def task_subscriptions_card_for_state(
@@ -10293,6 +10622,15 @@ def begin_desktop_following(
     client_id: str,
     thread_id: str,
 ) -> None:
+    set_desktop_following(connection, client_id, thread_id, True)
+
+
+def set_desktop_following(
+    connection: socket.socket,
+    client_id: str,
+    thread_id: str,
+    following: bool,
+) -> None:
     send_ipc_message(
         connection,
         {
@@ -10303,7 +10641,7 @@ def begin_desktop_following(
             "params": {
                 "conversationId": thread_id,
                 "hostId": "local",
-                "following": True,
+                "following": following,
             },
         },
     )
@@ -10454,36 +10792,13 @@ def respond_desktop_approval(
     approval: dict[str, Any],
     approved: bool,
 ) -> bool:
-    approval_type = str(approval.get("type") or "")
-    request_id = str(approval.get("request_id") or "")
-    if not request_id:
-        return False
-    if approval_type == "command":
-        method = "thread-follower-command-approval-decision"
-        params: dict[str, Any] = {
-            "conversationId": str(run["task"]["id"]),
-            "requestId": request_id,
-            "decision": "accept" if approved else "decline",
-        }
-    elif approval_type == "file":
-        method = "thread-follower-file-approval-decision"
-        params = {
-            "conversationId": str(run["task"]["id"]),
-            "requestId": request_id,
-            "decision": "accept" if approved else "decline",
-        }
-    elif approval_type == "permission":
-        method = "thread-follower-permissions-request-approval-response"
-        requested = approval.get("params", {}).get("permissions")
-        params = {
-            "conversationId": str(run["task"]["id"]),
-            "requestId": request_id,
-            "response": {
-                "permissions": requested if approved and isinstance(requested, dict) else {},
-                "scope": "turn",
-            },
-        }
-    else:
+    try:
+        method, params = approval_response_request(
+            str(run["task"]["id"]),
+            approval,
+            approved,
+        )
+    except ValueError:
         return False
     try:
         response = send_run_ipc_request(run, method, 1, params)
@@ -10491,6 +10806,60 @@ def respond_desktop_approval(
         log(f"desktop approval response failed error={type(exc).__name__}")
         return False
     return response.get("resultType") == "success"
+
+
+def approval_response_request(
+    task_id: str,
+    approval: dict[str, Any],
+    approved: bool,
+) -> tuple[str, dict[str, Any]]:
+    approval_type = str(approval.get("type") or "")
+    request_id = str(approval.get("request_id") or "")
+    if not request_id:
+        raise ValueError("missing approval request id")
+    if approval_type == "command":
+        method = "thread-follower-command-approval-decision"
+        params: dict[str, Any] = {
+            "conversationId": task_id,
+            "requestId": request_id,
+            "decision": "accept" if approved else "decline",
+        }
+    elif approval_type == "file":
+        method = "thread-follower-file-approval-decision"
+        params = {
+            "conversationId": task_id,
+            "requestId": request_id,
+            "decision": "accept" if approved else "decline",
+        }
+    elif approval_type == "permission":
+        method = "thread-follower-permissions-request-approval-response"
+        requested = approval.get("params", {}).get("permissions")
+        params = {
+            "conversationId": task_id,
+            "requestId": request_id,
+            "response": {
+                "permissions": requested if approved and isinstance(requested, dict) else {},
+                "scope": "turn",
+            },
+        }
+    else:
+        raise ValueError("unsupported approval type")
+    return method, params
+
+
+def respond_subscription_approval(
+    task_id: str,
+    approval: dict[str, Any],
+    approved: bool,
+) -> bool:
+    try:
+        method, params = approval_response_request(task_id, approval, approved)
+        params = {key: value for key, value in params.items() if key != "conversationId"}
+        desktop_task_request(task_id, method, params, version=1)
+    except (OSError, RuntimeError, ValueError) as exc:
+        log(f"subscription approval response failed error={type(exc).__name__}")
+        return False
+    return True
 
 
 def action_payload(event: dict[str, Any]) -> dict[str, Any]:
@@ -11500,8 +11869,201 @@ def approval_requests_from_stream_change(
     return approvals
 
 
+def removed_approval_request_ids_from_stream_change(
+    change: dict[str, Any],
+) -> set[str]:
+    if change.get("type") != "patches":
+        return set()
+    request_ids: set[str] = set()
+    for patch in change.get("patches", []):
+        if not isinstance(patch, dict) or patch.get("op") != "remove":
+            continue
+        path = patch.get("path")
+        if (
+            isinstance(path, list)
+            and len(path) >= 2
+            and path[-2] == "requests"
+            and isinstance(path[-1], str)
+            and path[-1]
+        ):
+            request_ids.add(path[-1])
+    return request_ids
+
+
+def resolve_missing_subscription_approvals(
+    task_id: str,
+    current_request_ids: set[str],
+    *,
+    only_request_ids: set[str] | None = None,
+) -> None:
+    with _state_lock:
+        candidates = [
+            (dict(entry.get("task", {})), dict(entry.get("approval", {})))
+            for entry in subscription_approval_entries(load_state()).values()
+            if isinstance(entry, dict)
+            and not entry.get("resolved")
+            and str(entry.get("task", {}).get("id") or "") == task_id
+            and str(entry.get("approval", {}).get("request_id") or "")
+            not in current_request_ids
+            and (
+                only_request_ids is None
+                or str(entry.get("approval", {}).get("request_id") or "")
+                in only_request_ids
+            )
+        ]
+    for task, approval in candidates:
+        if task.get("id") and approval.get("request_id"):
+            finalize_subscription_approval(
+                task,
+                approval,
+                "handled_elsewhere",
+            )
+
+
+def handle_subscription_approval_frame(
+    frame: dict[str, Any],
+    targets: dict[str, dict[str, Any]],
+) -> bool:
+    if (
+        frame.get("type") != "broadcast"
+        or frame.get("method") != "thread-stream-state-changed"
+    ):
+        return False
+    params = frame.get("params")
+    if not isinstance(params, dict):
+        return False
+    task_id = str(params.get("conversationId") or "")
+    target = targets.get(task_id)
+    change = params.get("change")
+    if target is None or not isinstance(change, dict):
+        return False
+    approvals = approval_requests_from_stream_change(change)
+    if change.get("type") == "snapshot":
+        resolve_missing_subscription_approvals(
+            task_id,
+            {str(approval["request_id"]) for approval in approvals},
+        )
+    else:
+        removed_request_ids = removed_approval_request_ids_from_stream_change(change)
+        if removed_request_ids:
+            resolve_missing_subscription_approvals(
+                task_id,
+                set(),
+                only_request_ids=removed_request_ids,
+            )
+    for approval in approvals:
+        publish_subscription_approval(
+            target["task"],
+            approval,
+            set(target["users"]),
+        )
+    return bool(approvals)
+
+
+def task_subscription_approval_observer_loop() -> None:
+    connection: socket.socket | None = None
+    client_id = ""
+    targets: dict[str, dict[str, Any]] = {}
+    followed_users: dict[str, frozenset[str]] = {}
+    next_refresh = 0.0
+    next_connect = 0.0
+    while not _shutdown_event.is_set():
+        now = time.monotonic()
+        if now >= next_refresh:
+            next_refresh = now + TASK_SUBSCRIPTION_POLL_SECONDS
+            refreshed = subscribed_approval_targets()
+            reconcile_subscription_approval_recipients(refreshed)
+            retry_subscription_approval_cards(refreshed)
+            targets = refreshed
+            if connection is not None:
+                try:
+                    for task_id in set(followed_users) - set(targets):
+                        set_desktop_following(
+                            connection,
+                            client_id,
+                            task_id,
+                            False,
+                        )
+                    for task_id, target in targets.items():
+                        users = frozenset(target["users"])
+                        if followed_users.get(task_id) != users:
+                            begin_desktop_following(connection, client_id, task_id)
+                except (ConnectionError, OSError, ValueError):
+                    connection.close()
+                    connection = None
+                    client_id = ""
+                    next_connect = now + 1
+                followed_users = {
+                    task_id: frozenset(target["users"])
+                    for task_id, target in targets.items()
+                }
+            if not targets and connection is not None:
+                connection.close()
+                connection = None
+                client_id = ""
+                followed_users = {}
+        if connection is None and targets and now >= next_connect:
+            next_connect = now + 2
+            if not DESKTOP_IPC_SOCKET.exists():
+                _shutdown_event.wait(0.2)
+                continue
+            candidate = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            candidate.settimeout(5)
+            try:
+                candidate.connect(str(DESKTOP_IPC_SOCKET))
+                candidate_client_id = initialize_desktop_connection(candidate)
+                for task_id in targets:
+                    begin_desktop_following(candidate, candidate_client_id, task_id)
+                candidate.settimeout(2)
+            except (ConnectionError, OSError, RuntimeError, ValueError, socket.timeout):
+                candidate.close()
+            else:
+                connection = candidate
+                client_id = candidate_client_id
+                followed_users = {
+                    task_id: frozenset(target["users"])
+                    for task_id, target in targets.items()
+                }
+                log(
+                    "subscription approval observer connected "
+                    f"tasks={len(targets)}"
+                )
+        if connection is None:
+            _shutdown_event.wait(0.2)
+            continue
+        try:
+            readable, _, _ = select.select([connection], [], [], 0.5)
+            if not readable:
+                continue
+            frame = receive_ipc_message(connection)
+            if frame.get("type") == "client-discovery-request":
+                send_ipc_message(
+                    connection,
+                    {
+                        "type": "client-discovery-response",
+                        "requestId": frame.get("requestId"),
+                        "response": {"canHandle": False},
+                    },
+                )
+                continue
+            handle_subscription_approval_frame(frame, targets)
+        except (ConnectionError, OSError, ValueError, json.JSONDecodeError, socket.timeout):
+            connection.close()
+            connection = None
+            client_id = ""
+            followed_users = {}
+            next_connect = time.monotonic() + 1
+    if connection is not None:
+        connection.close()
+
+
 def publish_approval(run: dict[str, Any], approval: dict[str, Any]) -> None:
     request_id = str(approval["request_id"])
+    task_id = str(run.get("task", {}).get("id") or "")
+    if task_id and subscription_approval_is_resolved(task_id, request_id):
+        approval["resolved"] = True
+        set_run_progress(run, "人工门已在订阅卡片中处理", "running", force=True)
+        return
     with _active_runs_lock:
         approvals = run.setdefault("approvals", {})
         if request_id in approvals:
@@ -11534,7 +12096,22 @@ def handle_approval_action(
     approved: bool,
     event: dict[str, Any],
 ) -> None:
-    success = respond_desktop_approval(run, approval, approved)
+    task = run["task"]
+    task_id = str(task["id"])
+    request_id = str(approval["request_id"])
+    with _approval_resolution_lock:
+        existing_resolution = subscription_approval_resolution(task_id, request_id)
+        success = bool(existing_resolution) or respond_desktop_approval(
+            run,
+            approval,
+            approved,
+        )
+        if success and not existing_resolution:
+            finalize_subscription_approval(
+                task,
+                approval,
+                "approved" if approved else "declined",
+            )
     message_id = str(event.get("message_id") or approval.get("message_id") or "")
     if not success:
         set_run_progress(run, "授权响应失败，请在 Codex Desktop 中处理", "approval", force=True)
@@ -11546,7 +12123,10 @@ def handle_approval_action(
             )
         return
     token = str(event.get("token") or "")
-    card = completed_approval_card(run, approval, approved)
+    effective_approved = (
+        existing_resolution == "approved" if existing_resolution else approved
+    )
+    card = completed_approval_card(run, approval, effective_approved)
     if token:
         update_card(token, card)
     elif message_id:
@@ -11563,11 +12143,109 @@ def handle_approval_action(
         "仍有授权请求等待处理"
         if has_pending
         else "已允许一次，Codex 继续运行"
-        if approved
+        if effective_approved
         else "已拒绝请求，等待 Codex 处理",
         "approval" if has_pending else "running",
         force=True,
     )
+
+
+def settle_matching_active_approval(
+    task_id: str,
+    request_id: str,
+    approved: bool,
+) -> None:
+    run = active_run_for_task(task_id)
+    if run is None:
+        return
+    with _active_runs_lock:
+        approval = run.get("approvals", {}).get(request_id)
+        if not isinstance(approval, dict) or approval.get("resolved"):
+            return
+        approval["resolved"] = True
+        message_id = str(approval.get("message_id") or "")
+        card = completed_approval_card(run, approval, approved)
+        has_pending = any(
+            not item.get("resolved")
+            for item in run.get("approvals", {}).values()
+            if isinstance(item, dict)
+        )
+    if message_id:
+        patch_card(message_id, card)
+    set_run_progress(
+        run,
+        "仍有授权请求等待处理" if has_pending else "人工门已由订阅用户处理",
+        "approval" if has_pending else "running",
+        force=True,
+    )
+
+
+def handle_subscription_approval_action(
+    user_id: str,
+    task_id: str,
+    request_id: str,
+    approved: bool,
+    event: dict[str, Any],
+) -> None:
+    message_id = str(event.get("message_id") or "")
+    with _state_lock:
+        state = load_state()
+        subscribed = task_id in user_task_subscriptions(state, user_id)
+        entry = subscription_approval_entries(state).get(
+            subscription_approval_key(task_id, request_id)
+        )
+    task = task_by_id(task_id, user_id) if subscribed else None
+    if task is None or not isinstance(entry, dict):
+        if message_id:
+            fallback_task = (
+                entry.get("task")
+                if isinstance(entry, dict) and isinstance(entry.get("task"), dict)
+                else {"id": task_id, "title": "该 Task", "project": ""}
+            )
+            fallback_approval = (
+                entry.get("approval")
+                if isinstance(entry, dict) and isinstance(entry.get("approval"), dict)
+                else {"request_id": request_id, "type": "permission"}
+            )
+            patch_card(
+                message_id,
+                completed_subscription_approval_card(
+                    fallback_task,
+                    fallback_approval,
+                    "unsubscribed",
+                ),
+            )
+        return
+    approval = entry.get("approval")
+    if not isinstance(approval, dict):
+        return
+    with _approval_resolution_lock:
+        existing_resolution = subscription_approval_resolution(task_id, request_id)
+        if existing_resolution:
+            if message_id:
+                patch_card(
+                    message_id,
+                    completed_subscription_approval_card(
+                        task,
+                        approval,
+                        existing_resolution,
+                    ),
+                )
+            return
+        success = respond_subscription_approval(task_id, approval, approved)
+        if success:
+            resolution = "approved" if approved else "declined"
+            finalize_subscription_approval(task, approval, resolution)
+            settle_matching_active_approval(task_id, request_id, approved)
+    if success:
+        return
+    if message_id:
+        patch_card(message_id, build_subscription_approval_card(task, approval))
+        reply(
+            message_id,
+            "没有成功把决定送到 Codex Desktop，请在桌面版中处理或稍后重试。",
+            f"subscription-approval-error-{request_id}",
+        )
 
 
 def remember_bridge_turn(turn_id: str, user_id: str = "") -> None:
@@ -13416,6 +14094,41 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
             if status_change:
                 schedule_user_task_identity_refresh(user_id, status_change, task)
             return
+        if action in {"subscription_approve_once", "subscription_decline"}:
+            task_id = str(payload.get("task_id") or "")
+            request_id = str(payload.get("request_id") or "")
+            with _state_lock:
+                entry = subscription_approval_entries(load_state()).get(
+                    subscription_approval_key(task_id, request_id)
+                )
+            if not isinstance(entry, dict):
+                return
+            task = entry.get("task")
+            approval = entry.get("approval")
+            if not isinstance(task, dict) or not isinstance(approval, dict):
+                return
+            if message_id:
+                patch_card(
+                    message_id,
+                    build_subscription_approval_card(
+                        task,
+                        approval,
+                        "resolving",
+                    ),
+                )
+            threading.Thread(
+                target=handle_subscription_approval_action,
+                args=(
+                    user_id,
+                    task_id,
+                    request_id,
+                    action == "subscription_approve_once",
+                    event,
+                ),
+                daemon=True,
+                name=f"codex-feishu-subscription-approval-{request_id[:8]}",
+            ).start()
+            return
         run = active_run(str(payload.get("run_id") or ""))
         if (
             run is None
@@ -14666,6 +15379,11 @@ def main() -> int:
         target=promlight_worker_loop,
         daemon=True,
         name="codex-feishu-promlight",
+    ).start()
+    threading.Thread(
+        target=task_subscription_approval_observer_loop,
+        daemon=True,
+        name="codex-feishu-subscription-approvals",
     ).start()
     threading.Thread(
         target=identity_refresh_loop,
