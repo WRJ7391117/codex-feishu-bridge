@@ -60,6 +60,44 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("checkExistingProfile()", setup)
         self.assertIn("现有连接", setup)
 
+    def test_manual_setup_summarizes_doctor_output_instead_of_showing_json(self):
+        existing = self.source.split("func checkExistingProfile", 1)[1].split(
+            "func startCredentialReconfiguration", 1
+        )[0]
+        configure = self.source.split("func configureProfileAndCheck", 1)[1].split(
+            "func recheckProfile", 1
+        )[0]
+        recheck = self.source.split("func recheckProfile", 1)[1].split(
+            "func openDeveloperConsole", 1
+        )[0]
+        for flow in (existing, configure, recheck):
+            self.assertIn("connectionCheckFailureMessage", flow)
+            self.assertNotIn("checked.output", flow)
+        self.assertNotIn("setupUsesExistingProfile = self.setupPassed", existing)
+
+        summary = self.source.split("private func connectionCheckFailureMessage", 1)[1].split(
+            "func openDeveloperConsole", 1
+        )[0]
+        self.assertIn("JSONSerialization.jsonObject", summary)
+        self.assertIn('unsuccessfulCheck("bot_identity")', summary)
+        self.assertIn('unsuccessfulCheck("endpoint_open")', summary)
+        self.assertIn("无法连接飞书身份服务", summary)
+        self.assertNotIn("return result.output", summary)
+
+        setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
+            "private struct ConfigurationChecklistView", 1
+        )[0]
+        side_panel = setup.split("private func sidePanelHeader", 1)[1].split(
+            "private func instructionRow", 1
+        )[0]
+        self.assertIn(".lineLimit(6)", side_panel)
+        status_panel = setup.split("private var statusPanel", 1)[1].split(
+            "private var connectionStatusPanel", 1
+        )[0]
+        self.assertIn("if model.setupUsesExistingProfile", status_panel)
+        self.assertIn('Button(model.isConfiguringProfile ? "正在检查…" : "重新检查")', status_panel)
+        self.assertIn("现有连接需要重新检查", setup)
+
     def test_setup_has_explicit_close_and_reconfigure_actions(self):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
             "private struct ConfigurationChecklistView", 1

@@ -8,6 +8,7 @@
 - Requires a one-shot launch acknowledgement from the new App before the legacy updater removes its rollback copy, and imports Developer ID plus App Store Connect credentials into an ephemeral CI keychain before signing and notarization.
 - Adds a nonce-based runtime quiesce handshake for later updates: event intake stops, in-flight lanes and durable queues drain, and only then may the installer replace and restart the background component.
 - Generates and validates `appcast.xml` in the tag Release workflow with a stable Ed25519 key whose private half is limited to GitHub Actions Secrets and the release Mac's login Keychain.
+- Turns manual-setup `lark-cli doctor` failures into concise guidance, keeps saved credentials selected after transient network errors, and prevents raw diagnostic JSON from overflowing the setup window.
 
 ## 1.11.12 (build 91)
 

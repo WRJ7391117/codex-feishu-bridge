@@ -1153,10 +1153,9 @@ private final class BridgeViewModel: ObservableObject {
                 guard let self else { return }
                 self.isConfiguringProfile = false
                 self.setupPassed = checked.status == 0
-                self.setupUsesExistingProfile = self.setupPassed
                 self.setupResult = self.setupPassed
                     ? "现有连接已通过 Bot 身份与飞书网络检查，无需重新输入 App ID 或 App Secret。"
-                    : (checked.output.isEmpty ? "现有连接检查失败，请重新配置凭证。" : checked.output)
+                    : self.connectionCheckFailureMessage(checked)
             }
         }
     }
@@ -1203,9 +1202,13 @@ private final class BridgeViewModel: ObservableObject {
                 self.setupAppSecret = ""
                 self.isConfiguringProfile = false
                 self.setupPassed = configured.status == 0 && checked.status == 0
-                self.setupResult = self.setupPassed
-                    ? "连接信息已安全保存，Bot 身份与飞书网络检查通过。"
-                    : (checked.output.isEmpty ? "连接检查失败，请核对 App ID、App Secret 和飞书应用状态。" : checked.output)
+                if self.setupPassed {
+                    self.setupResult = "连接信息已安全保存，Bot 身份与飞书网络检查通过。"
+                } else if configured.status != 0 {
+                    self.setupResult = "连接信息未能保存到 macOS 钥匙串。请重新输入 App ID 和 App Secret 后再试。"
+                } else {
+                    self.setupResult = self.connectionCheckFailureMessage(checked)
+                }
                 if self.setupPassed {
                     var config = controller.readConfig()
                     config["lark_profile"] = profile
@@ -1239,9 +1242,45 @@ private final class BridgeViewModel: ObservableObject {
                 self.setupPassed = checked.status == 0
                 self.setupResult = checked.status == 0
                     ? "Bot 身份与飞书网络检查通过。"
-                    : (checked.output.isEmpty ? "连接检查失败。" : checked.output)
+                    : self.connectionCheckFailureMessage(checked)
             }
         }
+    }
+
+    private func connectionCheckFailureMessage(_ result: CommandResult) -> String {
+        let fallback = "连接检查失败。请检查网络，并核对 App ID、App Secret 和飞书应用状态。"
+        guard let data = result.output.data(using: .utf8),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let checks = payload["checks"] as? [[String: Any]] else {
+            return fallback
+        }
+
+        func unsuccessfulCheck(_ name: String) -> [String: Any]? {
+            checks.first { check in
+                guard check["name"] as? String == name else { return false }
+                return (check["status"] as? String)?.lowercased() != "pass"
+            }
+        }
+
+        if unsuccessfulCheck("config_file") != nil
+            || unsuccessfulCheck("app_resolved") != nil {
+            return "没有找到可用的本机连接。请重新输入 App ID 和 App Secret。"
+        }
+        if let botCheck = unsuccessfulCheck("bot_identity") {
+            let diagnostic = [botCheck["message"], botCheck["hint"]]
+                .compactMap { $0 as? String }
+                .joined(separator: " ")
+                .lowercased()
+            let networkMarkers = [" eof", "timeout", "timed out", "network", "connection"]
+            if networkMarkers.contains(where: diagnostic.contains) {
+                return "无法连接飞书身份服务。请检查网络后重新检查；如果持续失败，再核对 App ID 和 App Secret。"
+            }
+            return "Bot 身份验证失败。请核对 App ID、App Secret，并确认飞书应用已启用机器人能力。"
+        }
+        if unsuccessfulCheck("endpoint_open") != nil {
+            return "无法连接飞书服务。请检查当前网络后重新检查。"
+        }
+        return fallback
     }
 
     func openDeveloperConsole() {
@@ -2472,11 +2511,19 @@ private struct ConnectionSetupView: View {
             if model.setupUsesExistingProfile {
                 VStack(alignment: .leading, spacing: 12) {
                     Label(
-                        model.isConfiguringProfile ? "正在检查现有连接" : "现有连接已可用",
-                        systemImage: model.isConfiguringProfile ? "clock" : "checkmark.circle.fill"
+                        model.isConfiguringProfile
+                            ? "正在检查现有连接"
+                            : (model.setupPassed ? "现有连接已可用" : "现有连接需要重新检查"),
+                        systemImage: model.isConfiguringProfile
+                            ? "clock"
+                            : (model.setupPassed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                     )
                         .font(.headline)
-                        .foregroundStyle(model.isConfiguringProfile ? Color.secondary : Color.green)
+                        .foregroundStyle(
+                            model.isConfiguringProfile
+                                ? Color.secondary
+                                : (model.setupPassed ? Color.green : Color.orange)
+                        )
                     Text("本机连接“\(model.setupProfile)”已保存于 macOS 钥匙串，无需再次输入 App ID 或 App Secret。")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -2488,7 +2535,9 @@ private struct ConnectionSetupView: View {
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.green.opacity(0.08))
+                .background(
+                    (model.setupPassed ? Color.green : Color.orange).opacity(0.08)
+                )
                 .clipShape(RoundedRectangle(cornerRadius: 12))
             } else {
                 HStack {
@@ -2631,7 +2680,16 @@ private struct ConnectionSetupView: View {
         case 2:
             connectionStatusPanel
             Spacer()
-            if !model.setupUsesExistingProfile {
+            if model.setupUsesExistingProfile {
+                if !model.setupPassed {
+                    Button(model.isConfiguringProfile ? "正在检查…" : "重新检查") {
+                        model.recheckProfile()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(model.isConfiguringProfile)
+                }
+            } else {
                 if !model.setupResult.isEmpty && !model.setupPassed {
                     Button("重新检查") { model.recheckProfile() }
                         .disabled(model.isConfiguringProfile)
@@ -2824,6 +2882,7 @@ private struct ConnectionSetupView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .lineLimit(6)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
