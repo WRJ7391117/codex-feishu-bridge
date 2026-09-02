@@ -30,7 +30,7 @@ Updated: 2026-09-03
 | Signed/notarized package | Developer ID | build path exists; six Developer ID/notarization GitHub Secrets are still missing | Blocked by credential |
 | Keep-data uninstall | isolated temporary home | runtime removed; config and state preserved | Pass |
 | Full purge | isolated temporary home | cancellation before change is tested; real Profile purge is not exercised | Partial |
-| GitHub CI | macOS runner | current commit is pushed to a branch, but CI only runs for `main` or pull requests | Pending |
+| GitHub CI | macOS runner | implementation commit `fc04752` passed tests, type-check, Universal build, and package verification in run `33694636004` | Pass |
 | GitHub tag Release | public repository | `v1.11.13` does not exist; tag/version gate and immutable artifact workflow are present | Pending |
 
 ## Public beta exit checks
