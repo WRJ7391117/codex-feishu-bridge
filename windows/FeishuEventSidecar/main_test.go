@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
+	larkapplication "github.com/larksuite/oapi-sdk-go/v3/service/application/v6"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
@@ -103,6 +105,37 @@ func TestNormalizeTextEvent(t *testing.T) {
 	}
 	if got.MessageType != "text" || got.Content != "Windows Codex：只读测试" {
 		t.Fatalf("unexpected normalized content: %#v", got)
+	}
+}
+
+func TestNormalizeMenuConsumerCallback(t *testing.T) {
+	openID := "menu-user"
+	eventKey := "current_task"
+	got, ok := normalizeMenuEvent(&larkapplication.P2BotMenuV6{Event: &larkapplication.P2BotMenuV6Data{
+		Operator: &larkapplication.Operator{OperatorId: &larkapplication.UserId{OpenId: &openID}},
+		EventKey: &eventKey,
+	}})
+	if !ok || got.Type != "application.bot.menu_v6" || got.SenderID != openID || got.Content != eventKey {
+		t.Fatalf("unexpected menu callback: %#v", got)
+	}
+}
+
+func TestNormalizeCardConsumerCallback(t *testing.T) {
+	got, ok := normalizeCardEvent(&callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Operator: &callback.Operator{OpenID: "card-user"},
+		Action: &callback.CallBackAction{Name: "confirm"},
+	}})
+	if !ok || got.Type != "card.action.trigger" || got.SenderID != "card-user" || got.Content != "confirm" {
+		t.Fatalf("unexpected card callback: %#v", got)
+	}
+}
+
+func TestNormalizeSecondaryConsumersFailClosedWithoutIdentity(t *testing.T) {
+	if _, ok := normalizeMenuEvent(&larkapplication.P2BotMenuV6{}); ok {
+		t.Fatal("menu callback without an open id must fail closed")
+	}
+	if _, ok := normalizeCardEvent(&callback.CardActionTriggerEvent{}); ok {
+		t.Fatal("card callback without an open id must fail closed")
 	}
 }
 

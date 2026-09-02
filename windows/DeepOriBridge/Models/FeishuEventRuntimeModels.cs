@@ -36,4 +36,8 @@ public sealed record FeishuEventRuntimeSnapshot(
     string? ReadOnlyPromptPreview = null,
     int ReadOnlyRouteReplySentCount = 0,
     DateTimeOffset? LastReadOnlyRouteReplyAt = null,
-    string? ReadOnlyRouteError = null);
+    string? ReadOnlyRouteError = null,
+    string? OwnerBindingCode = null,
+    DateTimeOffset? OwnerBindingExpiresAt = null,
+    int MenuEventCount = 0,
+    int CardActionEventCount = 0);

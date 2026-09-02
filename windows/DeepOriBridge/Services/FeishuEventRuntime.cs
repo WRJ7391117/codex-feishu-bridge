@@ -12,7 +12,6 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
     private const string MessageEventKey = "im.message.receive_v1";
     private const string ApprovedTriggerText = "Windows Bridge 回执测试";
     private const string ApprovedReplyText = "DeepOri Bridge for Windows 已收到测试消息。";
-    private const string OwnerBindingTriggerText = "Windows Bridge 绑定所有者";
     private const string CodexRouteTriggerText = "Windows Codex 路由测试";
     private const string CodexRouteReplyText = "DeepOri Bridge for Windows 已完成 Codex 路由测试。";
     private const string ReadOnlyRoutePrefix = "Windows Codex：";
@@ -32,6 +31,7 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
     private int _ownerBindingArmed;
     private int _disposeStarted;
     private readonly FeishuArmExpiryScheduler _armExpiryScheduler = new();
+    private CancellationTokenSource? _ownerBindingExpiry;
 
     public FeishuEventRuntime(FeishuCredentialService credentials)
     {
@@ -74,22 +74,25 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
             throw new InvalidOperationException("请先启动飞书消息长连接。");
         }
 
-        if (current.OwnerBound)
-        {
-            throw new InvalidOperationException("owner 已绑定；如需更换，请先显式撤销现有绑定。");
-        }
-
+        string code = FeishuOwnerBindingCodePolicy.Generate();
         Interlocked.Exchange(ref _ownerBindingArmed, 1);
+        _ownerBindingExpiry?.Cancel();
+        _ownerBindingExpiry?.Dispose();
+        _ownerBindingExpiry = new CancellationTokenSource();
         UpdateSnapshot(snapshot => snapshot with
         {
             OwnerBindingArmed = true,
             OwnerBindingError = null,
+            OwnerBindingCode = code,
+            OwnerBindingExpiresAt = DateTimeOffset.Now.AddMinutes(2),
         });
+        _ = ExpireOwnerBindingAsync(code, _ownerBindingExpiry.Token);
     }
 
     public void ClearOwnerBinding()
     {
         _armExpiryScheduler.CancelAll();
+        _ownerBindingExpiry?.Cancel();
         _credentials.ClearOwnerBinding();
         Interlocked.Exchange(ref _replyArmed, 0);
         Interlocked.Exchange(ref _ownerBindingArmed, 0);
@@ -102,6 +105,8 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
             ReplyArmed = false,
             OwnerBindingArmed = false,
             OwnerBindingError = null,
+            OwnerBindingCode = null,
+            OwnerBindingExpiresAt = null,
         });
     }
 
@@ -118,6 +123,7 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
 
     public void ArmCodexRouteCapture()
     {
+        EnsureProjectAuthorized();
         FeishuRouteGateState state = _routeGates.Arm(FeishuRouteKind.Controlled);
         ScheduleArmExpiryRefresh(FeishuRouteKind.Controlled, state);
         UpdateSnapshot(snapshot => snapshot with
@@ -181,6 +187,7 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
 
     public void ArmReadOnlyRouteCapture()
     {
+        EnsureProjectAuthorized();
         FeishuRouteGateState state = _routeGates.Arm(FeishuRouteKind.ReadOnly);
         ScheduleArmExpiryRefresh(FeishuRouteKind.ReadOnly, state);
         UpdateSnapshot(snapshot => snapshot with
@@ -280,7 +287,10 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
             (string AppId, string Secret)? runtimeCredential = _credentials.LoadForRuntime();
             if (runtimeCredential is null)
             {
-                throw new InvalidOperationException("请先保存并验证飞书测试机器人凭证。");
+                FeishuStoredCredential stored = _credentials.Load();
+                throw new InvalidOperationException(stored.HasSecret && !stored.HasVerifiedIdentity
+                    ? "应用身份不匹配或缺少已验证指纹；禁止启动长连接，请重新验证 App ID 与 Secret。"
+                    : "请先保存并验证飞书测试机器人凭证。");
             }
 
             _stopRequested = false;
@@ -375,6 +385,7 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
 
         Interlocked.Exchange(ref _replyArmed, 0);
         Interlocked.Exchange(ref _ownerBindingArmed, 0);
+        _ownerBindingExpiry?.Cancel();
         _routeGates.Invalidate(
             _credentials.LoadOwnerBinding().IsBound,
             listening: false);
@@ -382,6 +393,8 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
         {
             ReplyArmed = false,
             OwnerBindingArmed = false,
+            OwnerBindingCode = null,
+            OwnerBindingExpiresAt = null,
         });
         _armExpiryScheduler.CancelAll();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -395,7 +408,34 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
         }
 
         await _armExpiryScheduler.DisposeAsync();
+        _ownerBindingExpiry?.Dispose();
         _routeGates.Dispose();
+    }
+
+    private async Task ExpireOwnerBindingAsync(string code, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromMinutes(2), cancellationToken);
+            FeishuEventRuntimeSnapshot current = Snapshot;
+            if (!current.OwnerBindingArmed
+                || !string.Equals(current.OwnerBindingCode, code, StringComparison.Ordinal)
+                || Interlocked.CompareExchange(ref _ownerBindingArmed, 0, 1) != 1)
+            {
+                return;
+            }
+
+            UpdateSnapshot(snapshot => snapshot with
+            {
+                OwnerBindingArmed = false,
+                OwnerBindingCode = null,
+                OwnerBindingExpiresAt = null,
+                OwnerBindingError = "一次性绑定码已过期，请重新生成。",
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     private void OnConsumerOutput(object sender, DataReceivedEventArgs eventArgs)
@@ -536,6 +576,26 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
                 return;
             }
 
+            if (string.Equals(eventType, "application.bot.menu_v6", StringComparison.Ordinal))
+            {
+                UpdateSnapshot(snapshot => snapshot with
+                {
+                    MenuEventCount = snapshot.MenuEventCount + 1,
+                    LastReceivedAt = DateTimeOffset.Now,
+                });
+                return;
+            }
+
+            if (string.Equals(eventType, "card.action.trigger", StringComparison.Ordinal))
+            {
+                UpdateSnapshot(snapshot => snapshot with
+                {
+                    CardActionEventCount = snapshot.CardActionEventCount + 1,
+                    LastReceivedAt = DateTimeOffset.Now,
+                });
+                return;
+            }
+
             if (!string.Equals(
                 eventType,
                 MessageEventKey,
@@ -569,10 +629,17 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
                 && contentElement.ValueKind == JsonValueKind.String
                     ? contentElement.GetString()
                     : null;
+            FeishuEventRuntimeSnapshot bindingSnapshot = Snapshot;
+            bool matchesOwnerBindingCode = bindingSnapshot.OwnerBindingArmed
+                && FeishuOwnerBindingCodePolicy.Matches(
+                    bindingSnapshot.OwnerBindingCode,
+                    bindingSnapshot.OwnerBindingExpiresAt,
+                    content,
+                    DateTimeOffset.Now);
             string approvedAction =
                 FeishuEventSafetyPolicy.MatchesFixedCommand(content, ApprovedTriggerText)
                     ? "reply-test"
-                    : FeishuEventSafetyPolicy.MatchesFixedCommand(content, OwnerBindingTriggerText)
+                    : matchesOwnerBindingCode
                         ? "owner-bind"
                         : FeishuEventSafetyPolicy.MatchesFixedCommand(content, CodexRouteTriggerText)
                             ? "codex-route-test"
@@ -604,6 +671,10 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
             bool ownerMatches = ownerBound
                 && hasSenderId
                 && _credentials.MatchesBoundOwner(senderId!);
+            FeishuProjectAuthorizationState projectAuthorization = hasSenderId
+                ? _credentials.LoadProjectAuthorization(senderId!)
+                : new FeishuProjectAuthorizationState(false, string.Empty);
+            bool projectAuthorized = projectAuthorization.IsAuthorized;
             bool isReplyTest = string.Equals(approvedAction, "reply-test", StringComparison.Ordinal);
             bool isCodexRouteTest = string.Equals(
                 approvedAction,
@@ -618,7 +689,7 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
             UpdateSnapshot(snapshot => snapshot with
             {
                 OwnerBound = ownerBound,
-                LastMatchDiagnostic = $"最近事件安全匹配：应用动作标签={approvedAction}；单聊={YesNo(isP2p)}；用户={YesNo(isUser)}；文本类型={YesNo(isText)}；消息引用={YesNo(hasMessageId)}；owner={OwnerLabel(ownerBound, ownerMatches)}。",
+                LastMatchDiagnostic = $"最近事件安全匹配：应用动作标签={approvedAction}；单聊={YesNo(isP2p)}；用户={YesNo(isUser)}；文本类型={YesNo(isText)}；消息引用={YesNo(hasMessageId)}；owner={OwnerLabel(ownerBound, ownerMatches)}；明确项目授权={YesNo(projectAuthorized)}。",
             });
 
             string? approvedReadOnlyPrompt = readOnlyPrompt?.Trim();
@@ -632,8 +703,9 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
                 approvedAction,
                 approvedReadOnlyPrompt,
                 approvedTarget,
-                ownerMatches,
-                DateTimeOffset.Now);
+                ownerMatches && projectAuthorized,
+                DateTimeOffset.Now,
+                projectAuthorization.ProjectPath);
             if (capture.Duplicate)
             {
                 UpdateSnapshot(snapshot => snapshot with
@@ -650,6 +722,7 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
                 try
                 {
                     _credentials.BindOwner(senderId!);
+                    _ownerBindingExpiry?.Cancel();
                     _routeGates.SetOwnerBound(true);
                     UpdateSnapshot(snapshot => snapshot with
                     {
@@ -657,6 +730,8 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
                         OwnerBindingArmed = false,
                         LastOwnerBoundAt = DateTimeOffset.Now,
                         OwnerBindingError = null,
+                        OwnerBindingCode = null,
+                        OwnerBindingExpiresAt = null,
                         LastMatchDiagnostic = $"最近事件安全匹配：CLI 动作标签=owner-bind；单聊=是；用户=是；文本类型=是；消息引用=是；owner=匹配。",
                     });
                 }
@@ -666,6 +741,8 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
                     {
                         OwnerBindingArmed = false,
                         OwnerBindingError = $"owner 绑定失败：{exception.GetType().Name}",
+                        OwnerBindingCode = null,
+                        OwnerBindingExpiresAt = null,
                     });
                 }
             }
@@ -1042,6 +1119,14 @@ public sealed class FeishuEventRuntime : IAsyncDisposable
         {
             completion.TrySetException(
                 new IOException("飞书官方 SDK sidecar 已结束；回复状态未确认。"));
+        }
+    }
+
+    private void EnsureProjectAuthorized()
+    {
+        if (!_credentials.HasAnyProjectAuthorization())
+        {
+            throw new InvalidOperationException("请先为至少一位已绑定用户保存一个明确存在的 Codex 项目目录；不会默认开放所有项目。");
         }
     }
 

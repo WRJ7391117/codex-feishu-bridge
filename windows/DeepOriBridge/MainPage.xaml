@@ -7,506 +7,242 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Loaded="OnLoaded"
     Unloaded="OnUnloaded"
+    AutomationProperties.AutomationId="DeepOriBridge.Home.Page"
     mc:Ignorable="d">
 
-    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
-        <ScrollViewer>
-            <Grid MaxWidth="960" Padding="40,28,40,44" HorizontalAlignment="Stretch">
-                <StackPanel Spacing="22">
-                    <Grid ColumnSpacing="24">
+    <Grid AutomationProperties.AutomationId="DeepOriBridge.Home.Page" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup x:Name="WindowWidthStates">
+                <VisualState x:Name="Compact">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="0" />
+                    </VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="ContentGrid.Padding" Value="16,20,16,32" />
+                        <Setter Target="HeaderBeta.Visibility" Value="Collapsed" />
+                        <Setter Target="BridgeCommands.(Grid.Row)" Value="1" />
+                        <Setter Target="BridgeCommands.(Grid.Column)" Value="0" />
+                        <Setter Target="BridgeCommands.(Grid.ColumnSpan)" Value="3" />
+                        <Setter Target="BridgeCommands.HorizontalAlignment" Value="Right" />
+                        <Setter Target="BridgeCommands.Margin" Value="0,12,0,0" />
+                        <Setter Target="FeishuMetric.(Grid.ColumnSpan)" Value="5" />
+                        <Setter Target="CodexMetric.(Grid.Row)" Value="1" />
+                        <Setter Target="CodexMetric.(Grid.Column)" Value="0" />
+                        <Setter Target="CodexMetric.(Grid.ColumnSpan)" Value="5" />
+                        <Setter Target="LastCheckedMetric.(Grid.Row)" Value="2" />
+                        <Setter Target="LastCheckedMetric.(Grid.Column)" Value="0" />
+                        <Setter Target="LastCheckedMetric.(Grid.ColumnSpan)" Value="5" />
+                        <Setter Target="DashboardDividerOne.Visibility" Value="Collapsed" />
+                        <Setter Target="DashboardDividerTwo.Visibility" Value="Collapsed" />
+                        <Setter Target="PromLightBadge.Visibility" Value="Collapsed" />
+                        <Setter Target="ConfigurationCard.(Grid.Row)" Value="1" />
+                        <Setter Target="ConfigurationCard.(Grid.Column)" Value="0" />
+                        <Setter Target="DiagnosticsCard.(Grid.Row)" Value="2" />
+                        <Setter Target="DiagnosticsCard.(Grid.Column)" Value="0" />
+                        <Setter Target="NavigationSecondaryColumn.Width" Value="0" />
+                        <Setter Target="NavigationTertiaryColumn.Width" Value="0" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Medium">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="600" />
+                    </VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="ContentGrid.Padding" Value="24,24,24,40" />
+                        <Setter Target="HeaderBeta.Visibility" Value="Collapsed" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Wide">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="900" />
+                    </VisualState.StateTriggers>
+                </VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+
+        <ScrollViewer x:Name="RootScrollViewer" HorizontalScrollBarVisibility="Disabled">
+            <Grid x:Name="ContentGrid" MaxWidth="900" Padding="28,24,28,40" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="20">
+                    <Grid x:Name="HeaderGrid" ColumnSpacing="16">
                         <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
-
-                        <StackPanel Spacing="6">
-                            <TextBlock FontSize="30" FontWeight="SemiBold" Text="Windows Bridge 就绪检查" />
-                            <TextBlock
-                                MaxWidth="690"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="核验 Codex Desktop 的本机数据库、Windows 命名管道，以及官方 app-server JSON-RPC 接口。"
-                                TextWrapping="Wrap" />
+                        <Image
+                            Width="64"
+                            Height="64"
+                            AutomationProperties.Name="DeepOri Bridge 应用图标"
+                            Source="ms-appx:///Assets/Square150x150Logo.scale-200.png"
+                            Stretch="Uniform" />
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="5">
+                            <TextBlock AutomationProperties.AutomationId="DeepOriBridge.Home.Page" FontSize="26" FontWeight="SemiBold" Text="DeepOri Bridge" />
+                            <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="通过飞书继续 Windows 上已有的 Codex Task · for Windows" />
                         </StackPanel>
-
-                        <CommandBar
-                            x:Name="BridgeCommands"
-                            Grid.Column="1"
-                            HorizontalAlignment="Right"
-                            Background="Transparent"
-                            DefaultLabelPosition="Right"
-                            IsOpen="False">
-                            <AppBarButton
-                                x:Name="StartButton"
-                                Click="OnStartClicked"
-                                Icon="Play"
-                                Label="启动" />
-                            <AppBarButton
-                                x:Name="StopButton"
-                                Click="OnStopClicked"
-                                Icon="Stop"
-                                Label="停止" />
-                            <AppBarSeparator />
-                            <AppBarButton
-                                x:Name="RefreshButton"
-                                Click="OnRefreshClicked"
-                                Icon="Refresh"
-                                Label="刷新" />
-                        </CommandBar>
+                        <TextBlock x:Name="HeaderBeta" Grid.Column="2" VerticalAlignment="Center" Style="{StaticResource BridgeSecondaryTextStyle}" Text="Windows Beta" />
                     </Grid>
 
-                    <InfoBar
-                        x:Name="OverallStatus"
-                        IsClosable="False"
-                        IsOpen="True"
-                        Message="正在检查这台 Windows 电脑…"
-                        Severity="Informational"
-                        Title="初始化" />
-
-                    <Border
-                        Padding="20"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        CornerRadius="10">
-                        <StackPanel Spacing="14">
-                            <Grid ColumnSpacing="16">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Spacing="5">
-                                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="飞书测试机器人" />
-                                    <TextBlock
-                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                        Text="凭证仅用于当前 Windows 用户。App Secret 保存到 Windows Credential Locker；临时 token 不落盘。官方 lark-cli 的测试 profile 是独立存储，需单独显式清理。"
-                                        TextWrapping="Wrap" />
-                                </StackPanel>
-                                <Border
-                                    Grid.Column="1"
-                                    Padding="10,5"
-                                    HorizontalAlignment="Right"
-                                    VerticalAlignment="Top"
-                                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                                    CornerRadius="12">
-                                    <TextBlock FontSize="12" Text="测试 · 非生产" />
-                                </Border>
-                            </Grid>
-
-                            <Grid ColumnSpacing="14">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Spacing="5">
-                                    <TextBlock FontWeight="SemiBold" Text="App ID" />
-                                    <TextBox
-                                        x:Name="FeishuAppIdTextBox"
-                                        AutomationProperties.Name="飞书 App ID"
-                                        MaxLength="128"
-                                        PlaceholderText="cli_…" />
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" Spacing="5">
-                                    <TextBlock FontWeight="SemiBold" Text="App Secret" />
-                                    <PasswordBox
-                                        x:Name="FeishuAppSecretPasswordBox"
-                                        AutomationProperties.Name="飞书 App Secret"
-                                        MaxLength="256"
-                                        PasswordRevealMode="Peek"
-                                        PlaceholderText="仅在此安全输入" />
-                                </StackPanel>
-                            </Grid>
-
-                            <StackPanel Orientation="Horizontal" Spacing="10">
-                                <Button
-                                    x:Name="FeishuVerifyButton"
-                                    Click="OnFeishuVerifyClicked"
-                                    Content="保存并验证" />
-                                <Button
-                                    x:Name="FeishuClearButton"
-                                    Click="OnFeishuClearClicked"
-                                    Content="清除 Bridge 凭证" />
-                            </StackPanel>
-
-                            <InfoBar
-                                x:Name="FeishuCredentialStatus"
-                                IsClosable="False"
-                                IsOpen="True"
-                                Message="请在这里输入新机器人的 App ID 和 App Secret。"
-                                Severity="Informational"
-                                Title="等待凭证" />
-
-                            <TextBlock FontSize="16" FontWeight="SemiBold" Text="Owner-only 白名单" />
-                            <TextBlock
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="显式准备后，只接受下一条规范化后等于“Windows Bridge 绑定所有者”的单聊用户消息；仅忽略全半角和空白差异。sender ID 仅保存到 Windows Credential Locker，不显示、不写日志。"
-                                TextWrapping="Wrap" />
-                            <StackPanel Orientation="Horizontal" Spacing="10">
-                                <Button
-                                    x:Name="FeishuOwnerBindButton"
-                                    AutomationProperties.HelpText="准备后由下一条精确匹配的飞书单聊消息绑定 owner"
-                                    AutomationProperties.Name="准备绑定飞书所有者"
-                                    Click="OnFeishuOwnerBindClicked"
-                                    Content="准备绑定所有者" />
-                                <Button
-                                    x:Name="FeishuOwnerClearButton"
-                                    AutomationProperties.HelpText="从 Windows Credential Locker 撤销 owner 白名单"
-                                    AutomationProperties.Name="撤销飞书所有者绑定"
-                                    Click="OnFeishuOwnerClearClicked"
-                                    Content="撤销所有者绑定" />
-                            </StackPanel>
-                            <TextBlock
-                                x:Name="FeishuOwnerStatusText"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="○ owner 尚未绑定；回执和 Codex 路由保持禁用。"
-                                TextWrapping="Wrap" />
-
-                            <StackPanel Orientation="Horizontal" Spacing="10">
-                                <Button
-                                    x:Name="FeishuConnectButton"
-                                    Click="OnFeishuConnectClicked"
-                                    Content="启动消息长连接" />
-                                <Button
-                                    x:Name="FeishuDisconnectButton"
-                                    Click="OnFeishuDisconnectClicked"
-                                    Content="停止消息长连接" />
-                                <Button
-                                    x:Name="FeishuReplyTestButton"
-                                    Click="OnFeishuReplyTestClicked"
-                                    Content="准备下一条测试回执" />
-                            </StackPanel>
-                            <TextBlock
-                                x:Name="FeishuEventStatusText"
-                                FontWeight="SemiBold"
-                                Text="○ 消息长连接未启动"
-                                TextWrapping="Wrap" />
-                            <TextBlock
-                                x:Name="FeishuEventCountText"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="仅统计事件数量；不在页面或日志中保存消息正文与用户标识。"
-                                TextWrapping="Wrap" />
-                            <TextBlock
-                                x:Name="FeishuReplyStatusText"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="测试回执未准备。"
-                                TextWrapping="Wrap" />
-
-                            <Border
-                                Height="1"
-                                Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
-                            <TextBlock FontSize="16" FontWeight="SemiBold" Text="一次性 Windows Codex 路由 Gate" />
-                            <TextBlock
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="精确固定命令“Windows Codex 路由测试”自动标记为固定路由；其他符合 owner-only 条件的下一条单聊消息只进入本机人工预览 Gate。两者都必须再经本机人工授权，授权前不会创建 Codex 任务或发送飞书回复。"
-                                TextWrapping="Wrap" />
-                            <TextBlock
-                                FontFamily="Consolas"
-                                FontSize="12"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="cwd: D:\Evolution\Codex-Feishu-Bridge&#x0a;Codex: 请仅回复：Windows Codex 路由测试已完成。&#x0a;Bot: DeepOri Bridge for Windows 已完成 Codex 路由测试。&#x0a;安全策略: read-only + approvalPolicy=never"
-                                TextWrapping="Wrap" />
-                            <StackPanel Orientation="Horizontal" Spacing="10">
-                                <Button
-                                    x:Name="FeishuCodexRouteCaptureButton"
-                                    Click="OnFeishuCodexRouteCaptureClicked"
-                                    Content="准备捕获路由测试" />
-                                <Button
-                                    x:Name="FeishuCodexRouteClearButton"
-                                    Click="OnFeishuCodexRouteClearClicked"
-                                    Content="清除路由 Gate" />
-                                <Button
-                                    x:Name="FeishuCodexRouteExecuteButton"
-                                    Click="OnFeishuCodexRouteExecuteClicked"
-                                    Content="执行已授权路由" />
-                            </StackPanel>
-                            <TextBlock
-                                x:Name="FeishuCodexRouteStatusText"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="路由测试未准备；thread/start 与 turn/start 不会被调用。"
-                                TextWrapping="Wrap" />
-                        </StackPanel>
-                    </Border>
-
-                    <Border
-                        Padding="20"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        CornerRadius="10">
-                        <StackPanel Spacing="10">
-                            <Grid ColumnSpacing="16">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Spacing="6">
-                                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="Owner-only 通用只读路由" />
-                                    <TextBlock
-                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                        Text="只捕获以“Windows Codex：”开头的 owner 单聊文本。每条消息新建一个 read-only Task；提示词和回复各限 4000 字符，正文仅在内存中保留到完成或清除。"
-                                        TextWrapping="Wrap" />
-                                </StackPanel>
-                                <Border
-                                    Grid.Column="1"
-                                    Padding="10,5"
-                                    HorizontalAlignment="Right"
-                                    VerticalAlignment="Top"
-                                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                                    CornerRadius="12">
-                                    <TextBlock FontSize="12" Text="人工 Gate" />
-                                </Border>
-                            </Grid>
-                            <TextBlock
-                                FontFamily="Consolas"
-                                FontSize="12"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="prefix: Windows Codex：&#x0a;cwd: D:\Evolution\Codex-Feishu-Bridge&#x0a;sandbox: read-only · approvalPolicy: never"
-                                TextWrapping="Wrap" />
-                            <TextBox
-                                x:Name="FeishuReadOnlyPromptPreview"
-                                AcceptsReturn="True"
-                                AutomationProperties.HelpText="只在本机内存中显示等待人工授权的飞书提示词"
-                                AutomationProperties.Name="待授权只读提示词预览"
-                                IsReadOnly="True"
-                                MaxHeight="180"
-                                PlaceholderText="尚未捕获提示词"
-                                TextWrapping="Wrap" />
-                            <StackPanel Orientation="Horizontal" Spacing="10">
-                                <Button
-                                    x:Name="FeishuReadOnlyRouteCaptureButton"
-                                    AutomationProperties.HelpText="准备捕获下一条由 owner 发送并以 Windows Codex 全角冒号开头的单聊消息"
-                                    AutomationProperties.Name="准备捕获只读提示词"
-                                    Click="OnFeishuReadOnlyRouteCaptureClicked"
-                                    Content="准备捕获只读提示词" />
-                                <Button
-                                    x:Name="FeishuReadOnlyRouteClearButton"
-                                    AutomationProperties.Name="清除只读路由人工 Gate"
-                                    Click="OnFeishuReadOnlyRouteClearClicked"
-                                    Content="清除只读 Gate" />
-                                <Button
-                                    x:Name="FeishuReadOnlyRouteExecuteButton"
-                                    AutomationProperties.HelpText="在本机人工授权后，以 read-only 和 never 策略新建 Codex Task"
-                                    AutomationProperties.Name="执行已授权只读提示词"
-                                    Click="OnFeishuReadOnlyRouteExecuteClicked"
-                                    Content="执行已授权只读提示词" />
-                            </StackPanel>
-                            <TextBlock
-                                x:Name="FeishuReadOnlyRouteStatusText"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="只读路由未准备；不会自动创建 Codex Task 或发送飞书回复。"
-                                TextWrapping="Wrap" />
-                        </StackPanel>
-                    </Border>
-
-                    <Border
-                        Padding="20"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        CornerRadius="10">
-                        <Grid ColumnSpacing="20">
+                    <Border Style="{StaticResource BridgeCardStyle}">
+                        <Grid x:Name="RuntimeCardGrid" ColumnSpacing="16">
                             <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <StackPanel Spacing="8">
-                                <TextBlock FontSize="18" FontWeight="SemiBold" Text="只读桥接会话" />
-                                <TextBlock x:Name="RuntimeStatusText" Text="○ 已停止" TextWrapping="Wrap" />
-                                <TextBlock
-                                    x:Name="RuntimeDetailText"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="等待启动官方 app-server 父子进程 stdio 会话。"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-                            <Border
-                                Grid.Column="1"
-                                Padding="10,5"
-                                HorizontalAlignment="Right"
-                                VerticalAlignment="Top"
-                                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                                CornerRadius="12">
-                                <TextBlock FontSize="12" Text="只读 · 非生产" />
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Border Width="52" Height="52" Background="{ThemeResource AccentFillColorSecondaryBrush}" CornerRadius="26">
+                                <FontIcon HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="25" Glyph="&#xE930;" />
                             </Border>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
+                                <TextBlock x:Name="RuntimeStatusText" Style="{StaticResource BridgeSectionTitleStyle}" Text="DeepOri Bridge 已关闭" />
+                                <TextBlock x:Name="RuntimeDetailText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="飞书消息不会进入 Codex。" />
+                            </StackPanel>
+                            <StackPanel x:Name="BridgeCommands" Grid.Column="2" VerticalAlignment="Center" Orientation="Horizontal" Spacing="8">
+                                <Button x:Name="StartButton" Click="OnStartClicked" Content="立即开启" Style="{StaticResource AccentButtonStyle}" />
+                                <Button x:Name="StopButton" Click="OnStopClicked" Content="停止本次运行…" Style="{StaticResource AccentButtonStyle}" Visibility="Collapsed" />
+                                <Button x:Name="RefreshButton" AutomationProperties.Name="刷新状态" Click="OnRefreshClicked" ToolTipService.ToolTip="刷新状态">
+                                    <SymbolIcon Symbol="Refresh" />
+                                </Button>
+                            </StackPanel>
                         </Grid>
                     </Border>
 
-                    <Border
-                        Padding="20"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        CornerRadius="10">
-                        <StackPanel Spacing="10">
-                            <Grid ColumnSpacing="16">
+                    <InfoBar x:Name="OverallStatus" IsClosable="False" IsOpen="True" Message="正在检查这台 Windows 电脑…" Severity="Informational" Title="正在准备" />
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="运行看板" />
+                        <Border Style="{StaticResource BridgeCardStyle}">
+                            <Grid x:Name="DashboardGrid" ColumnSpacing="0" RowSpacing="12">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
-                                <StackPanel Spacing="6">
-                                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="PromLight 真机" />
-                                    <TextBlock x:Name="PromLightStatusText" Text="正在检测…" TextWrapping="Wrap" />
-                                    <TextBlock
-                                        x:Name="PromLightHardwareText"
-                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                        Text="VID 07D7 · PID 6B01 · Usage FF00:0001"
-                                        TextWrapping="Wrap" />
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel x:Name="FeishuMetric" HorizontalAlignment="Center" Spacing="5">
+                                    <FontIcon Foreground="{ThemeResource TextFillColorSecondaryBrush}" Glyph="&#xE968;" />
+                                    <TextBlock x:Name="FeishuEventStatusText" Style="{StaticResource BridgeMetricValueStyle}" Text="未连接" />
+                                    <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="飞书连接" />
                                 </StackPanel>
-                                <Border
-                                    Grid.Column="1"
-                                    Padding="10,5"
-                                    HorizontalAlignment="Right"
-                                    VerticalAlignment="Top"
-                                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                                    CornerRadius="12">
-                                    <TextBlock FontSize="12" Text="Windows HID" />
-                                </Border>
+                                <Rectangle x:Name="DashboardDividerOne" Grid.Column="1" Width="1" Height="48" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
+                                <StackPanel x:Name="CodexMetric" Grid.Column="2" HorizontalAlignment="Center" Spacing="5">
+                                    <FontIcon Foreground="{ThemeResource TextFillColorSecondaryBrush}" Glyph="&#xE756;" />
+                                    <TextBlock x:Name="CodexVersionText" Style="{StaticResource BridgeMetricValueStyle}" Text="检查中…" />
+                                    <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="Codex Desktop" />
+                                </StackPanel>
+                                <Rectangle x:Name="DashboardDividerTwo" Grid.Column="3" Width="1" Height="48" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
+                                <StackPanel x:Name="LastCheckedMetric" Grid.Column="4" HorizontalAlignment="Center" Spacing="5">
+                                    <FontIcon Foreground="{ThemeResource TextFillColorSecondaryBrush}" Glyph="&#xE823;" />
+                                    <TextBlock x:Name="LastCheckedText" Style="{StaticResource BridgeMetricValueStyle}" Text="尚未检查" />
+                                    <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="最近检查" />
+                                </StackPanel>
                             </Grid>
+                        </Border>
+                        <TextBlock x:Name="FeishuEventCountText" Margin="8,0,0,0" Style="{StaticResource BridgeSecondaryTextStyle}" Text="尚未收到飞书消息。" />
+                    </StackPanel>
 
-                            <CommandBar
-                                Background="Transparent"
-                                DefaultLabelPosition="Right"
-                                IsOpen="False">
-                                <AppBarButton
-                                    x:Name="PromLightDetectButton"
-                                    Click="OnPromLightDetectClicked"
-                                    Icon="Refresh"
-                                    Label="重新检测" />
-                                <AppBarSeparator />
-                                <AppBarButton
-                                    x:Name="PromLightIdleButton"
-                                    Click="OnPromLightIdleClicked"
-                                    Label="空闲" />
-                                <AppBarButton
-                                    x:Name="PromLightRunningButton"
-                                    Click="OnPromLightRunningClicked"
-                                    Label="运行中" />
-                                <AppBarButton
-                                    x:Name="PromLightHumanGateButton"
-                                    Click="OnPromLightHumanGateClicked"
-                                    Label="等待人工" />
-                                <AppBarButton
-                                    x:Name="PromLightErrorButton"
-                                    Click="OnPromLightErrorClicked"
-                                    Label="错误" />
-                            </CommandBar>
+                    <StackPanel Spacing="8">
+                        <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="Codex 用量" />
+                        <Border Style="{StaticResource BridgeCardStyle}">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="20" Glyph="&#xE9D9;" />
+                                <TextBlock Grid.Column="1" Style="{StaticResource BridgeSecondaryTextStyle}" Text="暂无额度数据；Windows 接口接入后会在这里自动显示。" />
+                            </Grid>
+                        </Border>
+                    </StackPanel>
 
-                            <TextBlock
-                                x:Name="PromLightWriteText"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="已验证：空闲 = 绿色常亮；运行中 = 黄色常亮；等待人工 = 黄色闪烁；错误 = 红色闪烁。"
-                                TextWrapping="Wrap" />
-                        </StackPanel>
-                    </Border>
+                    <StackPanel Spacing="8">
+                        <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="提示灯" />
+                        <Border Style="{StaticResource BridgeCardStyle}">
+                            <Expander IsExpanded="False">
+                                <Expander.Header>
+                                    <Grid MinHeight="48" ColumnSpacing="14">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Border Width="44" Height="44" Background="{ThemeResource AccentFillColorSecondaryBrush}" CornerRadius="10">
+                                            <FontIcon HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="21" Glyph="&#xEA80;" />
+                                        </Border>
+                                        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
+                                            <TextBlock FontWeight="SemiBold" Text="管理提示灯" />
+                                            <TextBlock x:Name="PromLightStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="正在读取这台 Windows 电脑上的 PromLight…" />
+                                        </StackPanel>
+                                        <TextBlock x:Name="PromLightBadge" Grid.Column="2" VerticalAlignment="Center" Style="{StaticResource BridgeSecondaryTextStyle}" Text="实验性设备测试" />
+                                    </Grid>
+                                </Expander.Header>
+                                <StackPanel Padding="0,14,0,4" Spacing="12">
+                                    <InfoBar IsClosable="False" IsOpen="True" Message="Windows 版尚未取得可公开宣称的设备与协议兼容性；以下操作只用于当前真机验证。" Severity="Warning" Title="实验性功能" />
+                                    <TextBlock x:Name="PromLightHardwareText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="设备信息尚未读取。" />
+                                    <CommandBar Background="Transparent" DefaultLabelPosition="Right" IsOpen="False">
+                                        <AppBarButton x:Name="PromLightDetectButton" Click="OnPromLightDetectClicked" Icon="Refresh" Label="刷新设备" />
+                                        <AppBarSeparator />
+                                        <AppBarButton x:Name="PromLightIdleButton" Click="OnPromLightIdleClicked" Label="空闲" />
+                                        <AppBarButton x:Name="PromLightRunningButton" Click="OnPromLightRunningClicked" Label="运行中" />
+                                        <AppBarButton x:Name="PromLightHumanGateButton" Click="OnPromLightHumanGateClicked" Label="等待人工" />
+                                        <AppBarButton x:Name="PromLightErrorButton" Click="OnPromLightErrorClicked" Label="错误" />
+                                    </CommandBar>
+                                    <TextBlock x:Name="PromLightWriteText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="尚未提交灯效。" />
+                                </StackPanel>
+                            </Expander>
+                        </Border>
+                    </StackPanel>
 
-                    <Grid ColumnSpacing="16" RowSpacing="16">
+                    <StackPanel Spacing="8">
+                        <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="设置与管理" />
+                        <Grid x:Name="NavigationCardsGrid" ColumnSpacing="12" RowSpacing="12">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition x:Name="NavigationPrimaryColumn" Width="*" />
+                            <ColumnDefinition x:Name="NavigationSecondaryColumn" Width="*" />
+                            <ColumnDefinition x:Name="NavigationTertiaryColumn" Width="*" />
                         </Grid.ColumnDefinitions>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
-
-                        <Border
-                            Padding="20"
-                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                            BorderThickness="1"
-                            CornerRadius="10">
-                            <StackPanel Spacing="10">
-                                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Codex Desktop" />
-                                <TextBlock x:Name="CodexVersionText" Text="检查中…" TextWrapping="Wrap" />
-                                <TextBlock
-                                    x:Name="CodexPathText"
-                                    FontFamily="Consolas"
-                                    FontSize="12"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-                        </Border>
-
-                        <Border
-                            Grid.Column="1"
-                            Padding="20"
-                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                            BorderThickness="1"
-                            CornerRadius="10">
-                            <StackPanel Spacing="10">
-                                <TextBlock FontSize="18" FontWeight="SemiBold" Text="官方 app-server" />
-                                <TextBlock x:Name="AppServerStatusText" Text="检查中…" TextWrapping="Wrap" />
-                                <TextBlock
-                                    x:Name="ThreadListStatusText"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-                        </Border>
-
-                        <Border
-                            Grid.Row="1"
-                            Padding="20"
-                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                            BorderThickness="1"
-                            CornerRadius="10">
-                            <StackPanel Spacing="12">
-                                <TextBlock FontSize="18" FontWeight="SemiBold" Text="本机数据库（仅读取文件头）" />
-                                <TextBlock x:Name="StateDatabaseStatusText" Text="检查中…" TextWrapping="Wrap" />
-                                <TextBlock
-                                    x:Name="StateDatabasePathText"
-                                    FontFamily="Consolas"
-                                    FontSize="12"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    TextWrapping="Wrap" />
-                                <TextBlock x:Name="CatalogDatabaseStatusText" Text="检查中…" TextWrapping="Wrap" />
-                                <TextBlock
-                                    x:Name="CatalogDatabasePathText"
-                                    FontFamily="Consolas"
-                                    FontSize="12"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-                        </Border>
-
-                        <Border
-                            Grid.Row="1"
-                            Grid.Column="1"
-                            Padding="20"
-                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                            BorderThickness="1"
-                            CornerRadius="10">
-                            <StackPanel Spacing="12">
-                                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Windows IPC 决策" />
-                                <TextBlock x:Name="PrivatePipeStatusText" Text="检查中…" TextWrapping="Wrap" />
-                                <TextBlock
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="私有 codex-ipc 仅探测是否存在，不发送数据。核心桥接使用官方 app-server，不复用 macOS Unix Socket 协议。"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-                        </Border>
-                    </Grid>
-
-                    <Border Padding="20" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="10">
-                        <Grid ColumnSpacing="20">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Spacing="6">
-                                <TextBlock FontSize="17" FontWeight="SemiBold" Text="范围说明" />
-                                <TextBlock
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="当前版本维持官方 app-server 只读会话。PromLight 仅提交候选 HID 报告，物理灯效需逐项人工确认；飞书测试凭证使用 Windows 安全存储，生产连接未修改。"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-                            <TextBlock
-                                x:Name="LastCheckedText"
-                                Grid.Column="1"
-                                VerticalAlignment="Bottom"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <Border Style="{StaticResource BridgeCardStyle}">
+                                <StackPanel Spacing="10">
+                                    <FontIcon HorizontalAlignment="Left" Glyph="&#xE77B;" />
+                                    <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="首次连接向导" />
+                                    <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="用 Codex 协助配置，或按 4 步手动完成飞书应用与使用者授权。" />
+                                    <Button AutomationProperties.Name="打开首次连接向导" Click="OnOpenSetupClicked" Content="开始配置" Style="{StaticResource AccentButtonStyle}" />
+                                </StackPanel>
+                            </Border>
+                            <Border x:Name="ConfigurationCard" Grid.Column="1" Style="{StaticResource BridgeCardStyle}">
+                                <StackPanel Spacing="10">
+                                    <FontIcon HorizontalAlignment="Left" Glyph="&#xE713;" />
+                                    <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="配置桥接" />
+                                    <TextBlock x:Name="FeishuOwnerStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="查看连接、owner 白名单与人工确认测试工具。" />
+                                    <Button AutomationProperties.Name="打开桥接配置" Click="OnOpenConfigurationClicked" Content="管理连接" />
+                                </StackPanel>
+                            </Border>
+                            <Border x:Name="DiagnosticsCard" Grid.Column="2" Style="{StaticResource BridgeCardStyle}">
+                                <StackPanel Spacing="10">
+                                    <FontIcon HorizontalAlignment="Left" Glyph="&#xE9D9;" />
+                                    <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="运行诊断" />
+                                    <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="只读核验 Codex 路径、app-server、数据库文件头与 Windows IPC。" />
+                                    <Button AutomationProperties.Name="打开运行诊断" Click="OnOpenDiagnosticsClicked" Content="查看诊断" />
+                                </StackPanel>
+                            </Border>
                         </Grid>
-                    </Border>
+                    </StackPanel>
+
+                    <TextBlock Margin="4,4,4,0" Style="{StaticResource BridgeSecondaryTextStyle}" Text="Windows 后台/托盘/自启动尚未实现：关闭此窗口会安全停止当前会话。Mac Bridge 与飞书生产配置不受影响。" />
                 </StackPanel>
             </Grid>
         </ScrollViewer>

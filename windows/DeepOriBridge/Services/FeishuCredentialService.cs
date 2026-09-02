@@ -8,8 +8,13 @@ namespace DeepOriBridge.Services;
 
 public sealed class FeishuCredentialService
 {
-    private const string CredentialResource = "DeepOriBridge.Feishu.TestBot";
-    private const string OwnerCredentialResource = "DeepOriBridge.Feishu.TestBot.Owner";
+    private const string CredentialResource = "DeepOriBridge.Windows.Feishu.BotCredential.v2";
+    private const string OwnerCredentialResource = "DeepOriBridge.Windows.Feishu.AuthorizedUser.v2";
+    private const string ProjectCredentialResource = "DeepOriBridge.Windows.Feishu.ProjectAuthorization.v2";
+    private const string VerifiedIdentityResource = "DeepOriBridge.Windows.Feishu.VerifiedAppIdentity.v2";
+    private const string ActiveUserCredentialResource = "DeepOriBridge.Windows.Feishu.ActiveAuthorizedUser.v2";
+    private const string LegacyCredentialResource = "DeepOriBridge.Feishu.TestBot";
+    private const string LegacyOwnerCredentialResource = "DeepOriBridge.Feishu.TestBot.Owner";
     private const string TokenEndpoint =
         "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal";
 
@@ -24,18 +29,27 @@ public sealed class FeishuCredentialService
     {
         try
         {
-            PasswordCredential? credential = _vault
-                .FindAllByResource(CredentialResource)
-                .FirstOrDefault();
+            PasswordCredential? credential = FindCredentials().FirstOrDefault();
+            bool legacy = false;
+            if (credential is null)
+            {
+                credential = FindLegacyCredentials().FirstOrDefault();
+                legacy = credential is not null;
+            }
             if (credential is null)
             {
                 return new FeishuStoredCredential(string.Empty, false);
             }
 
             credential.RetrievePassword();
+            string fingerprint = AppFingerprint(credential.UserName);
+            bool verifiedIdentity = !legacy
+                && HasMatchingVerifiedIdentity(credential.UserName, fingerprint);
             return new FeishuStoredCredential(
                 credential.UserName,
-                !string.IsNullOrEmpty(credential.Password));
+                !string.IsNullOrEmpty(credential.Password),
+                HasVerifiedIdentity: verifiedIdentity,
+                AppFingerprint: ShortFingerprint(fingerprint));
         }
         catch (Exception exception) when (IsCredentialNotFound(exception))
         {
@@ -144,8 +158,20 @@ public sealed class FeishuCredentialService
         {
             _vault.Remove(credential);
         }
+        foreach (PasswordCredential credential in FindLegacyCredentials())
+        {
+            _vault.Remove(credential);
+        }
+        foreach (PasswordCredential credential in FindLegacyOwnerCredentials())
+        {
+            _vault.Remove(credential);
+        }
 
         ClearOwnerBinding();
+        foreach (PasswordCredential credential in FindVerifiedIdentityCredentials())
+        {
+            _vault.Remove(credential);
+        }
     }
 
     public FeishuOwnerBindingState LoadOwnerBinding()
@@ -158,15 +184,18 @@ public sealed class FeishuCredentialService
 
         try
         {
-            PasswordCredential? credential = FindOwnerCredentials()
-                .FirstOrDefault(item => item.UserName.Equals(bot.AppId, StringComparison.Ordinal));
-            if (credential is null)
+            PasswordCredential[] credentials = OwnerCredentialsForApp(bot.AppId).ToArray();
+            if (credentials.Length == 0)
             {
                 return new FeishuOwnerBindingState(false);
             }
-
-            credential.RetrievePassword();
-            return new FeishuOwnerBindingState(!string.IsNullOrWhiteSpace(credential.Password));
+            string? active = RetrieveActiveUserId();
+            return new FeishuOwnerBindingState(
+                true,
+                UserCount: credentials.Length,
+                ActiveUserFingerprint: string.IsNullOrWhiteSpace(active)
+                    ? string.Empty
+                    : ShortFingerprint(Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(active)))));
         }
         catch (Exception exception)
         {
@@ -189,11 +218,18 @@ public sealed class FeishuCredentialService
             throw new InvalidOperationException("请先保存并验证飞书测试机器人凭证。");
         }
 
-        ClearOwnerBinding();
-        _vault.Add(new PasswordCredential(
-            OwnerCredentialResource,
-            bot.AppId,
-            senderId));
+        string key = AuthorizationKey(bot.AppId, senderId);
+        foreach (PasswordCredential credential in FindOwnerCredentials()
+            .Where(item => item.UserName.Equals(key, StringComparison.Ordinal)))
+        {
+            _vault.Remove(credential);
+        }
+        _vault.Add(new PasswordCredential(OwnerCredentialResource, key, senderId));
+        foreach (PasswordCredential credential in FindActiveUserCredentials())
+        {
+            _vault.Remove(credential);
+        }
+        _vault.Add(new PasswordCredential(ActiveUserCredentialResource, bot.AppId, senderId));
     }
 
     public void ClearOwnerBinding()
@@ -202,6 +238,95 @@ public sealed class FeishuCredentialService
         {
             _vault.Remove(credential);
         }
+
+        foreach (PasswordCredential credential in FindProjectCredentials())
+        {
+            _vault.Remove(credential);
+        }
+        foreach (PasswordCredential credential in FindActiveUserCredentials())
+        {
+            _vault.Remove(credential);
+        }
+    }
+
+    public FeishuProjectAuthorizationState LoadProjectAuthorization()
+    {
+        try
+        {
+            string? senderId = RetrieveActiveUserId();
+            FeishuStoredCredential bot = Load();
+            if (string.IsNullOrWhiteSpace(senderId) || string.IsNullOrWhiteSpace(bot.AppId))
+            {
+                return new FeishuProjectAuthorizationState(false, string.Empty);
+            }
+
+            return LoadProjectAuthorizationByKey(AuthorizationKey(bot.AppId, senderId));
+        }
+        catch (Exception exception)
+        {
+            return new FeishuProjectAuthorizationState(
+                false,
+                string.Empty,
+                $"无法读取项目授权：{exception.GetType().Name}");
+        }
+    }
+
+    private FeishuProjectAuthorizationState LoadProjectAuthorizationByKey(string key)
+    {
+        PasswordCredential? credential = FindProjectCredentials()
+            .FirstOrDefault(item => item.UserName.Equals(key, StringComparison.Ordinal));
+        if (credential is null)
+        {
+            return new FeishuProjectAuthorizationState(false, string.Empty);
+        }
+
+        credential.RetrievePassword();
+        string path = credential.Password;
+        bool valid = !string.IsNullOrWhiteSpace(path)
+            && !path.Contains('*', StringComparison.Ordinal)
+            && Path.IsPathFullyQualified(path)
+            && Directory.Exists(path);
+        return new FeishuProjectAuthorizationState(valid, valid ? path : string.Empty);
+    }
+
+    public FeishuProjectAuthorizationState SaveProjectAuthorization(string projectPath)
+    {
+        string candidate = projectPath.Trim();
+        if (candidate.Length == 0 || candidate.Contains('*', StringComparison.Ordinal))
+        {
+            return new FeishuProjectAuthorizationState(false, string.Empty, "必须选择一个明确项目，不能留空或使用通配符。");
+        }
+
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(candidate);
+        }
+        catch
+        {
+            return new FeishuProjectAuthorizationState(false, string.Empty, "项目路径无效。");
+        }
+
+        if (!Directory.Exists(fullPath))
+        {
+            return new FeishuProjectAuthorizationState(false, string.Empty, "项目目录不存在。");
+        }
+
+        string? senderId = RetrieveActiveUserId();
+        FeishuStoredCredential bot = Load();
+        if (string.IsNullOrWhiteSpace(senderId) || string.IsNullOrWhiteSpace(bot.AppId))
+        {
+            return new FeishuProjectAuthorizationState(false, string.Empty, "请先通过一次性验证码绑定飞书用户。");
+        }
+
+        string key = AuthorizationKey(bot.AppId, senderId);
+        foreach (PasswordCredential credential in FindProjectCredentials()
+            .Where(item => item.UserName.Equals(key, StringComparison.Ordinal)))
+        {
+            _vault.Remove(credential);
+        }
+        _vault.Add(new PasswordCredential(ProjectCredentialResource, key, fullPath));
+        return new FeishuProjectAuthorizationState(true, fullPath);
     }
 
     internal bool MatchesBoundOwner(string senderId)
@@ -212,23 +337,74 @@ public sealed class FeishuCredentialService
         }
 
         FeishuStoredCredential bot = Load();
-        PasswordCredential? credential = FindOwnerCredentials()
+        return OwnerCredentialsForApp(bot.AppId).Any(credential =>
+        {
+            credential.RetrievePassword();
+            return CryptographicOperations.FixedTimeEquals(
+                System.Text.Encoding.UTF8.GetBytes(credential.Password),
+                System.Text.Encoding.UTF8.GetBytes(senderId));
+        });
+    }
+
+    internal FeishuProjectAuthorizationState LoadProjectAuthorization(string senderId)
+    {
+        FeishuStoredCredential bot = Load();
+        if (!MatchesBoundOwner(senderId) || string.IsNullOrWhiteSpace(bot.AppId))
+        {
+            return new FeishuProjectAuthorizationState(false, string.Empty);
+        }
+        return LoadProjectAuthorizationByKey(AuthorizationKey(bot.AppId, senderId));
+    }
+
+    internal bool HasAnyProjectAuthorization()
+    {
+        FeishuStoredCredential bot = Load();
+        return OwnerCredentialsForApp(bot.AppId).Any(credential =>
+        {
+            credential.RetrievePassword();
+            return LoadProjectAuthorization(credential.Password).IsAuthorized;
+        });
+    }
+
+    private string? RetrieveActiveUserId()
+    {
+        FeishuStoredCredential bot = Load();
+        PasswordCredential? credential = FindActiveUserCredentials()
             .FirstOrDefault(item => item.UserName.Equals(bot.AppId, StringComparison.Ordinal));
         if (credential is null)
         {
-            return false;
+            PasswordCredential[] owners = OwnerCredentialsForApp(bot.AppId).ToArray();
+            credential = owners.Length == 1 ? owners[0] : null;
+        }
+        if (credential is null)
+        {
+            return null;
         }
 
         credential.RetrievePassword();
-        return CryptographicOperations.FixedTimeEquals(
-            System.Text.Encoding.UTF8.GetBytes(credential.Password),
-            System.Text.Encoding.UTF8.GetBytes(senderId));
+        return credential.Password;
+    }
+
+    private IEnumerable<PasswordCredential> OwnerCredentialsForApp(string appId) =>
+        FindOwnerCredentials().Where(item =>
+            item.UserName.StartsWith(appId + ":", StringComparison.Ordinal));
+
+    private static string AuthorizationKey(string appId, string senderId)
+    {
+        byte[] hash = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(senderId));
+        return $"{appId}:{Convert.ToHexString(hash)}";
     }
 
     internal (string AppId, string Secret)? LoadForRuntime()
     {
         FeishuStoredCredential stored = Load();
-        if (!stored.HasSecret || string.IsNullOrWhiteSpace(stored.AppId))
+        string fullFingerprint = AppFingerprint(stored.AppId);
+        if (!FeishuAppIdentityPolicy.MayStartSidecar(
+                stored.AppId,
+                stored.HasSecret,
+                stored.HasVerifiedIdentity,
+                fullFingerprint)
+            || string.IsNullOrWhiteSpace(stored.AppId))
         {
             return null;
         }
@@ -244,6 +420,10 @@ public sealed class FeishuCredentialService
         {
             _vault.Remove(credential);
         }
+        foreach (PasswordCredential credential in FindLegacyCredentials())
+        {
+            _vault.Remove(credential);
+        }
 
         if (!string.IsNullOrWhiteSpace(previousAppId)
             && !previousAppId.Equals(appId, StringComparison.Ordinal))
@@ -252,6 +432,12 @@ public sealed class FeishuCredentialService
         }
 
         _vault.Add(new PasswordCredential(CredentialResource, appId, secret));
+        string fingerprint = AppFingerprint(appId);
+        foreach (PasswordCredential credential in FindVerifiedIdentityCredentials())
+        {
+            _vault.Remove(credential);
+        }
+        _vault.Add(new PasswordCredential(VerifiedIdentityResource, appId, fingerprint));
     }
 
     private string? RetrieveSavedSecret(string appId)
@@ -290,6 +476,72 @@ public sealed class FeishuCredentialService
             return Array.Empty<PasswordCredential>();
         }
     }
+
+    private IReadOnlyList<PasswordCredential> FindLegacyCredentials() =>
+        FindByResourceOrEmpty(LegacyCredentialResource);
+
+    private IReadOnlyList<PasswordCredential> FindLegacyOwnerCredentials() =>
+        FindByResourceOrEmpty(LegacyOwnerCredentialResource);
+
+    private IReadOnlyList<PasswordCredential> FindByResourceOrEmpty(string resource)
+    {
+        try
+        {
+            return _vault.FindAllByResource(resource);
+        }
+        catch (Exception exception) when (IsCredentialNotFound(exception))
+        {
+            return Array.Empty<PasswordCredential>();
+        }
+    }
+
+    private IReadOnlyList<PasswordCredential> FindProjectCredentials()
+    {
+        try
+        {
+            return _vault.FindAllByResource(ProjectCredentialResource);
+        }
+        catch (Exception exception) when (IsCredentialNotFound(exception))
+        {
+            return Array.Empty<PasswordCredential>();
+        }
+    }
+
+    private IReadOnlyList<PasswordCredential> FindActiveUserCredentials() =>
+        FindByResourceOrEmpty(ActiveUserCredentialResource);
+
+    private IReadOnlyList<PasswordCredential> FindVerifiedIdentityCredentials()
+    {
+        try
+        {
+            return _vault.FindAllByResource(VerifiedIdentityResource);
+        }
+        catch (Exception exception) when (IsCredentialNotFound(exception))
+        {
+            return Array.Empty<PasswordCredential>();
+        }
+    }
+
+    private bool HasMatchingVerifiedIdentity(string appId, string fingerprint)
+    {
+        PasswordCredential? identity = FindVerifiedIdentityCredentials()
+            .FirstOrDefault(item => item.UserName.Equals(appId, StringComparison.Ordinal));
+        if (identity is null)
+        {
+            return false;
+        }
+
+        identity.RetrievePassword();
+        return CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.UTF8.GetBytes(identity.Password),
+            System.Text.Encoding.UTF8.GetBytes(fingerprint));
+    }
+
+    internal static string AppFingerprint(string appId) =>
+        FeishuAppIdentityPolicy.Fingerprint(appId);
+
+    internal static string ShortFingerprint(string fingerprint) =>
+        fingerprint.Length >= 12 ? fingerprint[..12] : fingerprint;
 
     private static bool IsCredentialNotFound(Exception exception) =>
         exception.HResult == unchecked((int)0x80070490);

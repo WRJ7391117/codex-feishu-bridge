@@ -4,7 +4,6 @@ namespace DeepOriBridge.Services;
 
 internal sealed class BridgeRuntime : IAsyncDisposable
 {
-    public const string ControlledRouteWorkingDirectory = @"D:\Evolution\Codex-Feishu-Bridge";
     public const string ControlledRoutePrompt = "请仅回复：Windows Codex 路由测试已完成。";
     public const string ControlledRouteExpectedResponse = "Windows Codex 路由测试已完成。";
     public const int ReadOnlyPromptMaxLength = 4000;
@@ -196,11 +195,35 @@ internal sealed class BridgeRuntime : IAsyncDisposable
     public async Task<CodexControlledRouteResult> RunControlledRouteTestAsync(
         CancellationToken cancellationToken)
     {
-        return await RunReadOnlyPromptAsync(ControlledRoutePrompt, cancellationToken);
+        return await RunReadOnlyPromptAsync(
+            ControlledRoutePrompt,
+            Directory.GetCurrentDirectory(),
+            cancellationToken);
+    }
+
+    public async Task<CodexControlledRouteResult> RunControlledRouteTestAsync(
+        string authorizedWorkingDirectory,
+        CancellationToken cancellationToken)
+    {
+        return await RunReadOnlyPromptAsync(
+            ControlledRoutePrompt,
+            authorizedWorkingDirectory,
+            cancellationToken);
     }
 
     public async Task<CodexControlledRouteResult> RunReadOnlyPromptAsync(
         string prompt,
+        CancellationToken cancellationToken)
+    {
+        return await RunReadOnlyPromptAsync(
+            prompt,
+            Directory.GetCurrentDirectory(),
+            cancellationToken);
+    }
+
+    public async Task<CodexControlledRouteResult> RunReadOnlyPromptAsync(
+        string prompt,
+        string authorizedWorkingDirectory,
         CancellationToken cancellationToken)
     {
         string approvedPrompt = prompt?.Trim()
@@ -215,6 +238,12 @@ internal sealed class BridgeRuntime : IAsyncDisposable
             throw new ArgumentException(
                 $"只读提示词不能超过 {ReadOnlyPromptMaxLength} 个字符。",
                 nameof(prompt));
+        }
+
+        string workingDirectory = Path.GetFullPath(authorizedWorkingDirectory);
+        if (!Directory.Exists(workingDirectory))
+        {
+            throw new DirectoryNotFoundException("已授权的 Codex 项目目录不存在。");
         }
 
         await _controlledRouteLock.WaitAsync(cancellationToken);
@@ -232,7 +261,7 @@ internal sealed class BridgeRuntime : IAsyncDisposable
             Volatile.Write(ref _activeTurnStarted, 0);
 
             CodexThreadStartResult thread = await client.StartThreadAsync(
-                ControlledRouteWorkingDirectory,
+                workingDirectory,
                 cancellationToken);
             var completion = new TaskCompletionSource<CodexControlledRouteResult>(
                 TaskCreationOptions.RunContinuationsAsynchronously);

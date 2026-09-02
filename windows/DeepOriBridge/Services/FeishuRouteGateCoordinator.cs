@@ -14,6 +14,7 @@ internal sealed record FeishuRouteAuthorization(
     long Generation,
     string MessageId,
     string? Prompt,
+    string ProjectPath,
     DateTimeOffset CapturedAt,
     DateTimeOffset ExpiresAt,
     CancellationToken SessionCancellation);
@@ -223,7 +224,8 @@ internal sealed class FeishuRouteGateCoordinator : IDisposable
         string? readOnlyPrompt,
         bool approvedTarget,
         bool ownerMatches,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        string? projectPath = null)
     {
         lock (_sync)
         {
@@ -262,6 +264,7 @@ internal sealed class FeishuRouteGateCoordinator : IDisposable
                 _controlledTicket = NewTicket(
                     messageId,
                     prompt: null,
+                    projectPath,
                     now,
                     _controlledArmVersion);
                 controlledCaptured = true;
@@ -277,6 +280,7 @@ internal sealed class FeishuRouteGateCoordinator : IDisposable
                 _readOnlyTicket = NewTicket(
                     messageId,
                     readOnlyPrompt.Trim(),
+                    projectPath,
                     now,
                     _readOnlyArmVersion);
                 readOnlyCaptured = true;
@@ -329,6 +333,7 @@ internal sealed class FeishuRouteGateCoordinator : IDisposable
                 ticket.Generation,
                 ticket.MessageId,
                 ticket.Prompt,
+                ticket.ProjectPath,
                 ticket.CapturedAt,
                 ticket.ExpiresAt,
                 _session.Token);
@@ -485,12 +490,14 @@ internal sealed class FeishuRouteGateCoordinator : IDisposable
     private Ticket NewTicket(
         string messageId,
         string? prompt,
+        string? projectPath,
         DateTimeOffset now,
         long version) =>
         new(
             _generation,
             messageId,
             prompt,
+            projectPath ?? string.Empty,
             now,
             now + AuthorizationTtl,
             _timeProvider.GetTimestamp(),
@@ -657,6 +664,7 @@ internal sealed class FeishuRouteGateCoordinator : IDisposable
         long generation,
         string messageId,
         string? prompt,
+        string projectPath,
         DateTimeOffset capturedAt,
         DateTimeOffset expiresAt,
         long capturedAtTimestamp,
@@ -665,6 +673,7 @@ internal sealed class FeishuRouteGateCoordinator : IDisposable
         internal long Generation { get; } = generation;
         internal string MessageId { get; } = messageId;
         internal string? Prompt { get; } = prompt;
+        internal string ProjectPath { get; } = projectPath;
         internal DateTimeOffset CapturedAt { get; } = capturedAt;
         internal DateTimeOffset ExpiresAt { get; } = expiresAt;
         internal long CapturedAtTimestamp { get; } = capturedAtTimestamp;

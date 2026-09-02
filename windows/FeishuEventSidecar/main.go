@@ -17,6 +17,8 @@ import (
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
+	larkapplication "github.com/larksuite/oapi-sdk-go/v3/service/application/v6"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
@@ -81,6 +83,24 @@ func normalizeEvent(event *larkim.P2MessageReceiveV1) (outputEvent, bool) {
 		SenderID:    msg.UserID,
 		Content:     stripOfficialMentionKeys(msg.Content, msg.Mentions),
 	}, true
+}
+
+func normalizeMenuEvent(event *larkapplication.P2BotMenuV6) (outputEvent, bool) {
+	if event == nil || event.Event == nil || event.Event.EventKey == nil || event.Event.Operator == nil || event.Event.Operator.OperatorId == nil || event.Event.Operator.OperatorId.OpenId == nil {
+		return outputEvent{}, false
+	}
+	return outputEvent{Type: "application.bot.menu_v6", SenderType: "user", SenderID: *event.Event.Operator.OperatorId.OpenId, Content: *event.Event.EventKey}, true
+}
+
+func normalizeCardEvent(event *callback.CardActionTriggerEvent) (outputEvent, bool) {
+	if event == nil || event.Event == nil || event.Event.Operator == nil || event.Event.Operator.OpenID == "" {
+		return outputEvent{}, false
+	}
+	content := "card-action"
+	if event.Event.Action != nil && event.Event.Action.Name != "" {
+		content = event.Event.Action.Name
+	}
+	return outputEvent{Type: "card.action.trigger", SenderType: "user", SenderID: event.Event.Operator.OpenID, Content: content}, true
 }
 
 func stripOfficialMentionKeys(content string, mentions []channeltypes.Mention) string {
@@ -236,7 +256,19 @@ func main() {
 			}
 			return emit(output)
 		},
-	)
+	).OnP2BotMenuV6(func(ctx context.Context, event *larkapplication.P2BotMenuV6) error {
+		output, ok := normalizeMenuEvent(event)
+		if !ok {
+			return nil
+		}
+		return emit(output)
+	}).OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+		output, ok := normalizeCardEvent(event)
+		if ok {
+			_ = emit(output)
+		}
+		return &callback.CardActionTriggerResponse{}, nil
+	})
 	wsClient := larkws.NewClient(
 		cfg.AppID,
 		cfg.AppSecret,

@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using DeepOriBridge.Services;
 
 namespace DeepOriBridge;
 
@@ -8,6 +9,8 @@ namespace DeepOriBridge;
 public partial class App : Application
 {
     private Window? _window;
+
+    internal BridgeAppServices Services { get; } = new();
 
     public App()
     {

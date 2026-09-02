@@ -6,6 +6,87 @@ using DeepOriBridge.Services;
 const string WorkingDirectory = @"D:\Evolution\Codex-Feishu-Bridge";
 int passed = 0;
 
+Assert(
+    BridgeProductIdentity.IsExpectedCandidate(
+        @"D:\Bridge\DeepOriBridge.exe",
+        BridgeProductIdentity.ExpectedProductName,
+        BridgeProductIdentity.ExpectedPackageName),
+    "exact Bridge executable, product, and package identity must pass");
+Assert(
+    !BridgeProductIdentity.IsExpectedCandidate(
+        @"C:\Program Files\WindowsApps\DeepOri.AgentMesh\DeepOriAgentMesh.exe",
+        "DeepOri Agent Mesh",
+        BridgeProductIdentity.ForbiddenMeshPackageName),
+    "Mesh must never be accepted as Bridge");
+Assert(
+    !BridgeProductIdentity.IsExpectedCandidate(
+        @"D:\Bridge\DeepOriBridge.exe",
+        BridgeProductIdentity.ExpectedProductName,
+        BridgeProductIdentity.ForbiddenMeshPackageName),
+    "Bridge executable under Mesh package identity must fail closed");
+Assert(
+    !BridgeProductIdentity.IsExpectedCandidate(
+        @"D:\Bridge\DeepOriBridge.exe",
+        "DeepOri Agent Mesh",
+        BridgeProductIdentity.ExpectedPackageName),
+    "product metadata mismatch must fail closed");
+string[] reversedCandidates =
+[
+    @"C:\Program Files\WindowsApps\DeepOri.AgentMesh\DeepOriAgentMesh.exe",
+    @"D:\Bridge\DeepOriBridge.exe",
+];
+Assert(
+    reversedCandidates.Count(path => BridgeProductIdentity.IsExpectedCandidate(
+        path,
+        Path.GetFileName(path).Equals("DeepOriBridge.exe", StringComparison.OrdinalIgnoreCase)
+            ? BridgeProductIdentity.ExpectedProductName
+            : "DeepOri Agent Mesh",
+        Path.GetFileName(path).Equals("DeepOriBridge.exe", StringComparison.OrdinalIgnoreCase)
+            ? BridgeProductIdentity.ExpectedPackageName
+            : BridgeProductIdentity.ForbiddenMeshPackageName)) == 1,
+    "candidate ordering must not change exact Bridge selection");
+Assert(
+    BridgeProductIdentity.SelectUniqueCandidate([]) is null,
+    "zero Bridge candidates must fail closed before any action");
+Assert(
+    BridgeProductIdentity.SelectUniqueCandidate(
+    [
+        (@"D:\BridgeA\DeepOriBridge.exe", BridgeProductIdentity.ExpectedProductName, BridgeProductIdentity.ExpectedPackageName),
+        (@"D:\BridgeB\DeepOriBridge.exe", BridgeProductIdentity.ExpectedProductName, BridgeProductIdentity.ExpectedPackageName),
+    ]) is null,
+    "multiple exact Bridge candidates must fail closed before any action");
+Assert(
+    BridgeProductIdentity.SelectUniqueCandidate(
+    [
+        (@"C:\Mesh\DeepOriAgentMesh.exe", "DeepOri Agent Mesh", BridgeProductIdentity.ForbiddenMeshPackageName),
+    ]) is null,
+    "Mesh-only installation must fail closed before any action");
+string botFingerprint = FeishuAppIdentityPolicy.Fingerprint("cli_bridge_bot");
+Assert(
+    FeishuAppIdentityPolicy.MayStartSidecar("cli_bridge_bot", true, true, botFingerprint),
+    "matching verified app fingerprint may start sidecar");
+Assert(
+    !FeishuAppIdentityPolicy.MayStartSidecar("cli_mesh_bot", true, true, botFingerprint),
+    "cross-app credential fingerprint must fail closed");
+Assert(
+    !FeishuAppIdentityPolicy.MayStartSidecar("cli_bridge_bot", true, false, botFingerprint),
+    "legacy credential without verified identity must fail closed");
+Assert(
+    !FeishuAppIdentityPolicy.MayStartSidecar("cli_bridge_bot", false, true, botFingerprint),
+    "verified identity without a secret must fail closed");
+string ownerCode = FeishuOwnerBindingCodePolicy.Generate();
+DateTimeOffset ownerCodeNow = DateTimeOffset.UtcNow;
+Assert(ownerCode.Length == 6 && ownerCode.All(char.IsDigit), "owner binding code must be six digits");
+Assert(
+    FeishuOwnerBindingCodePolicy.Matches(ownerCode, ownerCodeNow.AddMinutes(2), ownerCode, ownerCodeNow),
+    "exact unexpired owner binding code must match");
+Assert(
+    !FeishuOwnerBindingCodePolicy.Matches(ownerCode, ownerCodeNow, ownerCode, ownerCodeNow),
+    "expired owner binding code must fail closed");
+Assert(
+    !FeishuOwnerBindingCodePolicy.Matches(ownerCode, ownerCodeNow.AddMinutes(2), "Windows Bridge 绑定所有者", ownerCodeNow),
+    "legacy static owner binding phrase must fail closed");
+
 JsonElement valid = JsonSerializer.SerializeToElement(new
 {
     thread = new { id = "thread-readonly" },
@@ -77,6 +158,22 @@ Assert(
     "other fixed actions must not be diverted into the controlled route gate");
 
 DateTimeOffset gateNow = new(2026, 8, 31, 12, 0, 0, TimeSpan.Zero);
+using (var projectGates = NewRouteGates())
+{
+    projectGates.Arm(FeishuRouteKind.ReadOnly);
+    FeishuRouteCaptureResult capture = projectGates.ProcessMessage(
+        "project-bound-message",
+        "codex-readonly",
+        "只读检查",
+        approvedTarget: true,
+        ownerMatches: true,
+        gateNow,
+        @"D:\Authorized\ExactProject");
+    Assert(capture.ReadOnlyCaptured, "authorized sender project context must be captured");
+    FeishuRouteAuthorization authorization = projectGates.Claim(FeishuRouteKind.ReadOnly, gateNow);
+    Assert(authorization.ProjectPath == @"D:\Authorized\ExactProject",
+        "claimed route must preserve the exact sender-specific project path");
+}
 using (var gates = NewRouteGates())
 {
     gates.Arm(FeishuRouteKind.Controlled);

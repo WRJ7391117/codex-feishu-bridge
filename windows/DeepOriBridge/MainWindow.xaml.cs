@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using DeepOriBridge.Models;
 
 namespace DeepOriBridge;
 
@@ -17,10 +18,16 @@ public sealed partial class MainWindow : Window
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         AppWindow.SetIcon("Assets/AppIcon.ico");
-        AppWindow.Resize(new Windows.Graphics.SizeInt32(1440, 960));
+        AppWindow.Resize(new Windows.Graphics.SizeInt32(1600, 1000));
         AppWindow.Closing += OnAppWindowClosing;
 
-        RootFrame.Navigate(typeof(MainPage));
+        var services = ((App)Application.Current).Services;
+        FeishuStoredCredential credential = services.FeishuCredentials.Load();
+        bool setupComplete = credential.HasSecret
+            && credential.HasVerifiedIdentity
+            && services.FeishuCredentials.LoadOwnerBinding().IsBound
+            && services.FeishuCredentials.LoadProjectAuthorization().IsAuthorized;
+        RootFrame.Navigate(setupComplete ? typeof(MainPage) : typeof(ConnectionSetupPage));
     }
 
     private async void OnAppWindowClosing(
@@ -41,10 +48,7 @@ public sealed partial class MainWindow : Window
         _shutdownStarted = true;
         try
         {
-            if (RootFrame.Content is MainPage page)
-            {
-                await page.ShutdownAsync();
-            }
+            await ((App)Application.Current).Services.ShutdownAsync();
         }
         finally
         {

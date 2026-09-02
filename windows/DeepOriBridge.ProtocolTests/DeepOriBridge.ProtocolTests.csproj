@@ -18,5 +18,8 @@
     <Compile Include="..\DeepOriBridge\Services\FeishuArmExpiryScheduler.cs" Link="Production\FeishuArmExpiryScheduler.cs" />
     <Compile Include="..\DeepOriBridge\Services\FeishuEventSnapshotStore.cs" Link="Production\FeishuEventSnapshotStore.cs" />
     <Compile Include="..\DeepOriBridge\Services\FeishuSidecarProtocol.cs" Link="Production\FeishuSidecarProtocol.cs" />
+    <Compile Include="..\DeepOriBridge\Services\BridgeProductIdentity.cs" Link="Production\BridgeProductIdentity.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuAppIdentityPolicy.cs" Link="Production\FeishuAppIdentityPolicy.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuOwnerBindingCodePolicy.cs" Link="Production\FeishuOwnerBindingCodePolicy.cs" />
   </ItemGroup>
 </Project>
