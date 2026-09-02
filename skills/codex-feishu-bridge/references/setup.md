@@ -6,9 +6,9 @@
 - Codex Desktop with at least one local Task
 - a Feishu custom app with Bot capability
 
-The App bundles its patched runtime CLI. Use the first-connection assistant to configure a dedicated Profile. It passes App Secret through stdin to `lark-cli`, which stores it in macOS Keychain; never pass an App Secret in process arguments. A system `lark-cli` is optional and only needed for terminal maintenance.
+The App bundles its patched runtime CLI. Add and verify the Feishu Bot from the App home page before opening the first-connection assistant. The home-page form passes App Secret through stdin to `lark-cli`, which stores it in macOS Keychain; never pass an App Secret in process arguments. A system `lark-cli` is optional and only needed for terminal maintenance.
 
-The first-connection assistant offers two paths. “让 Codex 帮我配置” installs the App-bundled `deepori-bridge-setup` Skill locally and provides a prompt to paste into the user's own Codex Task. It does not require a Feishu or Lark plugin. “我自己手动配置” keeps the four-step App flow. In both paths, App Secret must be entered only in the App secure field and must never be pasted into a Codex Task.
+After the Bot connection passes, the first-connection assistant offers two paths. “让 Codex 帮我配置” installs the App-bundled `deepori-bridge-setup` Skill locally and provides a prompt to paste into the user's own Codex Task. It does not require a Feishu or Lark plugin. “我自己手动配置” uses a two-step flow for Bot console settings and explicit user/project authorization. App Secret remains in the home-page secure field and must never be pasted into a Codex Task.
 
 The installed bridge prefers its bundled `lark-cli 1.0.92-codex-feishu.3`. It registers `card.action.trigger` with the SDK's card-action handler and returns a visible processing toast. The system CLI and bundled CLI share the same Profile and Keychain credentials.
 

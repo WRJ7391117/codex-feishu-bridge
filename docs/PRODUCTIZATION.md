@@ -46,7 +46,7 @@ Optional automation-extension source remains visible in this repository for exis
 5. The App shows the exact permissions, events, card callback, menu keys, and publication steps required in the Feishu console.
 6. The first Feishu user must send the one-time code shown by the App in a P2P Bot message, be discovered by `open_id`, and receive no Task access until the Mac owner assigns explicit projects.
 7. A connection test proves all three event consumers and one real Bot round trip. A passing local self-test alone is not success.
-8. Updates preserve config and Task state, refuse to interrupt active or pending work, and verify version, SHA-256, bundle identity, signature, and both architectures. Automatic installation is an explicit persisted user choice, is off by default, and reuses the manual verified installer.
+8. Updates preserve config and Task state, refuse to interrupt active or pending work, and verify the signed Sparkle appcast, bundle identity, signature, and architecture. Automatic installation is on by default with an explicit persisted user toggle; checks run at launch, after real bridge activity subject to rate limiting, or from the manual action, without timer polling.
 9. Uninstall can remove the service while preserving local state. A separate explicit purge removes local bridge state and credentials.
 10. Support diagnostics are useful without printing App Secret, user IDs, Chat IDs, Task IDs, message contents, or private paths beyond the current user's standard bridge locations.
 
@@ -58,4 +58,4 @@ Optional automation-extension source remains visible in this repository for exis
 
 Until notarization is available, Releases must say that the App is ad-hoc signed and requires Finder -> right-click -> Open on first launch. The product must never tell users to disable Gatekeeper or remove quarantine attributes.
 
-The version tag workflow is the single GitHub Release publisher. Operators push the matching tag and let that workflow create the Release; its publish step is idempotent and replaces verified assets when the same Release already exists.
+The version tag workflow is the single GitHub Release publisher. Operators push the matching tag and let that workflow create the Release. If the same Release already exists, the workflow stops instead of replacing signed assets.

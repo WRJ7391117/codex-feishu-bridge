@@ -94,11 +94,11 @@ App 已内置桥接所需的专用 `lark-cli`；普通用户无需先安装命�
 
 若 Release 标注为 ad-hoc 签名且未经过 Apple 公证，另一台 Mac 首次打开时请在 Finder 中右键 App →“打开”。不要用脚本移除系统隔离属性。构建流程已支持 Developer ID 签名与 Apple 公证，是否已签名以对应 Release 说明和 `codesign` 验证结果为准。
 
-### 3. 使用首次连接向导
+### 3. 添加飞书 Bot，再使用首次连接向导
 
-首次打开 DeepOri Bridge 后点击“首次连接向导”，可以选择“让 Codex 帮我配置”或“我自己手动配置”。Codex 路线会从 App 内本地安装专用配置 Skill，并生成一段可复制到任意 Codex Task 的指令；不需要安装飞书插件。手动路线继续使用四步向导。
+首次打开 DeepOri Bridge 后，先在首页点击“添加 Bot”，输入 App ID 和 App Secret，并通过 Bot 身份与飞书网络检查。Bot 连接成功后，再点击“首次连接向导”，选择“让 Codex 帮我配置”或“我自己手动配置”。Codex 路线会从 App 内本地安装专用配置 Skill，并生成一段可复制到任意 Codex Task 的指令；不需要安装飞书插件。手动路线使用两步向导完成机器人后台设置和使用者授权。
 
-两种路线都要求 App Secret 只在 DeepOri Bridge 的安全输入框中填写。Secret 只通过 stdin 交给内置 `lark-cli`，由它存入 macOS Keychain，不会进入 Codex 对话、进程参数、桥接 `config.json` 或日志。
+App Secret 只在首页的 DeepOri Bridge 安全输入框中填写。Secret 只通过 stdin 交给内置 `lark-cli`，由它存入 macOS Keychain，不会进入 Codex 对话、进程参数、桥接 `config.json` 或日志。
 
 需要用终端维护时，才使用系统 `lark-cli`：
 
@@ -148,7 +148,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 打开 `Codex 飞书桥接.app`，主控制窗口会自动出现：
 
-1. 完成“首次连接向导”的 Profile 检查和首位用户识别；
+1. 完成首页飞书 Bot 检查，再通过“首次连接向导”识别首位用户；
 2. 在“授权用户”中填写备注名，并从 Codex Desktop 左侧栏读取的项目列表中明确选择允许项目；
    - `*` 表示允许访问全部项目；
    - 多个项目用逗号分隔，名称必须与 Codex Desktop 左侧栏完全一致；

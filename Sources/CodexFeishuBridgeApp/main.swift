@@ -15,13 +15,12 @@ private enum ProductBrand {
     static let codexSetupPrompt = """
     请使用 $deepori-bridge-setup 配置这台 Mac 上的 DeepOri Bridge。
 
-    请先只读检查，再尽可能自动完成配置。不要让我把 App Secret 发到 Codex 对话、终端参数、文件或日志中；需要凭证时，请让我只在 DeepOri Bridge 的安全输入框中填写。
+    首页已经添加并验证飞书 Bot。请先只读检查，再尽可能自动完成后续配置。不要让我把 App Secret 发到 Codex 对话、终端参数、文件或日志中；App Secret 只能由 DeepOri Bridge 和 macOS 钥匙串管理。
 
     仅在真正需要人工确认时暂停，并明确告诉我现在要做什么：
     1. 飞书登录、验证码或二次验证；
-    2. 在 DeepOri Bridge 中输入 App ID 和 App Secret；
-    3. 批准权限或发布飞书应用版本；
-    4. 选择每位用户可以访问的具体 Codex 项目。
+    2. 批准权限或发布飞书应用版本；
+    3. 选择每位用户可以访问的具体 Codex 项目。
 
     不要默认开放全部项目。完成后请验证 DeepOri Bridge 已开启、三个飞书事件消费者正常，并引导我完成一次飞书文字往返测试。
     """
@@ -828,6 +827,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var authorizedUserCount = 0
     @Published var health = BridgeHealthSnapshot.empty
     @Published var pendingAccessRequests: [AccessRequestDraft] = []
+    @Published var showBotSetup = false
     @Published var showConnectionSetup = false
     @Published var showConfiguration = false
     @Published var showDiagnosis = false
@@ -870,6 +870,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var setupAppSecret = ""
     @Published var setupResult = ""
     @Published var setupPassed = false
+    @Published var botConnectionChecked = false
     @Published var setupUsesExistingProfile = false
     @Published var isConfiguringProfile = false
     @Published var isDiscoveringUser = false
@@ -878,6 +879,7 @@ private final class BridgeViewModel: ObservableObject {
     @Published var availableProjects: [String] = []
     @Published var codexSetupSkillReady = false
     @Published var codexSetupStatus = ""
+    private var botSetupFlow = BotSetupFlow()
 
     init(bridge: BridgeController) {
         self.bridge = bridge
@@ -1088,22 +1090,68 @@ private final class BridgeViewModel: ObservableObject {
         refresh()
     }
 
-    func prepareConnectionSetup() {
+    func refreshBotConnection() {
+        guard !isConfiguringProfile else { return }
         let configuredProfile = String(
             describing: bridge.readConfig()["lark_profile"] ?? "codex-notify"
         )
         setupProfile = configuredProfile
         setupAppID = ""
         setupAppSecret = ""
-        setupUsesExistingProfile = hasConfiguredUsers
-        setupResult = setupUsesExistingProfile ? "正在检查现有连接…" : ""
+        setupUsesExistingProfile = true
+        setupResult = "正在检查当前飞书 Bot 连接…"
         setupPassed = false
+        botConnectionChecked = false
         discoveredOpenID = ""
         userDiscoveryResult = ""
-        showConnectionSetup = true
-        if setupUsesExistingProfile {
-            checkExistingProfile()
+        checkExistingProfile()
+    }
+
+    func prepareBotSetup(continueToConnectionSetup: Bool = false) {
+        botSetupFlow.present(
+            continueToConnectionSetup: continueToConnectionSetup,
+            currentlyVerified: setupPassed
+        )
+        showBotSetup = true
+        if !setupPassed {
+            refreshBotConnection()
         }
+    }
+
+    func prepareConnectionSetup() {
+        if setupPassed {
+            showConnectionSetup = true
+        } else {
+            prepareBotSetup(continueToConnectionSetup: true)
+        }
+    }
+
+    func dismissBotSetup() {
+        let restoredVerification = botSetupFlow.cancel(currentlyVerified: setupPassed)
+        if restoredVerification && !setupPassed {
+            setupPassed = true
+            setupUsesExistingProfile = true
+            setupProfile = profileName
+            setupResult = "当前 Bot 已连接。"
+        }
+        setupAppID = ""
+        setupAppSecret = ""
+        showBotSetup = false
+    }
+
+    func completeBotSetup() {
+        guard setupPassed else { return }
+        let shouldContinue = botSetupFlow.complete(currentlyVerified: setupPassed)
+        showBotSetup = false
+        if shouldContinue {
+            DispatchQueue.main.async { [weak self] in
+                self?.showConnectionSetup = true
+            }
+        }
+    }
+
+    var botSetupPrimaryTitle: String {
+        botSetupFlow.shouldContinueToConnectionSetup ? "继续首次连接向导" : "完成"
     }
 
     func prepareCodexAssistedSetup() -> Bool {
@@ -1142,6 +1190,7 @@ private final class BridgeViewModel: ObservableObject {
         let profile = setupProfile.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !profile.isEmpty else {
             setupUsesExistingProfile = false
+            botConnectionChecked = true
             setupResult = "现有连接名称为空，请重新配置凭证。"
             return
         }
@@ -1152,17 +1201,31 @@ private final class BridgeViewModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.isConfiguringProfile = false
+                self.botConnectionChecked = true
                 self.setupPassed = checked.status == 0
-                self.setupResult = self.setupPassed
-                    ? "现有连接已通过 Bot 身份与飞书网络检查，无需重新输入 App ID 或 App Secret。"
-                    : self.connectionCheckFailureMessage(checked)
+                if self.setupPassed, let error = self.persistSetupProfile(profile) {
+                    self.setupPassed = false
+                    self.setupResult = error
+                } else {
+                    if self.setupPassed {
+                        self.setupResult = "现有连接已通过 Bot 身份与飞书网络检查，无需重新输入 App ID 或 App Secret。"
+                    } else {
+                        let failure = self.connectionCheckFailureMessage(checked)
+                        self.setupResult = failure
+                        if failure.hasPrefix("没有找到可用的本机连接") {
+                            self.setupUsesExistingProfile = false
+                        }
+                    }
+                }
             }
         }
     }
 
     func startCredentialReconfiguration() {
+        botSetupFlow.beginCredentialReconfiguration()
         setupUsesExistingProfile = false
         setupPassed = false
+        botConnectionChecked = true
         setupResult = "请输入新的 App ID 和 App Secret。"
     }
 
@@ -1187,6 +1250,7 @@ private final class BridgeViewModel: ObservableObject {
         isConfiguringProfile = true
         setupResult = "正在写入 macOS Keychain 并检查 Bot 连接…"
         setupPassed = false
+        botConnectionChecked = false
         let controller = bridge
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let configured = controller.configureLarkProfile(
@@ -1201,24 +1265,21 @@ private final class BridgeViewModel: ObservableObject {
                 guard let self else { return }
                 self.setupAppSecret = ""
                 self.isConfiguringProfile = false
+                self.botConnectionChecked = true
+                if configured.status == 0 {
+                    self.botSetupFlow.recordCredentialWriteSucceeded()
+                }
                 self.setupPassed = configured.status == 0 && checked.status == 0
-                if self.setupPassed {
+                self.setupUsesExistingProfile = configured.status == 0
+                if configured.status == 0, let error = self.persistSetupProfile(profile) {
+                    self.setupPassed = false
+                    self.setupResult = error
+                } else if self.setupPassed {
                     self.setupResult = "连接信息已安全保存，Bot 身份与飞书网络检查通过。"
                 } else if configured.status != 0 {
                     self.setupResult = "连接信息未能保存到 macOS 钥匙串。请重新输入 App ID 和 App Secret 后再试。"
                 } else {
                     self.setupResult = self.connectionCheckFailureMessage(checked)
-                }
-                if self.setupPassed {
-                    var config = controller.readConfig()
-                    config["lark_profile"] = profile
-                    do {
-                        try controller.writeConfig(config)
-                        self.profileName = profile
-                    } catch {
-                        self.setupPassed = false
-                        self.setupResult = "Profile 已创建，但桥接配置未保存：\(error.localizedDescription)"
-                    }
                 }
             }
         }
@@ -1233,17 +1294,36 @@ private final class BridgeViewModel: ObservableObject {
         }
         isConfiguringProfile = true
         setupResult = "正在检查 Bot 身份与飞书网络…"
+        botConnectionChecked = false
         let controller = bridge
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let checked = controller.checkLarkProfile(profile)
             Task { @MainActor in
                 guard let self else { return }
                 self.isConfiguringProfile = false
+                self.botConnectionChecked = true
                 self.setupPassed = checked.status == 0
-                self.setupResult = checked.status == 0
-                    ? "Bot 身份与飞书网络检查通过。"
-                    : self.connectionCheckFailureMessage(checked)
+                if self.setupPassed, let error = self.persistSetupProfile(profile) {
+                    self.setupPassed = false
+                    self.setupResult = error
+                } else {
+                    self.setupResult = self.setupPassed
+                        ? "Bot 身份与飞书网络检查通过。"
+                        : self.connectionCheckFailureMessage(checked)
+                }
             }
+        }
+    }
+
+    private func persistSetupProfile(_ profile: String) -> String? {
+        var config = bridge.readConfig()
+        config["lark_profile"] = profile
+        do {
+            try bridge.writeConfig(config)
+            profileName = profile
+            return nil
+        } catch {
+            return "Profile 已创建，但桥接配置未保存：\(error.localizedDescription)"
         }
     }
 
@@ -1324,14 +1404,17 @@ private final class BridgeViewModel: ObservableObject {
     func continueToUserAuthorization() {
         showConnectionSetup = false
         prepareConfiguration()
-        if discoveredOpenID.hasPrefix("ou_") {
-            draftUsers = [
+        if discoveredOpenID.hasPrefix("ou_")
+            && !draftUsers.contains(where: { $0.openID == discoveredOpenID }) {
+            let hasExistingUsers = draftUsers.contains { $0.openID.hasPrefix("ou_") }
+            draftUsers.removeAll { !$0.openID.hasPrefix("ou_") }
+            draftUsers.append(
                 AuthorizedUserDraft(
-                    name: "机主",
+                    name: hasExistingUsers ? "新用户" : "机主",
                     openID: discoveredOpenID,
                     projects: ""
                 )
-            ]
+            )
         }
     }
 
@@ -1690,6 +1773,7 @@ private struct MainView: View {
             VStack(alignment: .leading, spacing: 22) {
                 header
                 statusCard
+                botCard
                 healthCard
                 usageCard
                 promLightEntryCard
@@ -1708,6 +1792,9 @@ private struct MainView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $model.showConfiguration) {
             ConfigurationView(model: model)
+        }
+        .sheet(isPresented: $model.showBotSetup) {
+            BotSetupView(model: model)
         }
         .sheet(isPresented: $model.showConnectionSetup) {
             ConnectionSetupView(model: model)
@@ -1841,6 +1928,47 @@ private struct MainView: View {
             }
             .padding(.vertical, 6)
         }
+    }
+
+    private var botCard: some View {
+        GroupBox("飞书 Bot") {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill((model.setupPassed ? Color.green : Color.accentColor).opacity(0.12))
+                        .frame(width: 44, height: 44)
+                    Image(systemName: model.setupPassed ? "checkmark.message.fill" : "message.badge.fill")
+                        .font(.system(size: 21))
+                        .foregroundStyle(model.setupPassed ? Color.green : Color.accentColor)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.setupPassed ? "飞书 Bot 已连接" : "先添加飞书 Bot")
+                        .font(.headline)
+                    Text(botConnectionSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(model.setupPassed ? "管理 Bot" : "添加 Bot") {
+                    model.prepareBotSetup()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.vertical, 5)
+        }
+    }
+
+    private var botConnectionSummary: String {
+        if model.isConfiguringProfile {
+            return "正在检查当前连接…"
+        }
+        if model.setupPassed {
+            return "Profile：\(model.profileName) · Bot 身份与飞书网络正常"
+        }
+        if model.botConnectionChecked {
+            return "完成 Bot 连接后，再运行首次连接向导"
+        }
+        return "App Secret 只由这台 Mac 的钥匙串安全保存"
     }
 
     private var usageCard: some View {
@@ -2144,6 +2272,167 @@ private struct MainView: View {
     }
 }
 
+private struct BotSetupView: View {
+    @ObservedObject var model: BridgeViewModel
+    @State private var showAdvancedSettings = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Image(systemName: "message.badge.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("添加飞书 Bot")
+                        .font(.title2.weight(.semibold))
+                    Text("先建立并验证 Bot 连接，再进入首次连接向导。")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(24)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 18) {
+                if model.setupUsesExistingProfile {
+                    existingConnection
+                } else {
+                    credentialForm
+                }
+
+                statusBox
+                Spacer()
+            }
+            .padding(24)
+
+            Divider()
+
+            HStack {
+                Button("取消") { model.dismissBotSetup() }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(model.isConfiguringProfile)
+                Spacer()
+                Button(model.botSetupPrimaryTitle) { model.completeBotSetup() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!model.setupPassed || model.isConfiguringProfile)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+        }
+        .frame(width: 660, height: 560)
+        .interactiveDismissDisabled(model.isConfiguringProfile)
+    }
+
+    private var existingConnection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label(
+                model.isConfiguringProfile
+                    ? "正在检查当前 Bot"
+                    : (model.setupPassed ? "当前 Bot 已连接" : "当前 Bot 需要检查"),
+                systemImage: model.isConfiguringProfile
+                    ? "clock"
+                    : (model.setupPassed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+            )
+                .font(.headline)
+                .foregroundStyle(
+                    model.isConfiguringProfile
+                        ? Color.secondary
+                        : (model.setupPassed ? Color.green : Color.orange)
+                )
+            Text("本机连接名称：\(model.setupProfile)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                Button(model.isConfiguringProfile ? "正在检查…" : "重新检查") {
+                    model.recheckProfile()
+                }
+                .disabled(model.isConfiguringProfile)
+                Button("重新配置凭据") {
+                    model.startCredentialReconfiguration()
+                }
+                .disabled(model.isConfiguringProfile)
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private var credentialForm: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("连接企业自建应用")
+                        .font(.headline)
+                    Text("还没有应用时，先去飞书开放平台创建。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("打开飞书开放平台", systemImage: "arrow.up.right.square") {
+                    model.openDeveloperConsole()
+                }
+                .buttonStyle(.link)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("App ID")
+                    .font(.callout.weight(.medium))
+                TextField("cli_…", text: $model.setupAppID)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("App Secret")
+                    .font(.callout.weight(.medium))
+                SecureField("请输入 App Secret", text: $model.setupAppSecret)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                Label("Secret 通过 stdin 写入 macOS 钥匙串，不进入配置文件或日志", systemImage: "lock.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            DisclosureGroup("高级设置", isExpanded: $showAdvancedSettings) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("本机连接名称")
+                        .font(.callout.weight(.medium))
+                    TextField("codex-notify", text: $model.setupProfile)
+                        .textFieldStyle(.roundedBorder)
+                    Text("通常无需修改；仅用于在这台 Mac 上区分多个飞书应用。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 8)
+            }
+
+            HStack {
+                Spacer()
+                Button(model.isConfiguringProfile ? "正在检查…" : "保存并检查 Bot") {
+                    model.configureProfileAndCheck()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.isConfiguringProfile)
+            }
+        }
+    }
+
+    private var statusBox: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: model.setupPassed ? "checkmark.circle.fill" : "info.circle")
+                .foregroundStyle(model.setupPassed ? Color.green : Color.secondary)
+            Text(model.setupResult.isEmpty ? "等待添加飞书 Bot。" : model.setupResult)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            Spacer()
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.65))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
 private enum ConnectionSetupPath {
     case choice
     case codex
@@ -2154,7 +2443,6 @@ private struct ConnectionSetupView: View {
     @ObservedObject var model: BridgeViewModel
     @State private var setupPath = ConnectionSetupPath.choice
     @State private var currentStep = 1
-    @State private var showAdvancedSettings = false
     @State private var showConfigurationChecklist = false
     @State private var confirmedSteps = Set<Int>()
     @State private var codexPromptCopied = false
@@ -2200,7 +2488,7 @@ private struct ConnectionSetupView: View {
             VStack(alignment: .leading, spacing: 24) {
                 sectionHeader(
                     "选择配置方式",
-                    "你可以让 Codex 协助完成大部分设置，也可以按向导自己操作。两种方式使用相同的安全规则。"
+                    "飞书 Bot 已连接。接下来可以让 Codex 协助完成大部分设置，也可以按向导自己操作。"
                 )
                 HStack(spacing: 20) {
                     setupPathCard(
@@ -2217,7 +2505,7 @@ private struct ConnectionSetupView: View {
                     setupPathCard(
                         icon: "hand.tap",
                         title: "我自己手动配置",
-                        detail: "按照四步向导创建飞书应用、连接凭证、配置机器人，并添加可以使用的飞书账号。",
+                        detail: "按照两步向导配置机器人，并添加可以使用的飞书账号和 Codex 项目权限。",
                         note: "适合希望逐项核对的用户",
                         buttonTitle: "使用手动向导"
                     ) {
@@ -2226,7 +2514,7 @@ private struct ConnectionSetupView: View {
                 }
                 Spacer()
                 Label(
-                    "无论选择哪种方式，App Secret 都只在 DeepOri Bridge 中输入并存入 macOS 钥匙串。",
+                    "App Secret 已由 DeepOri Bridge 安全存入 macOS 钥匙串，不会发送给 Codex。",
                     systemImage: "lock.shield.fill"
                 )
                     .font(.callout)
@@ -2273,7 +2561,7 @@ private struct ConnectionSetupView: View {
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
                         Label("Codex 会自动完成可安全自动化的步骤", systemImage: "checkmark.circle")
-                        Label("登录、Secret、发布和项目权限仍需你确认", systemImage: "person.crop.circle.badge.checkmark")
+                        Label("登录、发布和项目权限仍需你确认", systemImage: "person.crop.circle.badge.checkmark")
                         Label("不需要安装飞书插件", systemImage: "puzzlepiece.extension")
                     }
                     .font(.caption)
@@ -2417,9 +2705,9 @@ private struct ConnectionSetupView: View {
 
     private var progressBar: some View {
         HStack(spacing: 0) {
-            ForEach(1...4, id: \.self) { step in
+            ForEach(1...2, id: \.self) { step in
                 progressStep(step)
-                if step < 4 {
+                if step < 2 {
                     Rectangle()
                         .fill(step < currentStep ? Color.green.opacity(0.55) : Color.secondary.opacity(0.22))
                         .frame(height: 1)
@@ -2430,10 +2718,10 @@ private struct ConnectionSetupView: View {
     }
 
     private func progressStep(_ step: Int) -> some View {
-        let titles = ["创建应用", "连接应用", "配置机器人", "添加使用者"]
-        let complete = step < currentStep || (step == 2 && model.setupPassed && currentStep > 2)
+        let titles = ["配置机器人", "添加使用者"]
+        let complete = step < currentStep
         let current = step == currentStep
-        let available = step <= currentStep || step == 2
+        let available = step <= currentStep
 
         return Button {
             currentStep = step
@@ -2489,106 +2777,6 @@ private struct ConnectionSetupView: View {
     private var mainPanel: some View {
         switch currentStep {
         case 1:
-            sectionHeader(
-                "现在去飞书完成 2 项准备",
-                "\(ProductBrand.name) 需要一个由你管理的企业自建应用。"
-            )
-            instructionRow(
-                icon: "plus.app.fill",
-                title: "创建企业自建应用",
-                detail: "应用名称和图标可以按团队习惯设置。"
-            )
-            Divider()
-            instructionRow(
-                icon: "person.badge.shield.checkmark.fill",
-                title: "确认你有应用管理权限",
-                detail: "后续需要开启机器人、添加事件并发布版本。"
-            )
-            Divider()
-            HStack(spacing: 18) {
-                Button("打开飞书开发者后台", systemImage: "arrow.up.right.square") {
-                    model.openDeveloperConsole()
-                }
-                Button("查看完整配置清单", systemImage: "list.bullet.clipboard") {
-                    showConfigurationChecklist = true
-                }
-            }
-            .buttonStyle(.link)
-
-        case 2:
-            sectionHeader(
-                "连接你的飞书应用",
-                "优先使用本机已保存的连接；只有更换应用时才需要重新输入凭证。"
-            )
-            if model.setupUsesExistingProfile {
-                VStack(alignment: .leading, spacing: 12) {
-                    Label(
-                        model.isConfiguringProfile
-                            ? "正在检查现有连接"
-                            : (model.setupPassed ? "现有连接已可用" : "现有连接需要重新检查"),
-                        systemImage: model.isConfiguringProfile
-                            ? "clock"
-                            : (model.setupPassed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                    )
-                        .font(.headline)
-                        .foregroundStyle(
-                            model.isConfiguringProfile
-                                ? Color.secondary
-                                : (model.setupPassed ? Color.green : Color.orange)
-                        )
-                    Text("本机连接“\(model.setupProfile)”已保存于 macOS 钥匙串，无需再次输入 App ID 或 App Secret。")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("重新配置凭证") {
-                        model.startCredentialReconfiguration()
-                    }
-                    .buttonStyle(.bordered)
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    (model.setupPassed ? Color.green : Color.orange).opacity(0.08)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-            } else {
-                HStack {
-                    Spacer()
-                    Button("App ID 在哪里？", systemImage: "arrow.up.right.square") {
-                        model.openDeveloperConsole()
-                    }
-                    .buttonStyle(.link)
-                }
-
-                setupField("App ID", placeholder: "cli_...", text: $model.setupAppID)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("App Secret")
-                        .font(.callout.weight(.medium))
-                    SecureField("请输入 App Secret", text: $model.setupAppSecret)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
-                    Label("App Secret 安全存入 macOS 钥匙串", systemImage: "lock.fill")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Divider().padding(.vertical, 4)
-                DisclosureGroup("高级设置", isExpanded: $showAdvancedSettings) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        setupField(
-                            "本机连接名称",
-                            placeholder: "codex-notify",
-                            text: $model.setupProfile
-                        )
-                        Text("仅用于在这台 Mac 上区分多个飞书应用，通常无需修改。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.top, 8)
-                }
-            }
-
-        case 3:
             sectionHeader(
                 "现在去飞书完成 3 项设置",
                 "这三项共同决定机器人能否收发消息、响应卡片和显示菜单。"
@@ -2675,47 +2863,6 @@ private struct ConnectionSetupView: View {
         switch currentStep {
         case 1:
             sidePanelHeader(
-                icon: confirmedSteps.contains(1) ? "checkmark.shield.fill" : "shield",
-                title: confirmedSteps.contains(1) ? "准备已确认" : "完成后继续",
-                detail: confirmedSteps.contains(1)
-                    ? "可以进入下一步，连接刚刚创建的飞书应用。"
-                    : "完成左侧两项准备后，在这里确认。"
-            )
-            Spacer()
-            Button(confirmedSteps.contains(1) ? "已完成" : "我已完成") {
-                confirmedSteps.insert(1)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(confirmedSteps.contains(1))
-
-        case 2:
-            connectionStatusPanel
-            Spacer()
-            if model.setupUsesExistingProfile {
-                if !model.setupPassed {
-                    Button(model.isConfiguringProfile ? "正在检查…" : "重新检查") {
-                        model.recheckProfile()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(model.isConfiguringProfile)
-                }
-            } else {
-                if !model.setupResult.isEmpty && !model.setupPassed {
-                    Button("重新检查") { model.recheckProfile() }
-                        .disabled(model.isConfiguringProfile)
-                }
-                Button(model.isConfiguringProfile ? "正在检查…" : "保存并检查连接") {
-                    model.configureProfileAndCheck()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(model.isConfiguringProfile)
-            }
-
-        case 3:
-            sidePanelHeader(
                 icon: consoleCheckPassed ? "checkmark.shield.fill" : "checkmark.shield",
                 title: consoleCheckPassed ? "基础连接检查通过" : "完成后检查",
                 detail: consoleCheckPassed
@@ -2728,7 +2875,7 @@ private struct ConnectionSetupView: View {
                     ? "正在检查…"
                     : (consoleCheckPassed ? "重新检查" : "我已完成，开始检查")
             ) {
-                confirmedSteps.insert(3)
+                confirmedSteps.insert(1)
                 model.recheckProfile()
             }
             .buttonStyle(.borderedProminent)
@@ -2767,22 +2914,8 @@ private struct ConnectionSetupView: View {
         }
     }
 
-    private var connectionStatusPanel: some View {
-        let icon = model.isConfiguringProfile
-            ? "clock"
-            : (model.setupPassed ? "checkmark.shield.fill" : "bolt.horizontal.circle")
-        let title = model.setupPassed
-            ? "连接检查通过"
-            : (model.isConfiguringProfile ? "正在检查连接" : "等待检查")
-        let detail = model.setupResult.isEmpty
-            ? "保存后，\(ProductBrand.name) 会自动验证 Bot 身份和飞书网络。"
-            : model.setupResult
-
-        return sidePanelHeader(icon: icon, title: title, detail: detail)
-    }
-
     private var consoleCheckPassed: Bool {
-        confirmedSteps.contains(3) && model.setupPassed && !model.isConfiguringProfile
+        confirmedSteps.contains(1) && model.setupPassed && !model.isConfiguringProfile
     }
 
     private var authorizationStatusIcon: String {
@@ -2818,7 +2951,7 @@ private struct ConnectionSetupView: View {
                     .keyboardShortcut(.cancelAction)
             }
             Spacer()
-            Text("第 \(currentStep) 步，共 4 步")
+            Text("第 \(currentStep) 步，共 2 步")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -2832,7 +2965,7 @@ private struct ConnectionSetupView: View {
     }
 
     private var primaryFooterTitle: String {
-        if currentStep == 4 {
+        if currentStep == 2 {
             return model.hasConfiguredUsers && model.discoveredOpenID.isEmpty
                 ? "完成设置"
                 : "设置可访问项目"
@@ -2843,12 +2976,8 @@ private struct ConnectionSetupView: View {
     private var canAdvance: Bool {
         switch currentStep {
         case 1:
-            return confirmedSteps.contains(1)
-        case 2:
-            return model.setupPassed
-        case 3:
             return consoleCheckPassed
-        case 4:
+        case 2:
             return model.setupPassed
                 && (model.hasConfiguredUsers || !model.discoveredOpenID.isEmpty)
         default:
@@ -2857,7 +2986,7 @@ private struct ConnectionSetupView: View {
     }
 
     private func advance() {
-        if currentStep == 4 {
+        if currentStep == 2 {
             if model.hasConfiguredUsers && model.discoveredOpenID.isEmpty {
                 model.showConnectionSetup = false
             } else {
@@ -2923,19 +3052,6 @@ private struct ConnectionSetupView: View {
         .padding(.vertical, 8)
     }
 
-    private func setupField(
-        _ title: String,
-        placeholder: String,
-        text: Binding<String>
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title)
-                .font(.callout.weight(.medium))
-            TextField(placeholder, text: text)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(.body, design: .monospaced))
-        }
-    }
 }
 
 private struct ConfigurationChecklistView: View {
@@ -3563,10 +3679,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.refreshStatus()
             }
         }
-        if !model.hasConfiguredUsers {
-            DispatchQueue.main.async { [weak self] in
-                self?.model.prepareConnectionSetup()
-            }
+        DispatchQueue.main.async { [weak self] in
+            self?.model.refreshBotConnection()
         }
         acknowledgeLegacyUpdateLaunchIfRequested()
         DispatchQueue.main.async { [weak self] in

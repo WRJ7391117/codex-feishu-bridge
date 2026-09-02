@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = ROOT / "Sources/CodexFeishuBridgeApp/main.swift"
+BOT_SETUP_FLOW = ROOT / "Sources/CodexFeishuBridgeApp/BotSetupFlow.swift"
 PRODUCT_BOUNDARY = ROOT / "docs/PRODUCTIZATION.md"
 CONFIG_EXAMPLE = ROOT / "Resources/bridge/config.example.json"
 UNINSTALLER = ROOT / "Resources/bridge/uninstall.sh"
@@ -47,18 +48,95 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn('"--app-secret", appSecret', configure)
         self.assertNotIn('"--app-secret",', configure)
 
-    def test_first_launch_opens_connection_setup(self):
-        launch = self.source.split("func applicationDidFinishLaunching", 1)[1]
-        self.assertIn("if !model.hasConfiguredUsers", launch)
-        self.assertIn("self?.model.prepareConnectionSetup()", launch)
-
-    def test_existing_profile_is_checked_before_requesting_credentials(self):
-        setup = self.source.split("func prepareConnectionSetup", 1)[1].split(
-            "func configureProfileAndCheck", 1
+    def test_first_launch_checks_bot_without_opening_assistant(self):
+        launch = self.source.split("func applicationDidFinishLaunching", 1)[1].split(
+            "func applicationShouldHandleReopen", 1
         )[0]
-        self.assertIn("setupUsesExistingProfile = hasConfiguredUsers", setup)
+        self.assertIn("self?.model.refreshBotConnection()", launch)
+        self.assertNotIn("prepareConnectionSetup()", launch)
+
+    def test_existing_profile_is_checked_independently_of_users(self):
+        setup = self.source.split("func refreshBotConnection", 1)[1].split(
+            "func prepareBotSetup", 1
+        )[0]
+        self.assertIn("setupUsesExistingProfile = true", setup)
+        self.assertNotIn("hasConfiguredUsers", setup)
         self.assertIn("checkExistingProfile()", setup)
-        self.assertIn("现有连接", setup)
+
+    def test_home_page_owns_bot_credentials_before_first_connection(self):
+        main = self.source.split("private struct MainView", 1)[1].split(
+            "private struct BotSetupView", 1
+        )[0]
+        bot_setup = self.source.split("private struct BotSetupView", 1)[1].split(
+            "private enum ConnectionSetupPath", 1
+        )[0]
+        self.assertIn('GroupBox("飞书 Bot")', main)
+        self.assertIn('Button(model.setupPassed ? "管理 Bot" : "添加 Bot")', main)
+        self.assertIn('Text("App ID")', bot_setup)
+        self.assertIn('SecureField("请输入 App Secret"', bot_setup)
+        self.assertIn("model.completeBotSetup()", bot_setup)
+
+    def test_bot_setup_flow_executes_expected_state_transitions(self):
+        harness = r'''
+@main
+struct BotSetupFlowTestRunner {
+    static func main() {
+        var empty = BotSetupFlow()
+        empty.present(continueToConnectionSetup: true, currentlyVerified: false)
+        precondition(!empty.cancel(currentlyVerified: false))
+        precondition(!empty.shouldContinueToConnectionSetup)
+
+        var cancelledEdit = BotSetupFlow()
+        cancelledEdit.present(
+            continueToConnectionSetup: false,
+            currentlyVerified: true
+        )
+        cancelledEdit.beginCredentialReconfiguration()
+        precondition(cancelledEdit.cancel(currentlyVerified: false))
+        precondition(!cancelledEdit.isEditingCredentials)
+
+        var failedNewCredentials = BotSetupFlow()
+        failedNewCredentials.present(
+            continueToConnectionSetup: false,
+            currentlyVerified: true
+        )
+        failedNewCredentials.beginCredentialReconfiguration()
+        failedNewCredentials.recordCredentialWriteSucceeded()
+        precondition(!failedNewCredentials.cancel(currentlyVerified: false))
+
+        var retry = BotSetupFlow()
+        retry.present(continueToConnectionSetup: true, currentlyVerified: false)
+        retry.beginCredentialReconfiguration()
+        retry.recordCredentialWriteSucceeded()
+        precondition(retry.complete(currentlyVerified: true))
+        precondition(!retry.shouldContinueToConnectionSetup)
+
+        var blocked = BotSetupFlow()
+        blocked.present(continueToConnectionSetup: true, currentlyVerified: false)
+        precondition(!blocked.complete(currentlyVerified: false))
+        precondition(blocked.shouldContinueToConnectionSetup)
+    }
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            main = temporary / "BotSetupFlowTestRunner.swift"
+            executable = temporary / "bot-setup-flow-tests"
+            main.write_text(harness, encoding="utf-8")
+            compiled = subprocess.run(
+                ["swiftc", str(BOT_SETUP_FLOW), str(main), "-o", str(executable)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            executed = subprocess.run(
+                [str(executable)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
 
     def test_manual_setup_summarizes_doctor_output_instead_of_showing_json(self):
         existing = self.source.split("func checkExistingProfile", 1)[1].split(
@@ -98,12 +176,12 @@ class ProductOnboardingTests(unittest.TestCase):
             "private func instructionRow", 1
         )[0]
         self.assertIn(".lineLimit(6)", side_panel)
-        status_panel = setup.split("private var statusPanel", 1)[1].split(
-            "private var connectionStatusPanel", 1
+        bot_setup = self.source.split("private struct BotSetupView", 1)[1].split(
+            "private enum ConnectionSetupPath", 1
         )[0]
-        self.assertIn("if model.setupUsesExistingProfile", status_panel)
-        self.assertIn('Button(model.isConfiguringProfile ? "正在检查…" : "重新检查")', status_panel)
-        self.assertIn("现有连接需要重新检查", setup)
+        self.assertIn("if model.setupUsesExistingProfile", bot_setup)
+        self.assertIn('Button(model.isConfiguringProfile ? "正在检查…" : "重新检查")', bot_setup)
+        self.assertIn("当前 Bot 需要检查", bot_setup)
         self.assertNotIn(".frame(width: 1120, height: 760)", setup)
         self.assertIn("minWidth: 820", setup)
         self.assertIn("idealHeight: 760", setup)
@@ -116,8 +194,33 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('.help("关闭向导")', setup)
         self.assertIn('Image(systemName: "xmark.circle.fill")', setup)
         self.assertIn(".focusable(false)", setup)
-        self.assertIn("现有连接已可用", setup)
-        self.assertIn('Button("重新配置凭证"', setup)
+        bot_setup = self.source.split("private struct BotSetupView", 1)[1].split(
+            "private enum ConnectionSetupPath", 1
+        )[0]
+        self.assertIn("当前 Bot 已连接", bot_setup)
+        self.assertIn('Button("重新配置凭据"', bot_setup)
+
+    def test_bot_setup_cancel_clears_credentials_and_waits_for_active_check(self):
+        dismiss = self.source.split("func dismissBotSetup", 1)[1].split(
+            "func completeBotSetup", 1
+        )[0]
+        self.assertIn('setupAppID = ""', dismiss)
+        self.assertIn('setupAppSecret = ""', dismiss)
+        bot_setup = self.source.split("private struct BotSetupView", 1)[1].split(
+            "private enum ConnectionSetupPath", 1
+        )[0]
+        cancel = bot_setup.split('Button("取消")', 1)[1].split("Spacer()", 1)[0]
+        self.assertIn(".disabled(model.isConfiguringProfile)", cancel)
+        self.assertIn(".interactiveDismissDisabled(model.isConfiguringProfile)", bot_setup)
+
+    def test_discovered_user_is_appended_without_replacing_existing_users(self):
+        authorization = self.source.split("func continueToUserAuthorization", 1)[1].split(
+            "func prepareConfiguration", 1
+        )[0]
+        self.assertIn("draftUsers.contains", authorization)
+        self.assertIn("draftUsers.removeAll", authorization)
+        self.assertIn("draftUsers.append", authorization)
+        self.assertNotIn("draftUsers = [", authorization)
 
     def test_app_registers_standard_edit_commands_for_copy_and_paste(self):
         menu = self.source.split("private func buildApplicationMenu", 1)[1].split(
@@ -155,12 +258,15 @@ class ProductOnboardingTests(unittest.TestCase):
             self.assertIn(label, setup)
         self.assertIn("不会默认开放全部项目", setup)
 
-    def test_setup_is_a_generic_four_step_wizard(self):
+    def test_setup_is_a_bot_ready_two_step_wizard(self):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
             "private struct ConfigurationView", 1
         )[0]
-        for title in ("创建应用", "连接应用", "配置机器人", "添加使用者"):
+        for title in ("配置机器人", "添加使用者"):
             self.assertIn(title, setup)
+        for title in ("创建应用", "连接应用"):
+            self.assertNotIn(title, setup)
+        self.assertIn("共 2 步", setup)
         self.assertIn("switch currentStep", setup)
         self.assertIn("查看完整配置清单", setup)
         self.assertIn("ProductBrand.localPromise", setup)
@@ -241,6 +347,20 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('"${project_dir}/skills/deepori-bridge-setup"', build)
         self.assertIn('"${resources_dir}/CodexSkills/deepori-bridge-setup"', build)
 
+    def test_profile_persistence_is_shared_by_configure_and_recheck(self):
+        configure = self.source.split("func configureProfileAndCheck", 1)[1].split(
+            "func recheckProfile", 1
+        )[0]
+        recheck = self.source.split("func recheckProfile", 1)[1].split(
+            "private func persistSetupProfile", 1
+        )[0]
+        persist = self.source.split("private func persistSetupProfile", 1)[1].split(
+            "private func connectionCheckFailureMessage", 1
+        )[0]
+        self.assertIn("persistSetupProfile(profile)", configure)
+        self.assertIn("persistSetupProfile(profile)", recheck)
+        self.assertIn('config["lark_profile"] = profile', persist)
+
     def test_release_workflow_publishes_immutable_signed_drafts(self):
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn('gh release view "$GITHUB_REF_NAME"', workflow)
@@ -313,11 +433,14 @@ class ProductOnboardingTests(unittest.TestCase):
         setup = self.source.split("private struct ConnectionSetupView", 1)[1].split(
             "private struct ConfigurationChecklistView", 1
         )[0]
+        bot_setup = self.source.split("private struct BotSetupView", 1)[1].split(
+            "private enum ConnectionSetupPath", 1
+        )[0]
         checklist = self.source.split("private struct ConfigurationChecklistView", 1)[1].split(
             "private struct ConfigurationView", 1
         )[0]
-        self.assertIn("高级设置", setup)
-        self.assertIn("本机连接名称", setup)
+        self.assertIn("高级设置", bot_setup)
+        self.assertIn("本机连接名称", bot_setup)
         for detail in ("stdin", "lark-cli", "open_id", "card.action.trigger"):
             self.assertNotIn(detail, setup)
         self.assertIn("card.action.trigger", checklist)

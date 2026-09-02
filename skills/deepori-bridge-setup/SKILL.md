@@ -22,19 +22,19 @@ Configure the installed DeepOri Bridge App on this Mac. The outcome is a running
    - DeepOri Bridge App version and macOS compatibility
    - Codex Desktop installation and at least one local Task
    - current bridge configuration and service status without printing identifiers or secrets
-2. Open the DeepOri Bridge first-connection assistant and use its existing Profile when valid. Keep credentials in the App UI.
-3. Help configure the Feishu custom app:
+2. Confirm the DeepOri Bridge home page shows a verified Feishu Bot connection before opening the first-connection assistant. If it does not, pause and ask the user to use “添加 Bot” on the home page. Keep App ID and App Secret in that App-owned form and never move them into Codex.
+3. Open the DeepOri Bridge first-connection assistant and use its verified Profile.
+4. Help configure the Feishu custom app:
    - use browser automation when available and the user is already signed in
    - otherwise give one concrete click instruction at a time
    - enable Bot capability, long-connection delivery, required message/resource permissions, `im.message.receive_v1`, `application.bot.menu_v6`, and `card.action.trigger`
    - configure the menu Event Keys shown by the App, then publish a new Feishu app version
-4. Pause only for a real human gate and state exactly what the user must do now:
+5. Pause only for a real human gate and state exactly what the user must do now:
    - sign in, CAPTCHA, or two-factor authentication
-   - enter App ID and App Secret in the App secure fields
    - approve permissions or publish an external Feishu app version
    - select the exact Codex projects a user may access
-5. Add the first Feishu user through the App's one-time code flow. Ask the user to send only the displayed code in a P2P Bot chat. Then open user/project settings and save exact project access.
-6. Verify separately:
+6. Add the first Feishu user through the App's one-time code flow. Ask the user to send only the displayed code in a P2P Bot chat. Then open user/project settings and save exact project access.
+7. Verify separately:
    - App and background service running
    - Bot identity and Feishu network ready
    - three event consumers live

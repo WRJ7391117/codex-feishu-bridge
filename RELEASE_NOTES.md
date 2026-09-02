@@ -11,6 +11,8 @@
 - Turns manual-setup `lark-cli doctor` failures into concise guidance, keeps saved credentials selected after transient network errors, and prevents raw diagnostic JSON from overflowing the setup window.
 - Upgrades the bundled patched `lark-cli` base to official `v1.0.92` while retaining the typed card-action acknowledgement and durable workflow-decision inbox required by Bridge.
 - Keeps the main start/stop button and its macOS keyboard focus ring at one stable width when the action label changes.
+- Moves Feishu Bot credentials into a dedicated home-page setup card, verifies the Bot before opening first connection, and reduces the remaining manual assistant to Bot-console setup plus explicit user/project authorization.
+- Detects a saved Profile independently of authorized users and persists a custom Profile even when the first network check fails and a later retry succeeds.
 
 ## 1.11.12 (build 91)
 
