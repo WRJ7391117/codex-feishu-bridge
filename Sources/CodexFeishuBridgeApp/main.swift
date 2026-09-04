@@ -17,6 +17,8 @@ private enum ProductBrand {
 
     首页已经添加并验证飞书 Bot。请先只读检查，再尽可能自动完成后续配置。不要让我把 App Secret 发到 Codex 对话、终端参数、文件或日志中；App Secret 只能由 DeepOri Bridge 和 macOS 钥匙串管理。
 
+    飞书机器人必须使用 Skill 中定义的四个一级菜单和十二个“推送事件”子菜单。逐项保持菜单名称、顺序和 Event Key 完全一致，不要自行改名、省略或新增。
+
     仅在真正需要人工确认时暂停，并明确告诉我现在要做什么：
     1. 飞书登录、验证码或二次验证；
     2. 批准权限或发布飞书应用版本；
@@ -2790,7 +2792,7 @@ private struct ConnectionSetupView: View {
             instructionRow(
                 icon: "bubble.left.and.bubble.right.fill",
                 title: "2. 添加消息、卡片与菜单事件",
-                detail: "按完整配置清单添加三个事件消费者和菜单 Event Key。"
+                detail: "按完整配置清单添加三个事件消费者和十二个菜单 Event Key。"
             )
             Divider()
             instructionRow(
@@ -3403,21 +3405,9 @@ private struct ConfigurationView: View {
                         monospaced: true
                     )
                     configurationField(
-                        "修改当前 Task 模型",
-                        placeholder: "task_settings",
-                        text: $model.draftTaskSettingsEventKey,
-                        monospaced: true
-                    )
-                    configurationField(
-                        "压缩当前 Task 上下文",
-                        placeholder: "compact_task_context",
-                        text: $model.draftCompactContextEventKey,
-                        monospaced: true
-                    )
-                    configurationField(
-                        "Codex 额度用量",
-                        placeholder: "codex_usage",
-                        text: $model.draftUsageEventKey,
+                        "订阅桌面 Task",
+                        placeholder: "task_subscriptions",
+                        text: $model.draftTaskSubscriptionsEventKey,
                         monospaced: true
                     )
                     configurationField(
@@ -3433,9 +3423,21 @@ private struct ConfigurationView: View {
                         monospaced: true
                     )
                     configurationField(
-                        "订阅桌面 Task",
-                        placeholder: "task_subscriptions",
-                        text: $model.draftTaskSubscriptionsEventKey,
+                        "修改当前 Task 模型",
+                        placeholder: "task_settings",
+                        text: $model.draftTaskSettingsEventKey,
+                        monospaced: true
+                    )
+                    configurationField(
+                        "压缩当前 Task 上下文",
+                        placeholder: "compact_task_context",
+                        text: $model.draftCompactContextEventKey,
+                        monospaced: true
+                    )
+                    configurationField(
+                        "Codex 额度用量",
+                        placeholder: "codex_usage",
+                        text: $model.draftUsageEventKey,
                         monospaced: true
                     )
                     configurationField(

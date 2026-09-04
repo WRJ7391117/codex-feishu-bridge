@@ -28,7 +28,7 @@ Configure the installed DeepOri Bridge App on this Mac. The outcome is a running
    - use browser automation when available and the user is already signed in
    - otherwise give one concrete click instruction at a time
    - enable Bot capability, long-connection delivery, required message/resource permissions, `im.message.receive_v1`, `application.bot.menu_v6`, and `card.action.trigger`
-   - configure the menu Event Keys shown by the App, then publish a new Feishu app version
+   - configure the exact menu contract below, then publish a new Feishu app version
 5. Pause only for a real human gate and state exactly what the user must do now:
    - sign in, CAPTCHA, or two-factor authentication
    - approve permissions or publish an external Feishu app version
@@ -42,3 +42,26 @@ Configure the installed DeepOri Bridge App on this Mac. The outcome is a running
    - one user-performed text round trip from Feishu to the selected Codex Task and back
 
 If a required browser-control capability is unavailable, continue with precise manual guidance instead of installing unrelated plugins or broadening permissions.
+
+## Exact Bot menu contract
+
+Create exactly these four first-level menus in this order. Every child item must use the Feishu action “推送事件”. Keep every menu name and Event Key exactly as written; do not translate, rename, omit, reorder, or invent items.
+
+1. `Task 管理`
+   - `当前 Task` → `current_task`
+   - `切换 Task` → `select_task`
+   - `新建 Task` → `new_task`
+   - `归档当前 Task` → `archive_task`
+2. `桌面task`
+   - `订阅桌面 Task` → `task_subscriptions`
+   - `接续当前 Task` → `sync_desktop`
+   - `接续其他 Task` → `sync_desktop_switch`
+3. `模型设置`
+   - `修改当前 Task 模型` → `task_settings`
+   - `压缩当前 Task 上下文` → `compact_task_context`
+   - `Codex 额度用量` → `codex_usage`
+4. `提示灯`
+   - `我的提示灯` → `promlight`
+   - `灯光状态说明` → `promlight_legend`
+
+Before publication, compare all twelve Event Keys with DeepOri Bridge → “配置授权” → “机器人菜单 Event Key”. A visually similar menu with a different Event Key is not valid.

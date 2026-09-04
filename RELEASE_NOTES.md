@@ -1,6 +1,6 @@
 # Release Notes
 
-## 1.11.13 (build 92)
+## 1.11.13 (build 93)
 
 - Replaces the App's custom GitHub Release discovery loop with Sparkle 2.9.6, using a signed appcast and launch or Bridge-event-triggered checks, without scheduled polling.
 - Downloads verified updates automatically, but holds both automatic and interactive installation handlers until active runs and all durable Bridge queues are empty.
@@ -13,6 +13,7 @@
 - Keeps the main start/stop button and its macOS keyboard focus ring at one stable width when the action label changes.
 - Moves Feishu Bot credentials into a dedicated home-page setup card, verifies the Bot before opening first connection, and reduces the remaining manual assistant to Bot-console setup plus explicit user/project authorization.
 - Detects a saved Profile independently of authorized users and persists a custom Profile even when the first network check fails and a later retry succeeds.
+- Makes Codex-assisted setup use the same four first-level menus and twelve Event Keys as the App, including Desktop handoff, model settings, usage, and PromLight entries.
 
 ## 1.11.12 (build 91)
 

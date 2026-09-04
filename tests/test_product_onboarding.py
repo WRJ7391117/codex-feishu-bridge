@@ -22,6 +22,8 @@ README = ROOT / "README.md"
 INFO_PLIST = ROOT / "Resources/Info.plist"
 SETUP_SKILL = ROOT / "skills/deepori-bridge-setup/SKILL.md"
 SETUP_SKILL_AGENT = ROOT / "skills/deepori-bridge-setup/agents/openai.yaml"
+BRIDGE_SKILL = ROOT / "skills/codex-feishu-bridge/SKILL.md"
+BRIDGE_TROUBLESHOOTING = ROOT / "skills/codex-feishu-bridge/references/troubleshooting.md"
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release.yml"
 APPCAST_SCRIPT = ROOT / "scripts/generate-appcast.sh"
 PACKAGE_MANIFEST = ROOT / "Package.swift"
@@ -242,9 +244,14 @@ struct BotSetupFlowTestRunner {
             "select_task",
             "new_task",
             "archive_task",
+            "task_subscriptions",
+            "task_settings",
+            "compact_task_context",
             "codex_usage",
             "sync_desktop",
             "sync_desktop_switch",
+            "promlight",
+            "promlight_legend",
         ):
             self.assertIn(value, setup)
         for label in (
@@ -253,7 +260,13 @@ struct BotSetupFlowTestRunner {
             "订阅桌面 Task",
             "接续当前 Task",
             "接续其他 Task",
+            "模型设置",
+            "修改当前 Task 模型",
+            "压缩当前 Task 上下文",
             "Codex 额度用量",
+            "提示灯",
+            "我的提示灯",
+            "灯光状态说明",
         ):
             self.assertIn(label, setup)
         self.assertIn("不会默认开放全部项目", setup)
@@ -346,6 +359,86 @@ struct BotSetupFlowTestRunner {
         self.assertIn("$deepori-bridge-setup", agent)
         self.assertIn('"${project_dir}/skills/deepori-bridge-setup"', build)
         self.assertIn('"${resources_dir}/CodexSkills/deepori-bridge-setup"', build)
+
+    def test_codex_setup_contract_matches_all_twelve_app_menu_items(self):
+        app_checklist = self.source.split(
+            'checklistSection("机器人菜单 Event Key"', 1
+        )[1].split("])", 1)[0]
+        editable_fields = self.source.split("private var advancedSettings", 1)[1].split(
+            "private var accessRequests", 1
+        )[0]
+        setup_skill = SETUP_SKILL.read_text(encoding="utf-8")
+        bridge_skill = BRIDGE_SKILL.read_text(encoding="utf-8")
+        troubleshooting = BRIDGE_TROUBLESHOOTING.read_text(encoding="utf-8")
+        bridge_source = " ".join(BRIDGE_SOURCE.read_text(encoding="utf-8").split())
+        groups = (
+            (
+                "Task 管理",
+                (
+                    ("当前 Task", "current_task", "current_task_menu_event_key", "CURRENT_TASK_MENU_EVENT_KEY"),
+                    ("切换 Task", "select_task", "task_menu_event_key", "TASK_MENU_EVENT_KEY"),
+                    ("新建 Task", "new_task", "new_task_menu_event_key", "NEW_TASK_MENU_EVENT_KEY"),
+                    ("归档当前 Task", "archive_task", "archive_task_menu_event_key", "ARCHIVE_TASK_MENU_EVENT_KEY"),
+                ),
+            ),
+            (
+                "桌面task",
+                (
+                    ("订阅桌面 Task", "task_subscriptions", "task_subscriptions_menu_event_key", "TASK_SUBSCRIPTIONS_MENU_EVENT_KEY"),
+                    ("接续当前 Task", "sync_desktop", "desktop_sync_menu_event_key", "DESKTOP_SYNC_MENU_EVENT_KEY"),
+                    ("接续其他 Task", "sync_desktop_switch", "desktop_sync_switch_menu_event_key", "DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY"),
+                ),
+            ),
+            (
+                "模型设置",
+                (
+                    ("修改当前 Task 模型", "task_settings", "task_settings_menu_event_key", "TASK_SETTINGS_MENU_EVENT_KEY"),
+                    ("压缩当前 Task 上下文", "compact_task_context", "compact_context_menu_event_key", "COMPACT_CONTEXT_MENU_EVENT_KEY"),
+                    ("Codex 额度用量", "codex_usage", "usage_menu_event_key", "USAGE_MENU_EVENT_KEY"),
+                ),
+            ),
+            (
+                "提示灯",
+                (
+                    ("我的提示灯", "promlight", "promlight_menu_event_key", "PROMLIGHT_MENU_EVENT_KEY"),
+                    ("灯光状态说明", "promlight_legend", "promlight_legend_menu_event_key", "PROMLIGHT_LEGEND_MENU_EVENT_KEY"),
+                ),
+            ),
+        )
+        self.assertIn("exactly these four first-level menus", setup_skill)
+        self.assertIn("all twelve Bot menu Event Keys", bridge_skill)
+        previous_app_group = -1
+        previous_skill_group = -1
+        previous_editable_item = -1
+        config = json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
+        handler = bridge_source.split("event_key not in {", 1)[1].split(
+            "} or not authorized_user", 1
+        )[0]
+        for number, (group, items) in enumerate(groups, start=1):
+            app_group = app_checklist.index(f'"一级菜单 · {group}"')
+            skill_group = setup_skill.index(f"{number}. `{group}`")
+            self.assertGreater(app_group, previous_app_group)
+            self.assertGreater(skill_group, previous_skill_group)
+            previous_app_group = app_group
+            previous_skill_group = skill_group
+            self.assertIn(f'“{group}” groups', troubleshooting)
+            previous_app_item = app_group
+            previous_skill_item = skill_group
+            for label, event_key, config_field, constant in items:
+                app_item = app_checklist.index(f'"{event_key} · {label}"')
+                skill_item = setup_skill.index(f"- `{label}` → `{event_key}`")
+                self.assertGreater(app_item, previous_app_item)
+                self.assertGreater(skill_item, previous_skill_item)
+                editable_item = editable_fields.index(f'placeholder: "{event_key}"')
+                self.assertGreater(editable_item, previous_editable_item)
+                previous_app_item = app_item
+                previous_skill_item = skill_item
+                previous_editable_item = editable_item
+                self.assertIn(f"`{event_key}`", bridge_skill)
+                self.assertEqual(config[config_field], event_key)
+                self.assertIn(f'CONFIG.get("{config_field}") or "{event_key}"', bridge_source)
+                self.assertIn(constant, handler)
+                self.assertIn(f"if event_key == {constant}:", bridge_source)
 
     def test_profile_persistence_is_shared_by_configure_and_recheck(self):
         configure = self.source.split("func configureProfileAndCheck", 1)[1].split(

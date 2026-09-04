@@ -6,7 +6,7 @@ Updated: 2026-09-03
 
 | Surface | Target | Current evidence | Status |
 | --- | --- | --- | --- |
-| Source tests | isolated temporary HOME on macOS arm64 | 415 Python tests pass without the developer Codex database; Bot setup state transitions are compiled and executed with `swiftc` | Pass |
+| Source tests | isolated temporary HOME on macOS arm64 | 416 Python tests pass without the developer Codex database; Bot setup state transitions are compiled and executed with `swiftc` | Pass |
 | Result audio | normal turn, Desktop sync, and Task subscription | explicit local audio links are separated from files; native Opus and attachment fallback plus durable retry are tested | Pass locally; real Feishu playback pending |
 | Result-file authorization | selected Task workspace | local image/audio/file links outside the Task root are rejected; current-turn image-generation events remain separately scoped | Pass locally |
 | State concurrency | App plus background process | a real subprocess waits on the shared state lock and preserves unrelated queue data while removing an access request | Pass locally |
@@ -23,7 +23,7 @@ Updated: 2026-09-03
 | First connection | new Feishu custom app | requires a second app/tenant and real Bot round trip | Not tested |
 | First user discovery | bounded message listener | implementation and tests pass; real new-app event not yet exercised | Not accepted |
 | Project authorization | Codex sidebar project picker | implementation and static tests pass | Not accepted visually |
-| Runtime | current Mac existing install | installed App reports 1.11.13 (92), but it predates the current commit; the latest package is only locally built and no fresh real Bot round trip was run | Partial |
+| Runtime | current Mac existing install | installed App reports 1.11.13 (92); source build 93 contains the current setup contract but is not yet installed, and no fresh real Bot round trip was run | Partial |
 | Apple Silicon clean account | macOS 13+ | no clean-account install evidence yet | Not tested |
 | Intel Mac | macOS 13+ | x86_64 binary exists; no real Intel launch evidence | Not tested |
 | Gatekeeper | ad-hoc Release download | documented Finder right-click Open path | Not tested on another Mac |

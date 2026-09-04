@@ -15078,15 +15078,16 @@ def _handle_menu_event_once(event: dict[str, Any]) -> None:
     if event_key == DESKTOP_SYNC_SWITCH_MENU_EVENT_KEY:
         start_desktop_sync_switch(user_id, state, event_id)
         return
-    task = selected_task(user_id, state)
-    busy = bool(task and active_run_for_task(str(task["id"])) is not None)
-    send_menu_card(
-        user_id,
-        state,
-        build_archive_task_card(task, busy=busy),
-        f"archive-task-{event_id}",
-    )
-    log(f"menu handled key={event_key} result=archive-card")
+    if event_key == ARCHIVE_TASK_MENU_EVENT_KEY:
+        task = selected_task(user_id, state)
+        busy = bool(task and active_run_for_task(str(task["id"])) is not None)
+        send_menu_card(
+            user_id,
+            state,
+            build_archive_task_card(task, busy=busy),
+            f"archive-task-{event_id}",
+        )
+        log(f"menu handled key={event_key} result=archive-card")
 
 
 def handle_menu_event(event: dict[str, Any]) -> None:

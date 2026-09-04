@@ -2871,11 +2871,11 @@ class ReleaseVersionTests(unittest.TestCase):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
         self.assertEqual(info["CFBundleShortVersionString"], "1.11.13")
-        self.assertEqual(info["CFBundleVersion"], "92")
+        self.assertEqual(info["CFBundleVersion"], "93")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.11.13 (build 92)", readme)
-        self.assertIn("1.11.13 (build 92", release_notes)
+        self.assertIn("1.11.13 (build 93)", readme)
+        self.assertIn("1.11.13 (build 93", release_notes)
 
 
 class AppPromLightHomeTests(unittest.TestCase):
