@@ -26,6 +26,15 @@ jobs:
         with:
           go-version-file: windows/FeishuEventSidecar/go.mod
           cache-dependency-path: windows/FeishuEventSidecar/go.sum
+      - name: Prepare canonical Go test directory
+        shell: pwsh
+        run: |
+          # The runner's default TEMP may use RUNNER~1. Production attestation
+          # intentionally rejects executable path aliases; use a long-path test
+          # build directory without weakening that check or skipping the test.
+          $goTestDirectory = Join-Path $env:RUNNER_TEMP 'deepori-go-build'
+          New-Item -ItemType Directory -Path $goTestDirectory -Force | Out-Null
+          "GOTMPDIR=$((Resolve-Path -LiteralPath $goTestDirectory).Path)" >> $env:GITHUB_ENV
       - name: Go protocol tests
         working-directory: windows/FeishuEventSidecar
         run: go test ./...
