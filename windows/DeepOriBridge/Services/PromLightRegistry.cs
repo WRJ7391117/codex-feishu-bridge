@@ -21,16 +21,36 @@ internal sealed class PromLightRegistry(string path,
     // while the exact lamp has an outstanding physical write (including its ACK).
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> Lanes = new(StringComparer.OrdinalIgnoreCase);
     private SemaphoreSlim Lane(string id) => Lanes.GetOrAdd(Path.GetFullPath(path) + ":" + id, _ => new(1, 1));
+    private FileStream OpenProcessLease(string id)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(id)));
+        return new FileStream(path + ".lamp-" + key + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    }
     internal async Task<IDisposable> AcquireWriteLeaseAsync(string id, CancellationToken token)
     {
         SemaphoreSlim lane = Lane(id);
         await lane.WaitAsync(token);
-        return new WriteLease(lane);
+        try
+        {
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                try { return new WriteLease(lane, OpenProcessLease(id)); }
+                catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33)
+                { await Task.Delay(50, token); }
+            }
+        }
+        catch { lane.Release(); throw; }
     }
-    private sealed class WriteLease(SemaphoreSlim lane) : IDisposable
+    private sealed class WriteLease(SemaphoreSlim lane, FileStream processLease) : IDisposable
     {
         private SemaphoreSlim? _lane = lane;
-        public void Dispose() => Interlocked.Exchange(ref _lane, null)?.Release();
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _lane, null) is { } held)
+            { processLease.Dispose(); held.Release(); }
+        }
     }
     private readonly Func<byte[], byte[]> _protect = protect ?? (bytes => ProtectedData.Protect(bytes, null, DataProtectionScope.CurrentUser));
     private readonly Func<byte[], byte[]> _unprotect = unprotect ?? (bytes => ProtectedData.Unprotect(bytes, null, DataProtectionScope.CurrentUser));
@@ -66,7 +86,12 @@ internal sealed class PromLightRegistry(string path,
         // Busy is a failed mutation, never a successful unbind followed by an old frame.
         SemaphoreSlim lane = Lane(id);
         if (!lane.Wait(0)) throw new InvalidOperationException("提示灯写入尚未结束，配置未更改；请稍后重试。");
-        using var lease = new WriteLease(lane);
+        FileStream processLease;
+        try { processLease = OpenProcessLease(id); }
+        catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33)
+        { lane.Release(); throw new InvalidOperationException("另一 Bridge 进程仍在写入此灯，配置未更改；请稍后重试。", error); }
+        catch { lane.Release(); throw; }
+        using var lease = new WriteLease(lane, processLease);
         return Access(lamps =>
     {
         PromLightLamp previous = Check(lamps, owner, generation, id, revision);

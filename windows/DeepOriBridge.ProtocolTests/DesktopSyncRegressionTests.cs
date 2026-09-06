@@ -59,6 +59,38 @@ internal static class DesktopSyncRegressionTests
             subscriptions.Set("scope-a", threadId, null);
             assert(subscriptions.Read("scope-a").Count == 0, "unsubscribe durably removes the exact Task");
 
+            string ownerFixture = Path.Combine(root.FullName, "owner-isolation");
+            var ownerSubscriptions = new FeishuTaskSubscriptionStore(ownerFixture);
+            ownerSubscriptions.Set("alice", threadId, new(threadId, root.FullName, "project-id"));
+            string aliceFile = Directory.GetFiles(ownerFixture, "*.bin").Single();
+            ownerSubscriptions.Set("bob", threadId, new(threadId, root.FullName, "project-id"));
+            foreach (byte[] corrupt in new[] { Encoding.UTF8.GetBytes("not-DPAPI"),
+                System.Security.Cryptography.ProtectedData.Protect(Encoding.UTF8.GetBytes("{invalid-json"), null,
+                    System.Security.Cryptography.DataProtectionScope.CurrentUser) })
+            {
+                await File.WriteAllBytesAsync(aliceFile, corrupt);
+                var delivered = new List<string>();
+                int unavailable = 0;
+                await FeishuSubscriptionObservation.ForEachOwnerAsync(["alice", "bob"], owner =>
+                {
+                    if (ownerSubscriptions.Read(owner).ContainsKey(threadId)) delivered.Add(owner);
+                    return Task.CompletedTask;
+                }, () => unavailable++, CancellationToken.None);
+                assert(unavailable == 1 && delivered.SequenceEqual(["bob"]),
+                    "corrupt encrypted/JSON subscription for owner A does not starve owner B at the production observation boundary");
+                assert(File.ReadAllBytes(aliceFile).SequenceEqual(corrupt), "unreadable owner records remain untouched for recovery");
+            }
+            var aclDelivered = new List<string>();
+            int aclUnavailable = 0;
+            await FeishuSubscriptionObservation.ForEachOwnerAsync(["alice", "bob"], owner =>
+            {
+                if (owner == "alice") throw new UnauthorizedAccessException("fixture ACL denial");
+                aclDelivered.Add(owner);
+                return Task.CompletedTask;
+            }, () => aclUnavailable++, CancellationToken.None);
+            assert(aclUnavailable == 1 && aclDelivered.SequenceEqual(["bob"]),
+                "an owner-specific ACL denial does not starve other users or require changing real file permissions");
+
             var task = new CodexThreadSummary(
                 threadId, "开始", "", root.FullName, "gpt", "notLoaded", [],
                 ProjectId: "project-id", ProjectDisplayName: "Codex-Feishu-Bridge");

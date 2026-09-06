@@ -193,6 +193,22 @@ internal sealed class FeishuReplyCursorStore(string directory)
     }
 }
 
+internal static class FeishuSubscriptionObservation
+{
+    internal static async Task ForEachOwnerAsync(IEnumerable<string> owners, Func<string, Task> observe,
+        Action onUnavailable, CancellationToken token)
+    {
+        foreach (string owner in owners)
+        {
+            token.ThrowIfCancellationRequested();
+            try { await observe(owner); }
+            catch (Exception error) when (error is InvalidOperationException or IOException or UnauthorizedAccessException
+                or CryptographicException or JsonException)
+            { onUnavailable(); }
+        }
+    }
+}
+
 internal sealed class FeishuTaskSubscriptionStore(string directory)
 {
     private readonly object _gate = new();

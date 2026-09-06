@@ -57,7 +57,8 @@ idle-write acknowledgement cannot be assigned to another owner. Display names
 are not device identities. Revoked owners have their lamps placed into cleanup,
 and offline cleanup retains the reservation.
 
-Configuration changes and HID writes share an exact per-lamp lane. While a write
+Configuration changes and HID writes share an exact per-lamp lane, including a
+cross-process exclusive file lease. While a write
 is outstanding, synchronous settings actions report busy without committing a
 change. Once submitted to Windows, a write retains its lane until the actual OS
 operation completes; cancellation does not pretend to revoke a physical frame.
@@ -67,9 +68,12 @@ Malformed or unknown-version v1 settings are refused, not silently imported as a
 empty lamp. Adding/selecting an authorized user preserves other users' project
 scopes; explicit owner revocation still invalidates the old project generation.
 
-Local candidate evidence (2026-09-06): 1,496 protocol/safety assertions passed,
+Local candidate evidence (2026-09-06): 1,505 protocol/safety assertions passed,
 Go tests passed, and the Release build with both development permissions disabled
 reported zero warnings/errors. Windows PowerShell 5.1 setup examples passed.
+Four pages at four widths passed 16 read-only UI checks. Regression coverage
+includes an independent child process holding a lamp lease and corrupt/ACL-denied
+owner storage not preventing other users' subscription observation.
 These are automated checks, not a signing or multi-device acceptance report.
 The actual Credential Locker integration checks were skipped because the host
 broker could not be exercised; installed-user Skill inspection was skipped in

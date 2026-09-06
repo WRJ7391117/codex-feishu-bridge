@@ -45,6 +45,39 @@ internal static class PromLightFleetRegressionTests
             }
             finally { ack.TrySetResult(); await write; }
             a = registry.Update("alice", "gen", a.Id, a.Revision, name: "ACK 后可更新");
+            string ready = Path.Combine(directory, "child-ready");
+            string release = Path.Combine(directory, "child-release");
+            var start = new System.Diagnostics.ProcessStartInfo("dotnet")
+            { UseShellExecute = false, CreateNoWindow = true };
+            foreach (string argument in new[] { typeof(PromLightFleetRegressionTests).Assembly.Location,
+                "--promlight-held-lease-child", Path.Combine(directory, "registry.bin"), a.Id, ready, release })
+                start.ArgumentList.Add(argument);
+            using (var child = System.Diagnostics.Process.Start(start)!)
+            {
+                try
+                {
+                    using var childDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    while (!File.Exists(ready))
+                    {
+                        if (child.HasExited) throw new InvalidOperationException("Lease fixture exited before acquiring its file lease.");
+                        await Task.Delay(20, childDeadline.Token);
+                    }
+                    Denied(() => registry.Update("alice", "gen", a.Id, a.Revision, unbind: true),
+                        "a separate OS process holding the write lease prevents concurrent unbind");
+                    Denied(() => registry.Update("alice", "gen", a.Id, a.Revision, taskIds: []),
+                        "a separate OS process holding the write lease prevents task mutation");
+                    using var otherLampLease = await registry.AcquireWriteLeaseAsync(b.Id, childDeadline.Token);
+                    assert(!child.HasExited, "another lamp remains independently available while cross-process write is outstanding");
+                }
+                finally
+                {
+                    await File.WriteAllTextAsync(release, "release");
+                    using var exitDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    try { await child.WaitForExitAsync(exitDeadline.Token); }
+                    catch (OperationCanceledException) { child.Kill(); await child.WaitForExitAsync(); throw; }
+                }
+                assert(child.ExitCode == 0, "cross-process write lease is released only after its actual operation completes");
+            }
             assert(a.TaskIds.Length == 2 && b.TaskIds.Single() == "task-one", "task-to-lamp mapping is many to many");
             long oldRevision = a.Revision;
             a = registry.Update("alice", "gen", a.Id, a.Revision, name: "桌面灯");

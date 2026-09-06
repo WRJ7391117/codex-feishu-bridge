@@ -5,6 +5,16 @@ using System.Text.Json;
 using DeepOriBridge.Models;
 using DeepOriBridge.Services;
 
+if (args.Length == 5 && args[0] == "--promlight-held-lease-child")
+{
+    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+    var registry = new PromLightRegistry(args[1], data => data, data => data);
+    using var lease = await registry.AcquireWriteLeaseAsync(args[2], deadline.Token);
+    await File.WriteAllTextAsync(args[3], "ready", deadline.Token);
+    while (!File.Exists(args[4])) await Task.Delay(20, deadline.Token);
+    return;
+}
+
 if (args.Contains("--fake-sidecar-child", StringComparer.Ordinal))
 {
     await Task.Delay(TimeSpan.FromMinutes(2));

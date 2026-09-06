@@ -4290,11 +4290,8 @@ public sealed partial class FeishuEventRuntime : IAsyncDisposable
         string? activeOwner = _credentials.ActiveBoundOwnerId();
         CodexThreadSummary? current = await _bridgeRuntime.GetCurrentThreadAsync(token);
         var observed = new HashSet<string>(StringComparer.Ordinal);
-        foreach (string sender in _credentials.BoundOwnerIds())
+        await FeishuSubscriptionObservation.ForEachOwnerAsync(_credentials.BoundOwnerIds(), async sender =>
         {
-            token.ThrowIfCancellationRequested();
-            try
-            {
             // The global desktop selection belongs only to its active owner;
             // explicit subscriptions are independently observed for every owner.
             if (current is not null && sender == activeOwner)
@@ -4312,13 +4309,8 @@ public sealed partial class FeishuEventRuntime : IAsyncDisposable
                     await ObserveTaskReplyAsync(task, sender, generation, token);
                 }
             }
-            }
-            catch (Exception error) when (error is InvalidOperationException or IOException)
-            {
-                // An unreadable owner's scope or Task must not starve other users.
-                UpdateSnapshot(snapshot => snapshot with { ReadOnlyRouteError = "部分使用者订阅暂不可读，原记录已保留；其他使用者继续处理。" });
-            }
-        }
+        }, () => UpdateSnapshot(snapshot => snapshot with
+        { ReadOnlyRouteError = "部分使用者订阅暂不可读，原记录已保留；其他使用者继续处理。" }), token);
         Volatile.Write(ref _replyObservedTaskIds, observed.ToArray());
     }
 
