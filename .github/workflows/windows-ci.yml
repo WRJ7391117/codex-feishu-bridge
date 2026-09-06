@@ -38,13 +38,13 @@ jobs:
       - name: Go protocol tests
         working-directory: windows/FeishuEventSidecar
         run: go test ./...
-      - name: Release build (unsigned runtime disabled)
-        run: dotnet build windows/DeepOriBridge/DeepOriBridge.csproj -c Release -p:Platform=x64 -p:ContinuousIntegrationBuild=true -p:BridgeDeveloperBuild=false -p:BridgeLocalPreviewSensitiveRuntime=false
       - name: Isolated protocol and safety tests
-        run: dotnet run --project windows/DeepOriBridge.ProtocolTests/DeepOriBridge.ProtocolTests.csproj -- --skip-credential-locker-integration --skip-installed-skill-check
+        run: dotnet run --project windows/DeepOriBridge.ProtocolTests/DeepOriBridge.ProtocolTests.csproj -c Release -- --skip-credential-locker-integration --skip-installed-skill-check
       - name: Windows PowerShell 5.1 setup examples
         shell: powershell
         run: ./windows/scripts/Test-SetupSkillExamples.ps1
+      - name: Release build (unsigned runtime disabled)
+        run: dotnet build windows/DeepOriBridge/DeepOriBridge.csproj -c Release -p:Platform=x64 -p:ContinuousIntegrationBuild=true -p:BridgeDeveloperBuild=false -p:BridgeLocalPreviewSensitiveRuntime=false
       - name: Release boundary
         shell: pwsh
         run: |
