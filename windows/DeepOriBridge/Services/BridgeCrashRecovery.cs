@@ -14,7 +14,7 @@ internal static class BridgeCrashRecovery
         try
         {
             using Process current = Process.GetCurrentProcess();
-            string state = Path.Combine(ApplicationData.Current.LocalFolder.Path, "CrashRecovery");
+            string state = Path.Combine(BridgeLocalStorage.Root, "CrashRecovery");
             Directory.CreateDirectory(state);
             string identity = current.Id + "-" + current.StartTime.ToUniversalTime().Ticks;
             _normalExitMarker = Path.Combine(state, identity + ".normal");
@@ -24,7 +24,18 @@ internal static class BridgeCrashRecovery
             { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
             foreach (string value in new[] { "-NoProfile", "-NonInteractive", "-File", script,
                 "-BridgeProcessId", current.Id.ToString(), "-StartTicks", current.StartTime.ToUniversalTime().Ticks.ToString(),
-                "-StateDirectory", state, "-PackageFamily", Package.Current.Id.FamilyName }) start.ArgumentList.Add(value);
+                "-StateDirectory", state }) start.ArgumentList.Add(value);
+            if (PortablePreview.Enabled)
+            {
+                start.ArgumentList.Add("-Portable");
+                start.ArgumentList.Add("-ExpectedExecutableHash");
+                start.ArgumentList.Add(FileAttestation.Sha256(Environment.ProcessPath!));
+            }
+            else
+            {
+                start.ArgumentList.Add("-PackageFamily");
+                start.ArgumentList.Add(Package.Current.Id.FamilyName);
+            }
             using Process? helper = Process.Start(start);
         }
         catch (Exception exception)

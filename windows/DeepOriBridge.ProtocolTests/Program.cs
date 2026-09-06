@@ -41,6 +41,37 @@ if (!File.Exists(Path.Combine(
         "Run protocol tests from the repository root; refusing to inspect another checkout.");
 }
 int passed = 0;
+if (args.Length == 2 && args[0] == "--portable-payload-check")
+{
+    string[] payloadFiles = PortablePreview.VerifyPayload(args[1]);
+    Console.WriteLine($"PASS: {payloadFiles.Length} portable files verified, including manifest; no services started");
+    return;
+}
+if (args.Contains("--portable-vault-probe", StringComparer.Ordinal))
+{
+    // A throwaway known resource only; never enumerate or read existing credentials.
+    string resource = PortablePreview.CredentialPrefix + ".Probe." + Guid.NewGuid().ToString("N");
+    var vault = new Windows.Security.Credentials.PasswordVault();
+    var credential = new Windows.Security.Credentials.PasswordCredential(resource, "probe", "synthetic-test-value");
+    bool added = false;
+    try
+    {
+        vault.Add(credential);
+        added = true;
+        var read = vault.Retrieve(resource, "probe");
+        read.RetrievePassword();
+        Assert(read.Password == "synthetic-test-value", "unpackaged Credential Locker isolated add/retrieve");
+    }
+    finally { if (added) vault.Remove(credential); }
+    Console.WriteLine("PASS: unpackaged Credential Locker add/read/remove for one throwaway probe only");
+    return;
+}
+PortablePreviewRegressionTests.Run(Assert);
+if (args.Contains("--portable-tests", StringComparer.Ordinal))
+{
+    Console.WriteLine($"PASS: {passed} portable preview assertions");
+    return;
+}
 if (args.Length == 2 && args[0] == "--attachment-file-probe")
 {
     // Read-only validation of an explicitly supplied image. Never rename the

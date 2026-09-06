@@ -29,6 +29,8 @@ internal sealed class BridgeAppServices
         string? cleanFirstRunTestPrefix = ResolveCleanFirstRunUiTestPrefix();
         FeishuCredentials = cleanFirstRunTestPrefix is not null
             ? new FeishuCredentialService(cleanFirstRunTestPrefix)
+            : ProductIdentity.IsPortableIdentity
+                ? new FeishuCredentialService(PortablePreview.CredentialPrefix)
             : ProductIdentity.IsDevelopmentIdentity
                 ? new FeishuCredentialService(
                     FeishuCredentialService.DevelopmentIsolatedResourcePrefix)

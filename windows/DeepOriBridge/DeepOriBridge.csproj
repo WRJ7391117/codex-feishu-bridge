@@ -14,12 +14,23 @@
     <EnableMsixTooling>true</EnableMsixTooling>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <BridgePortablePreview Condition="'$(BridgePortablePreview)' == ''">false</BridgePortablePreview>
+    <WindowsPackageType Condition="'$(BridgePortablePreview)' == 'true'">None</WindowsPackageType>
+    <WindowsAppSDKSelfContained Condition="'$(BridgePortablePreview)' == 'true'">true</WindowsAppSDKSelfContained>
+    <SelfContained Condition="'$(BridgePortablePreview)' == 'true'">true</SelfContained>
+    <!-- Keep the SDK resource/PRI targets; WindowsPackageType=None disables packaging. -->
+    <DebugType Condition="'$(BridgePortablePreview)' == 'true'">none</DebugType>
+    <DebugSymbols Condition="'$(BridgePortablePreview)' == 'true'">false</DebugSymbols>
+    <EnableWinAppRunSupport Condition="'$(BridgePortablePreview)' == 'true'">false</EnableWinAppRunSupport>
+    <BridgeDeveloperBuild Condition="'$(BridgePortablePreview)' == 'true'">false</BridgeDeveloperBuild>
+    <BridgeLocalPreviewSensitiveRuntime Condition="'$(BridgePortablePreview)' == 'true'">false</BridgeLocalPreviewSensitiveRuntime>
     <BridgeDeveloperBuild Condition="'$(BridgeDeveloperBuild)' == ''">true</BridgeDeveloperBuild>
     <BridgeLocalPreviewSensitiveRuntime Condition="'$(BridgeLocalPreviewSensitiveRuntime)' == '' and '$(BridgeDeveloperBuild)' == 'true'">true</BridgeLocalPreviewSensitiveRuntime>
     <BridgeLocalPreviewSensitiveRuntime Condition="'$(BridgeLocalPreviewSensitiveRuntime)' == ''">false</BridgeLocalPreviewSensitiveRuntime>
   </PropertyGroup>
 
   <ItemGroup>
+    <AssemblyMetadata Include="DeepOriBridge.PortablePreview" Value="$(BridgePortablePreview)" />
     <AssemblyMetadata Include="DeepOriBridge.DeveloperBuild" Value="$(BridgeDeveloperBuild)" />
     <AssemblyMetadata Include="DeepOriBridge.LocalPreviewSensitiveRuntime" Value="$(BridgeLocalPreviewSensitiveRuntime)" />
     <AssemblyMetadata Include="DeepOriBridge.DeveloperCanonicalAppxRoot" Value="$([System.IO.Path]::GetFullPath('$(TargetDir)AppX'))" />
@@ -46,8 +57,11 @@
   </ItemGroup>
 
   <Import Project="..\BuildSidecar.targets" />
+  <ItemGroup Condition="'$(BridgePortablePreview)' == 'true'">
+    <Content Update="Assets\*.png;Assets\*.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 
-  <Target Name="RefreshLocalPreviewAppxPayload" AfterTargets="Build">
+  <Target Name="RefreshLocalPreviewAppxPayload" AfterTargets="Build" Condition="'$(BridgePortablePreview)' != 'true'">
     <MakeDir Directories="$(OutDir)AppX\Assets\CodexSkills\deepori-bridge-setup;$(OutDir)AppX\Tools" />
     <Copy SourceFiles="$(OutDir)DeepOriBridge.dll;$(OutDir)DeepOriBridge.deps.json;$(OutDir)DeepOriBridge.runtimeconfig.json;$(OutDir)resources.pri"
           DestinationFolder="$(OutDir)AppX"
@@ -70,6 +84,11 @@
            Text="Release CI must set BridgeDeveloperBuild=false and use a signed package identity." />
     <Error Condition="'$(BridgeLocalPreviewSensitiveRuntime)' != 'false'"
            Text="Release CI must disable the unsigned local-preview sensitive runtime." />
+  </Target>
+
+  <Target Name="RejectMixedPortableIdentity" BeforeTargets="PrepareForBuild" Condition="'$(BridgePortablePreview)' == 'true'">
+    <Error Condition="'$(BridgeDeveloperBuild)' != 'false' or '$(BridgeLocalPreviewSensitiveRuntime)' != 'false' or '$(WindowsPackageType)' != 'None'"
+           Text="Portable preview requires its own unpackaged trust channel; developer permissions must remain disabled." />
   </Target>
 
   <ItemGroup>

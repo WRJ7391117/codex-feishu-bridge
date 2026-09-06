@@ -68,6 +68,15 @@ The returned PID, start time, payload hash, HWND, and page must exactly equal th
 
 ## Local Preview Attestation
 
+This Skill also supports the explicitly user-trusted unsigned portable channel
+`unsigned-portable-preview-v1`. It is NOT a signed/package/developer identity.
+For that exact channel use the portable branch below: no Get-AppxPackage lookup,
+no developer flags, and only the independent portable Credential Locker namespace.
+The App must have received the user's first-run trust confirmation before it can
+issue this challenge. Never click that initial trust confirmation for an uninformed
+user or claim Windows publisher authentication. All remaining remote scopes,
+nonce/process/window checks and manual owner/project gates are unchanged.
+
 An accepted handshake is not enough by itself. In the same PowerShell process, immediately validate the response with the deterministic checks below before any UI action. This is the only supported local-preview audit; do not invent additional source-tree or fuzzy package checks.
 
 - Require `PackagingMode=packaged`, `BuildChannel=unsigned-local-preview`, `PackagePathAttested=true`, `DeveloperPathAttested=true`, `LocalPreviewSensitiveRuntimeEnabled=true`, `ProductionCredentialReuseEnabled=false`, `AgentMeshCredentialAccessEnabled=false`, `CredentialLockerIsolated=true`, and the exact resource prefix `DeepOriBridge.Windows.Development.Unsigned.Isolated` in the accepted response. The pipe server rejects the handshake unless these values are the runtime values used by the Bridge service graph.
@@ -95,6 +104,53 @@ $expectedFiles = @(
     'Tools\feishu-event-sidecar.manifest.json'
     'Tools\Watch-BridgeProcess.ps1'
 )
+if ($bridgeResponse.PackagingMode -ceq 'unsigned-portable-preview-v1') {
+    $root = [IO.Path]::GetFullPath($bridgeResponse.BridgePackageInstallLocation).TrimEnd('\')
+    $exe = [IO.Path]::GetFullPath($bridgeResponse.BridgeExecutablePath)
+    $bridge = [Diagnostics.Process]::GetProcessById([int]$bridgeResponse.BridgeProcessId)
+    if ($bridgeResponse.BuildChannel -cne 'unsigned-portable-preview-v1' -or
+        $bridgeResponse.PackagePathAttested -or $bridgeResponse.DeveloperPathAttested -or
+        $bridgeResponse.LocalPreviewSensitiveRuntimeEnabled -or
+        $bridgeResponse.ProductionCredentialReuseEnabled -or $bridgeResponse.AgentMeshCredentialAccessEnabled -or
+        -not $bridgeResponse.CredentialLockerIsolated -or
+        $bridgeResponse.CredentialLockerResourcePrefix -cne 'DeepOriBridge.Windows.Portable.Unsigned.Isolated.v1' -or
+        $exe -cne [IO.Path]::Combine($root, 'DeepOriBridge.exe') -or
+        $bridge.MainModule.FileName -cne $exe -or
+        $bridge.StartTime.ToUniversalTime().Ticks -ne $bridgeResponse.BridgeProcessStartTimeUtcTicks -or
+        (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -cne $bridgeResponse.BridgeExecutableSha256) {
+        throw 'Portable channel/process isolation check failed.'
+    }
+    $ancestor = Get-Item -LiteralPath $root
+    while ($ancestor) {
+        if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Unsafe portable root.' }
+        $ancestor = $ancestor.Parent
+    }
+    function Get-BridgePortableFiles([string]$Directory) {
+        foreach ($item in Get-ChildItem -LiteralPath $Directory -Force) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Unsafe portable payload.' }
+            if ($item.PSIsContainer) { Get-BridgePortableFiles $item.FullName } else { $item }
+        }
+    }
+    $actualFiles = @(Get-BridgePortableFiles $root)
+    $portableManifest = Get-Content -LiteralPath (Join-Path $root 'portable-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($portableManifest.Version -ne 1 -or $portableManifest.Channel -cne 'unsigned-portable-preview-v1' -or
+        $portableManifest.SourceCommit -notmatch '^[a-fA-F0-9]{40}$') { throw 'Invalid portable manifest.' }
+    $expectedFiles = [string[]]@(@($portableManifest.Files.PSObject.Properties.Name) + 'portable-manifest.json')
+    [Array]::Sort($expectedFiles, [StringComparer]::Ordinal)
+    $actualNames = [string[]]@($actualFiles | ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\', '/') })
+    [Array]::Sort($actualNames, [StringComparer]::Ordinal)
+    if ([string]::Join("`n", $actualNames) -cne [string]::Join("`n", $expectedFiles) -or
+        [string]::Join("`n", $bridgeResponse.PayloadManifestFiles) -cne [string]::Join("`n", $expectedFiles)) {
+        throw 'Portable payload file set mismatch.'
+    }
+    foreach ($entry in $portableManifest.Files.PSObject.Properties) {
+        $path = [IO.Path]::GetFullPath([IO.Path]::Combine($root, $entry.Name))
+        if (-not $path.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $entry.Value) {
+            throw 'Portable file hash mismatch.'
+        }
+    }
+} else {
 $packages = @(Get-AppxPackage -Name $expectedPackageName)
 if ($packages.Count -ne 1) { throw 'Exact Bridge package cardinality failed.' }
 $package = $packages[0]
@@ -123,6 +179,7 @@ if ($package.PackageFamilyName -cne $expectedFamily -or
     [string]::Join("`n", $bridgeResponse.PayloadManifestFiles) -cne [string]::Join("`n", $expectedFiles)) {
     throw 'DeepOri Bridge local-preview attestation failed; stop setup.'
 }
+}
 $sortedFiles = [string[]]$expectedFiles.Clone()
 [Array]::Sort($sortedFiles, [StringComparer]::Ordinal)
 $payload = [Text.StringBuilder]::new()
@@ -146,7 +203,9 @@ if ($actualPayload -cne $bridgePayload -or
 }
 ```
 
-After these checks pass, report only that package/path, payload, preview runtime, and isolated vault attestations passed. Do not print their raw values.
+After these checks pass, report only the actual channel's path, payload and isolated
+vault checks. For portable builds explicitly say user-trusted unsigned preview,
+not package/publisher authenticated. Do not print raw evidence.
 
 ## Accepted-session command pipe
 

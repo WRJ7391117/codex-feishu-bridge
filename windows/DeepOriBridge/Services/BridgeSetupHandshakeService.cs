@@ -157,15 +157,16 @@ internal sealed class BridgeSetupHandshakeService : IAsyncDisposable
             instance.ExecutablePath,
             Path.GetDirectoryName(instance.ExecutablePath)!,
             instance.PackagingMode,
-            "unsigned-local-preview",
+            _identity.IsPortableIdentity ? PortablePreview.Channel : "unsigned-local-preview",
             instance.PackagePathAttested,
             instance.DeveloperPathAttested,
             _identity.IsLocalPreviewRuntimeEnabled,
             ProductionCredentialReuseEnabled: false,
             AgentMeshCredentialAccessEnabled: false,
             CredentialLockerResourcePrefix: _credentials.ResourcePrefix,
-            CredentialLockerIsolated: _credentials.UsesDevelopmentIsolatedNamespace,
-            PayloadManifestFiles: BridgeProductIdentity.SecurityCriticalPayloadFiles.ToArray());
+            CredentialLockerIsolated: _credentials.UsesDevelopmentIsolatedNamespace
+                || (_identity.IsPortableIdentity && _credentials.ResourcePrefix == PortablePreview.CredentialPrefix),
+            PayloadManifestFiles: _identity.PayloadFiles);
         var cancellation = new CancellationTokenSource(ChallengeLifetime);
         lock (_lock)
         {
@@ -651,7 +652,7 @@ internal sealed class BridgeSetupHandshakeService : IAsyncDisposable
 
     private static bool HasValidLocalPreviewAttestation(
         BridgeSetupChallenge challenge) =>
-        challenge.PackagingMode.Equals("packaged", StringComparison.Ordinal)
+        HasValidPortableAttestation(challenge) || (challenge.PackagingMode.Equals("packaged", StringComparison.Ordinal)
         && challenge.BuildChannel.Equals("unsigned-local-preview", StringComparison.Ordinal)
         && challenge.PackagePathAttested
         && challenge.DeveloperPathAttested
@@ -667,7 +668,27 @@ internal sealed class BridgeSetupHandshakeService : IAsyncDisposable
             StringComparison.OrdinalIgnoreCase)
         && challenge.PayloadManifestFiles.SequenceEqual(
             BridgeProductIdentity.SecurityCriticalPayloadFiles,
-            StringComparer.Ordinal);
+            StringComparer.Ordinal));
+
+    private static bool HasValidPortableAttestation(BridgeSetupChallenge challenge)
+    {
+        if (!PortablePreview.Enabled || challenge.PackagingMode != PortablePreview.Channel
+            || challenge.BuildChannel != PortablePreview.Channel || challenge.PackagePathAttested
+            || challenge.DeveloperPathAttested || challenge.LocalPreviewSensitiveRuntimeEnabled
+            || challenge.ProductionCredentialReuseEnabled || challenge.AgentMeshCredentialAccessEnabled
+            || !challenge.CredentialLockerIsolated
+            || challenge.CredentialLockerResourcePrefix != PortablePreview.CredentialPrefix)
+            return false;
+        try
+        {
+            string root = Path.GetDirectoryName(Path.GetFullPath(challenge.BridgeExecutablePath))!;
+            return Path.GetFullPath(challenge.BridgePackageInstallLocation) == root
+                && PortablePreview.IsTrusted(root, challenge.BridgePayloadManifestSha256)
+                && challenge.PayloadManifestFiles.SequenceEqual(PortablePreview.VerifyPayload(root), StringComparer.Ordinal);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException)
+        { return false; }
+    }
 
     private static bool MatchesLiveBridge(
         BridgeSetupChallenge challenge,

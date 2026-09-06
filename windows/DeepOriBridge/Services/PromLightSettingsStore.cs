@@ -12,17 +12,17 @@ internal sealed class PromLightSettingsStore
 
     internal PromLightLegacyConfiguration LoadForMigration()
     {
-        try { return PromLightLegacyConfiguration.Parse(ApplicationData.Current.LocalSettings.Values[SettingsKey]); }
+        try { return PromLightLegacyConfiguration.Parse(BridgeLocalStorage.Read(SettingsKey)); }
         catch { return new(PromLightLegacyState.Invalid, null); }
     }
 
     internal string? LoadPinnedDevice() =>
-        ApplicationData.Current.LocalSettings.Values[DeviceIdentityKey] as string;
+        BridgeLocalStorage.Read(DeviceIdentityKey);
 
     internal void PinDevice(string deviceId)
     {
         if (string.IsNullOrWhiteSpace(deviceId)) throw new ArgumentException("提示灯设备身份不能为空。");
-        ApplicationData.Current.LocalSettings.Values[DeviceIdentityKey] = deviceId;
+        BridgeLocalStorage.Write(DeviceIdentityKey, deviceId);
     }
 
     private sealed record StoredSettings(
@@ -35,7 +35,7 @@ internal sealed class PromLightSettingsStore
     {
         try
         {
-            if (ApplicationData.Current.LocalSettings.Values[SettingsKey] is not string json
+            if (BridgeLocalStorage.Read(SettingsKey) is not string json
                 || string.IsNullOrWhiteSpace(json))
             {
                 return PromLightBindingSnapshot.Initial;
@@ -71,8 +71,7 @@ internal sealed class PromLightSettingsStore
             snapshot.Name,
             snapshot.TaskIds.ToArray(),
             snapshot.UpdatedAt.ToUnixTimeSeconds());
-        ApplicationData.Current.LocalSettings.Values[SettingsKey] =
-            JsonSerializer.Serialize(stored);
+        BridgeLocalStorage.Write(SettingsKey, JsonSerializer.Serialize(stored));
         return snapshot;
     }
 

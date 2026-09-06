@@ -29,7 +29,7 @@ internal sealed class PromLightFleetService : IPromLightService, IPromLightFleet
         _runtime = runtime;
         string storageScope = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(credentials.ResourcePrefix)));
-        _registryPath = Path.Combine(ApplicationData.Current.LocalFolder.Path, "PromLight", storageScope, "registry-v2.bin");
+        _registryPath = Path.Combine(BridgeLocalStorage.Root, "PromLight", storageScope, "registry-v2.bin");
         _registry = new(_registryPath);
         _origins = new(Path.Combine(Path.GetDirectoryName(_registryPath)!, "turn-origins.bin"));
     }

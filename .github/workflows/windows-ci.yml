@@ -45,6 +45,13 @@ jobs:
         run: ./windows/scripts/Test-SetupSkillExamples.ps1
       - name: Release build (unsigned runtime disabled)
         run: dotnet build windows/DeepOriBridge/DeepOriBridge.csproj -c Release -p:Platform=x64 -p:ContinuousIntegrationBuild=true -p:BridgeDeveloperBuild=false -p:BridgeLocalPreviewSensitiveRuntime=false
+      - name: Stage isolated portable candidate (no upload)
+        shell: pwsh
+        run: |
+          $candidate = Join-Path $env:RUNNER_TEMP 'bridge-portable-candidate'
+          ./windows/scripts/Publish-PortablePreview.ps1 -OutputDirectory $candidate
+          dotnet run --no-build --project windows/DeepOriBridge.ProtocolTests/DeepOriBridge.ProtocolTests.csproj -c Release -- --portable-payload-check (Join-Path $candidate 'DeepOriBridge-Windows-x64-preview')
+          if ($LASTEXITCODE -ne 0) { throw 'Portable payload verification failed.' }
       - name: Release boundary
         shell: pwsh
         run: |

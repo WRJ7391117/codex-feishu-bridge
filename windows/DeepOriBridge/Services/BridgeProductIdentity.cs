@@ -24,7 +24,8 @@ internal sealed record BridgeCandidateAttestation(
     bool DeveloperPathAttested = false,
     bool PackagePathAttested = false,
     string PayloadManifestSha256 = "",
-    long WindowHandle = 0);
+    long WindowHandle = 0,
+    bool PortableUserTrusted = false);
 
 internal sealed record BridgeWindowObservation(
     long WindowHandle,
@@ -80,8 +81,16 @@ internal sealed class BridgeProductIdentity
     public string PayloadManifestSha256 => Current.PayloadManifestSha256;
     public bool IsDevelopmentIdentity { get; }
     public bool IsLocalPreviewRuntimeEnabled { get; }
+    public bool IsPortableIdentity => Current.PackagingMode == PortablePreview.Channel;
+    public string StorageChannel => IsPortableIdentity ? "Portable-Unsigned-Isolated-v1"
+        : IsDevelopmentIdentity ? "Development-Unsigned-Isolated" : "Production";
+    internal string[] PayloadFiles => IsPortableIdentity
+        ? PortablePreview.VerifyPayload(Path.GetDirectoryName(Current.ExecutablePath)!)
+        : SecurityCriticalPayloadFiles;
     public bool CanUseSensitiveRuntime =>
-        IsLocalPreviewRuntimeEnabled
+        (IsPortableIdentity && PortablePreview.IsTrusted(
+            Path.GetDirectoryName(Current.ExecutablePath)!, Current.PayloadManifestSha256))
+        || IsLocalPreviewRuntimeEnabled
         || !IsDevelopmentIdentity
             && !Current.SignatureKind.Equals("None", StringComparison.OrdinalIgnoreCase)
             && !Current.SignatureKind.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
@@ -97,7 +106,8 @@ internal sealed class BridgeProductIdentity
         BridgeCandidateAttestation? selected = SelectUniqueCandidate(
             ObserveProcessCandidates(current),
             allowDevelopmentIdentity: IsDevelopmentIdentity,
-            requirePageContract: false);
+            requirePageContract: false,
+            allowPortableIdentity: PortablePreview.Enabled);
         if (selected is null)
         {
             throw new InvalidOperationException(
@@ -186,7 +196,8 @@ internal sealed class BridgeProductIdentity
         BridgeCandidateAttestation? process = SelectUniqueCandidate(
             ObserveProcessCandidates(Current),
             allowDevelopmentIdentity: IsDevelopmentIdentity,
-            requirePageContract: false);
+            requirePageContract: false,
+            allowPortableIdentity: PortablePreview.Enabled);
         BridgeWindowObservation? window = SelectUniqueWindow(
             ObserveTopLevelWindows(Current.ProcessId),
             Current.ProcessId,
@@ -217,7 +228,8 @@ internal sealed class BridgeProductIdentity
     internal static bool IsExpectedCandidate(
         BridgeCandidateAttestation candidate,
         bool allowDevelopmentIdentity,
-        bool requirePageContract = true)
+        bool requirePageContract = true,
+        bool allowPortableIdentity = false)
     {
         string fileName = Path.GetFileName(candidate.ExecutablePath);
         bool exactProcess = fileName.Equals(ExpectedExecutableName, StringComparison.OrdinalIgnoreCase)
@@ -236,6 +248,13 @@ internal sealed class BridgeProductIdentity
         {
             return false;
         }
+
+        if (candidate.PackagingMode == PortablePreview.Channel)
+            return allowPortableIdentity && candidate.PortableUserTrusted
+                && !candidate.DeveloperPathAttested && !candidate.PackagePathAttested
+                && candidate.PackageName.Length == 0 && candidate.PackageFamilyName.Length == 0
+                && candidate.Publisher.Length == 0 && candidate.PublisherId.Length == 0
+                && candidate.ApplicationUserModelId.Length == 0 && candidate.SignatureKind == "None";
 
         if (candidate.PackagingMode.Equals("unpackaged-dev", StringComparison.Ordinal))
         {
@@ -266,13 +285,15 @@ internal sealed class BridgeProductIdentity
     internal static BridgeCandidateAttestation? SelectUniqueCandidate(
         IEnumerable<BridgeCandidateAttestation> candidates,
         bool allowDevelopmentIdentity,
-        bool requirePageContract = true)
+        bool requirePageContract = true,
+        bool allowPortableIdentity = false)
     {
         BridgeCandidateAttestation[] matches = candidates
             .Where(candidate => IsExpectedCandidate(
                 candidate,
                 allowDevelopmentIdentity,
-                requirePageContract))
+                requirePageContract,
+                allowPortableIdentity))
             .GroupBy(
                 candidate => $"{Path.GetFullPath(candidate.ExecutablePath)}|{candidate.ProcessId}|{candidate.ProcessStartTimeUtcTicks}|{candidate.ExecutableSha256}|{candidate.PayloadManifestSha256}",
                 StringComparer.OrdinalIgnoreCase)
@@ -326,7 +347,9 @@ internal sealed class BridgeProductIdentity
                         PayloadManifestSha256 = sameCanonicalPath
                             ? FileAttestation.PayloadManifestSha256(
                                 Path.GetDirectoryName(path)!,
-                                SecurityCriticalPayloadFiles)
+                                current.PackagingMode == PortablePreview.Channel
+                                    ? PortablePreview.VerifyPayload(Path.GetDirectoryName(path)!)
+                                    : SecurityCriticalPayloadFiles)
                             : string.Empty,
                         DeveloperPathAttested = sameCanonicalPath && current.DeveloperPathAttested,
                         PackagePathAttested = sameCanonicalPath && current.PackagePathAttested,
@@ -390,6 +413,19 @@ internal sealed class BridgeProductIdentity
         if (FileAttestation.HasReparsePoint(canonicalPath))
         {
             throw new InvalidOperationException("Bridge 可执行文件路径包含重解析点。");
+        }
+
+        if (PortablePreview.Enabled)
+        {
+            string root = Path.GetDirectoryName(canonicalPath)!;
+            string hash = FileAttestation.PayloadManifestSha256(root, PortablePreview.VerifyPayload(root));
+            if (!PortablePreview.IsTrusted(root, hash)) throw new InvalidOperationException("尚未确认信任此便携版本。");
+            using Process portableProcess = Process.GetCurrentProcess();
+            return new BridgeCandidateAttestation(canonicalPath,
+                FileVersionInfo.GetVersionInfo(canonicalPath).ProductName ?? string.Empty,
+                "", "", "", "", "", "None", portableProcess.Id,
+                portableProcess.StartTime.ToUniversalTime().Ticks, FileAttestation.Sha256(canonicalPath), "",
+                PackagingMode: PortablePreview.Channel, PayloadManifestSha256: hash, PortableUserTrusted: true);
         }
 
         Package? package = null;

@@ -9,6 +9,13 @@ runtime checks do require the proper release identity for a distributable
 installer. An unsigned portable edition would be a separate packaging change,
 not a renamed development AppX directory.
 
+The user has now explicitly accepted a separate unsigned portable **preview** trust
+model. See `PORTABLE_PREVIEW_PLAN.md` and `PORTABLE_INSTALL.md`. Its first-run
+consent, isolated storage/vault and complete payload checks do not authenticate
+a Windows publisher. Portable source/build work is allowed; public binaries still
+require recorded clean-machine and functional acceptance. The signed-MSIX gates
+below are not silently waived or relabeled as completed.
+
 The current local App is a development preview. Do not redistribute its AppX
 directory as a portable app: its local identity attestation is tied to the build
 location. Do not import a self-signed certificate into users' trust stores as an

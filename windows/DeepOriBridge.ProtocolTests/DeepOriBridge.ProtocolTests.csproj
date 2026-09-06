@@ -6,6 +6,8 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\DeepOriBridge\Services\PortablePreview.cs" Link="Production\PortablePreview.cs" />
+    <Compile Include="..\DeepOriBridge\Services\BridgeLocalStorage.cs" Link="Production\BridgeLocalStorage.cs" />
     <Compile Include="..\DeepOriBridge\Services\TaskExecutionGate.cs" Link="Production\TaskExecutionGate.cs" />
     <Compile Include="..\DeepOriBridge\Services\FeishuAttachments.cs" Link="Production\FeishuAttachments.cs" />
     <Compile Include="..\DeepOriBridge\Services\FeishuAttachmentSession.cs" Link="Production\FeishuAttachmentSession.cs" />

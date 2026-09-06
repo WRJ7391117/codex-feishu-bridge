@@ -47,14 +47,14 @@ public sealed partial class FeishuEventRuntime : IAsyncDisposable
     private FeishuTaskInputQueue TaskInputQueue => LazyInitializer.EnsureInitialized(ref _taskInputQueue,
         () => new FeishuTaskInputQueue(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DeepOriBridge",
-            _productIdentity?.IsDevelopmentIdentity != false ? "Development-Unsigned-Isolated" : "Production", "TaskInputQueue")));
+            _productIdentity?.StorageChannel ?? "Development-Unsigned-Isolated", "TaskInputQueue")));
     private FeishuTaskResultOutbox? _taskResultOutbox;
     private FeishuResultResources? _resultResources;
     private FeishuDesktopSyncSubscriptionStore? _desktopSyncSubscriptions;
     private FeishuResultResources ResultResources => LazyInitializer.EnsureInitialized(ref _resultResources,
         () => new FeishuResultResources(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DeepOriBridge",
-            _productIdentity?.IsDevelopmentIdentity != false ? "Development-Unsigned-Isolated" : "Production",
+            _productIdentity?.StorageChannel ?? "Development-Unsigned-Isolated",
             "TaskResultResources")));
     private CancellationTokenSource? _taskResultWorker;
     private readonly ConcurrentDictionary<string, string> _bridgeTurnIds = new(StringComparer.Ordinal);
@@ -65,7 +65,7 @@ public sealed partial class FeishuEventRuntime : IAsyncDisposable
     private FeishuReplyCursorStore ReplyCursors => LazyInitializer.EnsureInitialized(ref _replyCursors,
         () => new FeishuReplyCursorStore(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DeepOriBridge",
-            _productIdentity?.IsDevelopmentIdentity != false ? "Development-Unsigned-Isolated" : "Production", "ReplyCursors")));
+            _productIdentity?.StorageChannel ?? "Development-Unsigned-Isolated", "ReplyCursors")));
     private void SaveReplyCursor(string scope, string turnId)
     {
         ReplyCursors.Save(scope, turnId);
@@ -75,13 +75,13 @@ public sealed partial class FeishuEventRuntime : IAsyncDisposable
     private FeishuTaskResultOutbox TaskResultOutbox => LazyInitializer.EnsureInitialized(ref _taskResultOutbox,
         () => new FeishuTaskResultOutbox(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DeepOriBridge",
-            _productIdentity?.IsDevelopmentIdentity != false ? "Development-Unsigned-Isolated" : "Production",
+            _productIdentity?.StorageChannel ?? "Development-Unsigned-Isolated",
             "TaskResultOutbox")));
     private FeishuDesktopSyncSubscriptionStore DesktopSyncSubscriptions => LazyInitializer.EnsureInitialized(
         ref _desktopSyncSubscriptions,
         () => new FeishuDesktopSyncSubscriptionStore(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DeepOriBridge",
-            _productIdentity?.IsDevelopmentIdentity != false ? "Development-Unsigned-Isolated" : "Production",
+            _productIdentity?.StorageChannel ?? "Development-Unsigned-Isolated",
             "DesktopSyncSubscriptions")));
     private readonly ConcurrentDictionary<string, MenuCardAction> _menuCardActions = new(StringComparer.Ordinal);
     private sealed record PendingNewTaskProject(string ProjectId, string AuthorizedRoot);
@@ -90,7 +90,7 @@ public sealed partial class FeishuEventRuntime : IAsyncDisposable
     private FeishuTaskSubscriptionStore TaskSubscriptions => LazyInitializer.EnsureInitialized(ref _taskSubscriptions,
         () => new FeishuTaskSubscriptionStore(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DeepOriBridge",
-            _productIdentity?.IsDevelopmentIdentity != false ? "Development-Unsigned-Isolated" : "Production", "TaskSubscriptions")));
+            _productIdentity?.StorageChannel ?? "Development-Unsigned-Isolated", "TaskSubscriptions")));
     private string SubscriptionScope(string sender) => (_sidecarAttestation?.IdentityGeneration
         ?? throw new InvalidOperationException("飞书身份世代不可用。")) + ":" + sender + ":" + (_credentials.CurrentTaskSelectionScope(sender)
         ?? throw new InvalidOperationException("该使用者的项目授权暂不可用；订阅已保留。"));
@@ -189,6 +189,7 @@ public sealed partial class FeishuEventRuntime : IAsyncDisposable
     public bool CanStartSensitiveRuntime =>
         _testHooks is not null
         || (_productIdentity?.CanUseSensitiveRuntime == true
+            && (!_productIdentity.IsPortableIdentity || _credentials.ResourcePrefix == PortablePreview.CredentialPrefix)
             && _credentials.IsSensitiveRuntimeNamespaceAllowed(
                 _productIdentity.IsDevelopmentIdentity));
 

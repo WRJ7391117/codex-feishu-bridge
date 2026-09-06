@@ -47,7 +47,7 @@ internal sealed partial class PromLightService : IPromLightService, IAsyncDispos
         {
             lock (_diagnosticLock)
             {
-                string path = Path.Combine(ApplicationData.Current.LocalFolder.Path, "promlight-diagnostics.jsonl");
+                string path = Path.Combine(BridgeLocalStorage.Root, "promlight-diagnostics.jsonl");
                 if (File.Exists(path) && new FileInfo(path).Length > 1024 * 1024)
                     File.Move(path, path + ".previous", overwrite: true);
                 File.AppendAllText(path, System.Text.Json.JsonSerializer.Serialize(new

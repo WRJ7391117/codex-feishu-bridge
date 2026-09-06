@@ -56,6 +56,13 @@ public sealed partial class DiagnosticsPage : Page
         ProductIdentityStatus.Severity = _productIdentity.IsReleaseIdentityReady
             ? InfoBarSeverity.Success
             : InfoBarSeverity.Warning;
+        if (_productIdentity.IsPortableIdentity)
+        {
+            ProductIdentityStatus.Title = "未签名便携测试版 · 用户已确认信任";
+            ProductIdentityStatus.Message = "没有 Windows 发布者签名；已校验完整文件、规范路径和当前进程。"
+                + "使用独立便携凭证空间，不读取开发版或正式版凭证。文件指纹："
+                + _productIdentity.PayloadManifestSha256[..12];
+        }
         RenderFeishuConsumers();
         BackButton.Focus(FocusState.Programmatic);
         await RefreshAsync();

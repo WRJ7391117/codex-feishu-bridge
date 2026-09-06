@@ -22,8 +22,8 @@ internal sealed class CurrentTaskSelectionStore(
 
     internal static CurrentTaskSelectionStore ForApp(Func<string?> scope, Func<string?> authorizedRoot) => new(
         scope,
-        key => ApplicationData.Current.LocalSettings.Values["CurrentTask.v1." + key] as string,
-        (key, value) => ApplicationData.Current.LocalSettings.Values["CurrentTask.v1." + key] = value,
+        key => BridgeLocalStorage.Read("CurrentTask.v1." + key),
+        (key, value) => BridgeLocalStorage.Write("CurrentTask.v1." + key, value),
         root => authorizedRoot() is { Length: > 0 } allowed && AuthorizedProjectScope.Contains(allowed, root));
 
     internal CurrentTaskSelection Load(string key)
