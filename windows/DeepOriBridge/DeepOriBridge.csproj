@@ -14,7 +14,20 @@
     <EnableMsixTooling>true</EnableMsixTooling>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <BridgeDeveloperBuild Condition="'$(BridgeDeveloperBuild)' == ''">true</BridgeDeveloperBuild>
+    <BridgeLocalPreviewSensitiveRuntime Condition="'$(BridgeLocalPreviewSensitiveRuntime)' == '' and '$(BridgeDeveloperBuild)' == 'true'">true</BridgeLocalPreviewSensitiveRuntime>
+    <BridgeLocalPreviewSensitiveRuntime Condition="'$(BridgeLocalPreviewSensitiveRuntime)' == ''">false</BridgeLocalPreviewSensitiveRuntime>
   </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="DeepOriBridge.DeveloperBuild" Value="$(BridgeDeveloperBuild)" />
+    <AssemblyMetadata Include="DeepOriBridge.LocalPreviewSensitiveRuntime" Value="$(BridgeLocalPreviewSensitiveRuntime)" />
+    <AssemblyMetadata Include="DeepOriBridge.DeveloperCanonicalAppxRoot" Value="$([System.IO.Path]::GetFullPath('$(TargetDir)AppX'))" />
+    <AssemblyMetadata Include="DeepOriBridge.DeveloperCanonicalLooseRoot" Value="$([System.IO.Path]::GetFullPath('$(TargetDir)'))" />
+    <AssemblyMetadata Include="DeepOriBridge.CleanFirstRunUiTestToken"
+                      Value="$(BridgeCleanFirstRunUiTestToken)"
+                      Condition="'$(BridgeCleanFirstRunUiTestToken)' != ''" />
+  </ItemGroup>
 
   <ItemGroup>
     <Content Include="Assets\SplashScreen.scale-200.png" />
@@ -27,25 +40,41 @@
     <Content Include="Assets\AppIcon.ico" />
     <Content Include="Assets\Wide310x150Logo.scale-200.png" />
     <Content Include="Assets\CodexSkills\**\*">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </Content>
-    <Content Include="Tools\feishu-event-sidecar.exe">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
     </Content>
   </ItemGroup>
 
-  <Target Name="BuildFeishuEventSidecar"
-          BeforeTargets="PrepareForBuild"
-          Condition="'$(DesignTimeBuild)' != 'true'">
-    <Exec Command="go build -trimpath -ldflags=&quot;-s -w&quot; -o &quot;$(ProjectDir)Tools\feishu-event-sidecar.exe&quot; ."
-          WorkingDirectory="$(ProjectDir)..\FeishuEventSidecar"
-          EnvironmentVariables="GOPROXY=https://goproxy.cn,direct" />
+  <Import Project="..\BuildSidecar.targets" />
+
+  <Target Name="RefreshLocalPreviewAppxPayload" AfterTargets="Build">
+    <MakeDir Directories="$(OutDir)AppX\Assets\CodexSkills\deepori-bridge-setup;$(OutDir)AppX\Tools" />
+    <Copy SourceFiles="$(OutDir)DeepOriBridge.dll;$(OutDir)DeepOriBridge.deps.json;$(OutDir)DeepOriBridge.runtimeconfig.json;$(OutDir)resources.pri"
+          DestinationFolder="$(OutDir)AppX"
+          SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(ProjectDir)Assets\CodexSkills\deepori-bridge-setup\SKILL.md"
+          DestinationFiles="$(OutDir)AppX\Assets\CodexSkills\deepori-bridge-setup\SKILL.md"
+          SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(ProjectDir)Assets\CodexSkills\deepori-bridge-setup\.deepori-bridge-managed"
+          DestinationFiles="$(OutDir)AppX\Assets\CodexSkills\deepori-bridge-setup\.deepori-bridge-managed"
+          SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(BridgeSidecarOutputDir)\feishu-event-sidecar.exe;$(BridgeSidecarOutputDir)\feishu-event-sidecar.manifest.json"
+          DestinationFolder="$(OutDir)AppX\Tools"
+          SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(ProjectDir)Tools\Watch-BridgeProcess.ps1" DestinationFolder="$(OutDir)AppX\Tools" />
+  </Target>
+
+  <Target Name="RejectDeveloperIdentityInReleaseCI" BeforeTargets="PrepareForBuild"
+          Condition="'$(ContinuousIntegrationBuild)' == 'true' and '$(Configuration)' == 'Release'">
+    <Error Condition="'$(BridgeDeveloperBuild)' != 'false'"
+           Text="Release CI must set BridgeDeveloperBuild=false and use a signed package identity." />
+    <Error Condition="'$(BridgeLocalPreviewSensitiveRuntime)' != 'false'"
+           Text="Release CI must disable the unsigned local-preview sensitive runtime." />
   </Target>
 
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
+    <Content Include="Tools\Watch-BridgeProcess.ps1" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!--
@@ -66,6 +95,7 @@
     <PropertyGroup> above to opt out.
   -->
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.6.1" />

@@ -6,11 +6,23 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\DeepOriBridge\Services\TaskExecutionGate.cs" Link="Production\TaskExecutionGate.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuAttachments.cs" Link="Production\FeishuAttachments.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuAttachmentSession.cs" Link="Production\FeishuAttachmentSession.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuResultResources.cs" Link="Production\FeishuResultResources.cs" />
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
     <Compile Include="..\DeepOriBridge\Models\CodexAppServerModels.cs" Link="Production\CodexAppServerModels.cs" />
     <Compile Include="..\DeepOriBridge\Models\BridgeRuntimeSnapshot.cs" Link="Production\BridgeRuntimeSnapshot.cs" />
     <Compile Include="..\DeepOriBridge\Models\FeishuEventRuntimeModels.cs" Link="Production\FeishuEventRuntimeModels.cs" />
+    <Compile Include="..\DeepOriBridge\Models\FeishuCredentialModels.cs" Link="Production\FeishuCredentialModels.cs" />
+    <Compile Include="..\DeepOriBridge\Models\PromLightModels.cs" Link="Production\PromLightModels.cs" />
+    <Compile Include="..\DeepOriBridge\Models\WindowsSetupCopy.cs" Link="Production\WindowsSetupCopy.cs" />
     <Compile Include="..\DeepOriBridge\Services\CodexAppServerClient.cs" Link="Production\CodexAppServerClient.cs" />
+    <Compile Include="..\DeepOriBridge\Services\CodexDesktopTurnClient.cs" Link="Production\CodexDesktopTurnClient.cs" />
+    <Compile Include="..\DeepOriBridge\Services\CodexDesktopProjectCatalog.cs" Link="Production\CodexDesktopProjectCatalog.cs" />
+    <Compile Include="..\DeepOriBridge\Services\CodexProjectMembershipReader.cs" Link="Production\CodexProjectMembershipReader.cs" />
     <Compile Include="..\DeepOriBridge\Services\BridgeRuntime.cs" Link="Production\BridgeRuntime.cs" />
+    <Compile Include="..\DeepOriBridge\Services\CurrentTaskSelectionStore.cs" Link="Production\CurrentTaskSelectionStore.cs" />
     <Compile Include="..\DeepOriBridge\Services\CodexExecutableLocator.cs" Link="Production\CodexExecutableLocator.cs" />
     <Compile Include="..\DeepOriBridge\Services\FeishuEventSafetyPolicy.cs" Link="Production\FeishuEventSafetyPolicy.cs" />
     <Compile Include="..\DeepOriBridge\Services\FeishuRouteGateCoordinator.cs" Link="Production\FeishuRouteGateCoordinator.cs" />
@@ -19,7 +31,39 @@
     <Compile Include="..\DeepOriBridge\Services\FeishuEventSnapshotStore.cs" Link="Production\FeishuEventSnapshotStore.cs" />
     <Compile Include="..\DeepOriBridge\Services\FeishuSidecarProtocol.cs" Link="Production\FeishuSidecarProtocol.cs" />
     <Compile Include="..\DeepOriBridge\Services\BridgeProductIdentity.cs" Link="Production\BridgeProductIdentity.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FileAttestation.cs" Link="Production\FileAttestation.cs" />
+    <Compile Include="..\DeepOriBridge\Services\BridgeSetupHandshakeService.cs" Link="Production\BridgeSetupHandshakeService.cs" />
+    <Compile Include="..\DeepOriBridge\Services\CodexSetupSkillInstaller.cs" Link="Production\CodexSetupSkillInstaller.cs" />
     <Compile Include="..\DeepOriBridge\Services\FeishuAppIdentityPolicy.cs" Link="Production\FeishuAppIdentityPolicy.cs" />
+    <Compile Include="..\DeepOriBridge\Services\BotSetupFlow.cs" Link="Production\BotSetupFlow.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuCredentialService.cs" Link="Production\FeishuCredentialService.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuIdentityGenerationPolicy.cs" Link="Production\FeishuIdentityGenerationPolicy.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuIdentityTransactionCoordinator.cs" Link="Production\FeishuIdentityTransactionCoordinator.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuRuntimeStartPolicy.cs" Link="Production\FeishuRuntimeStartPolicy.cs" />
+    <Compile Include="..\DeepOriBridge\Services\SetupPathAvailabilityPolicy.cs" Link="Production\SetupPathAvailabilityPolicy.cs" />
+    <Compile Include="..\DeepOriBridge\Services\PageIdentityCommandGate.cs" Link="Production\PageIdentityCommandGate.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuEventRuntime.cs" Link="Production\FeishuEventRuntime.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuCurrentTaskCardBuilder.cs" Link="Production\FeishuCurrentTaskCardBuilder.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuTaskFeedback.cs" Link="Production\FeishuTaskFeedback.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuTaskResultOutbox.cs" Link="Production\FeishuTaskResultOutbox.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuDesktopSync.cs" Link="Production\FeishuDesktopSync.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuTaskInputQueue.cs" Link="Production\FeishuTaskInputQueue.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuMacParityCardBuilder.cs" Link="Production\FeishuMacParityCardBuilder.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuPromLightCardBuilder.cs" Link="Production\FeishuPromLightCardBuilder.cs" />
+    <Compile Include="..\DeepOriBridge\Services\IPromLightService.cs" Link="Production\IPromLightService.cs" />
+    <Compile Include="..\DeepOriBridge\Services\PromLightRegistry.cs" Link="Production\PromLightRegistry.cs" />
+    <Compile Include="..\DeepOriBridge\Services\PromLightLegacyConfiguration.cs" Link="Production\PromLightLegacyConfiguration.cs" />
+    <Compile Include="..\DeepOriBridge\Services\PromLightTurnOrigins.cs" Link="Production\PromLightTurnOrigins.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuPromLightFleet.cs" Link="Production\FeishuPromLightFleet.cs" />
+    <Compile Include="..\DeepOriBridge\Services\PromLightProtocol.cs" Link="Production\PromLightProtocol.cs" />
+    <Compile Include="..\DeepOriBridge\Services\PromLightDeviceSelectionPolicy.cs" Link="Production\PromLightDeviceSelectionPolicy.cs" />
+    <Compile Include="..\DeepOriBridge\Services\PromLightTaskObserver.cs" Link="Production\PromLightTaskObserver.cs" />
+    <Compile Include="..\DeepOriBridge\Services\AuthorizedProjectScope.cs" Link="Production\AuthorizedProjectScope.cs" />
     <Compile Include="..\DeepOriBridge\Services\FeishuOwnerBindingCodePolicy.cs" Link="Production\FeishuOwnerBindingCodePolicy.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuOwnerBindingGate.cs" Link="Production\FeishuOwnerBindingGate.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuTaskSelectorCardBuilder.cs" Link="Production\FeishuTaskSelectorCardBuilder.cs" />
+    <Compile Include="..\DeepOriBridge\Services\FeishuTaskManagementCardBuilder.cs" Link="Production\FeishuTaskManagementCardBuilder.cs" />
   </ItemGroup>
+
+  <Import Project="..\BuildSidecar.targets" />
 </Project>

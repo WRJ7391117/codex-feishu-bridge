@@ -3,31 +3,82 @@ namespace DeepOriBridge.Models;
 internal static class WindowsSetupCopy
 {
     public const string CodexPrompt = """
-        请使用 $deepori-bridge-setup 配置这台 Windows 电脑上的 DeepOri Bridge。
+        请使用 $deepori-bridge-setup 自动完成这台 Windows 电脑上的 DeepOri Bridge 首次配置。立即执行，不要停留在方案说明，也不要把可自动完成的步骤转交给我。
 
-        安全阻断：在跨应用身份契约通过独立审计前，不得自动查找、打开、初始化或启动任何 DeepOri 应用。尤其禁止 Get-AppxPackage 后用 -match DeepOri、Select-Object -First 1 或窗口标题猜测目标；DeepOri.AgentMesh / DeepOriAgentMesh.exe / “初始化本机节点” / “启动本地服务”都不是 Bridge，遇到即停止。Bridge 候选必须同时精确匹配 DeepOriBridge.exe、产品名“DeepOri Bridge for Windows”和页面 AutomationId 前缀“DeepOriBridge.”；零个或多个候选都必须 fail-closed。
+        本指令由 DeepOri Bridge 在我完成 Bot 身份验证后生成。我点击“授权自动配置并打开 Codex”或“授权并复制指令”，即授权你仅对本指令末尾列出的唯一飞书应用执行以下预期变更：核对并补齐 Bridge 所需权限与三个长连接事件、写入固定的 DeepOri 受管菜单、创建并提交包含这些预期变更的新版本，以及检查发布结果。不要为这些预期变更重复向我索取确认；遇到目标身份不一致、未知远端菜单、额外 diff 或多候选时必须停止。
 
-        请先只读检查，再尽可能自动完成配置。不要让我把 App Secret 发到 Codex 对话、终端参数、文件、状态或日志中；需要凭证时，请让我只在 DeepOri Bridge for Windows 的安全输入框中填写，由当前 Windows 用户的 Credential Locker 保存。
+        完成标准：
+        1. 先读取 App 内置的 $deepori-bridge-setup，再在同一个持久 Windows PowerShell 5.1 进程中完成单次 named-pipe 身份握手与本机预览证明，并在该进程中发送后续命令。握手须在 120 秒内完成；接受后的会话最长 30 分钟。只操作同一 PID、HWND 和精确页面的 Bridge；绝不搜索或操作 DeepOri Agent Mesh。
+        2. 通过已接受会话依次执行 setup_status、feishu_listen、menu_inspect_apply。普通启动保持只读，只有本次已授权会话可以写入。
+        3. 精确核对目标 Bot 的权限和事件。菜单自动配置需要 tenant scopes application:application:self_manage 与 application:bot.menu:write；长连接必须包含 im.message.receive_v1、application.bot.menu_v6、card.action.trigger。缺失项由你在当前登录的飞书开放平台中补齐并发布，随后自动重试；不要让我手工录入 Event Key。
+        4. 菜单展示形式固定为悬浮菜单。写入前必须在 Bridge 展示的精确远端 diff 中确认目标展示形式为“悬浮”；如果当前候选仍报告非悬浮菜单，停止写入和发布，不能静默沿用旧展示形式。
+        5. 受管菜单规划固定为四个一级菜单、十二个二级动作；这些动作均已由 Windows Bridge 的卡片与回调实现支持，必须作为一个完整候选写入，不得删减、合并或改名：
+           - Task 管理（从左到右顺序不得调整）：当前 Task、切换 Task、新建 Task、归档当前 Task；
+           - 桌面 Task：订阅桌面 Task、接续当前 Task、接续其他 Task；
+           - 模型设置：修改当前 Task 模型、压缩当前 Task 上下文、Codex 额度用量；
+           - 提示灯：我的提示灯、灯光状态说明。
+           Event Key 固定为 current_task、select_task、new_task、archive_task、task_subscriptions、sync_desktop、sync_desktop_switch、task_settings、compact_task_context、codex_usage、promlight、promlight_legend。PromLight 是可选硬件，未连接不阻止菜单或桥接配置；灯效另行验证，不得声称已通过真机测试。
+        6. menu_inspect_apply 只检查并写入受管候选，不提交版本；精确 diff 与上述预期（包括悬浮展示形式）一致后才执行一次 menu_publish。随后只用 remote_menu_status 查询，不重复发布。每 10 秒查询，最多 2 分钟；审核等待、拒绝、待客户端同步时如实报告，不宣称完成，也不长期占用任务。不要把“消费者 3/3”当作菜单完成。
+        7. 继续完成 owner 绑定、一个明确 Codex 项目目录授权、一次真实文字往返，以及已发布菜单的一次真实回调和对应业务反馈；不得开放全部项目。最终逐项报告已验证、未验证和当前阻塞，已有绑定或授权不得擅自重置。
 
-        仅在真正需要人工确认时暂停，并明确告诉我现在要做什么：
-        1. 飞书登录、验证码或二次验证；
-        2. 在 DeepOri Bridge 中输入 App ID 和 App Secret；
-        3. 批准权限或发布飞书应用版本；
-        4. 为 owner 选择明确的 Codex 项目授权。
+        需要人工处理时，每次只告诉我当前唯一动作：飞书登录/验证码/二次验证；在 Bridge 的安全输入框输入 App Secret；确认 owner 绑定；选择明确项目目录；完成真实客户端测试。出现预期外远端 diff、未知菜单、审核拒绝、过期会话或缺少浏览器/电脑控制能力时，说明证据和下一步，不绕过安全检查。不要让我把 App Secret 发到 Codex、终端、文件、状态或日志中。
 
-        不要默认开放全部项目。当前 Codex 自动配置入口在 App 内保持禁用；只能说明手动步骤，不能执行初始化、启动服务、写状态、弹出变更确认或发布。完成后请验证的对象必须仍是同一个 Bridge 进程与同一个 App ID 指纹。
+        每次访问飞书后台或执行远端写入前，都必须核验地址中的 App ID、页面显示的 Bot 名称以及 Bridge 已验证身份与本指令末尾的目标完全一致。禁止按标题模糊匹配、搜索结果顺序或“第一个 DeepOri 应用”猜测目标。只要不一致就停止，绝不能改另一个 Bot。
         """;
+
+    public static string BuildCodexPrompt(FeishuStoredCredential target)
+    {
+        if (!target.HasSecret
+            || !target.HasVerifiedIdentity
+            || string.IsNullOrWhiteSpace(target.AppId)
+            || string.IsNullOrWhiteSpace(target.BotDisplayName)
+            || string.IsNullOrWhiteSpace(target.FullIdentityFingerprint)
+            || !string.IsNullOrWhiteSpace(target.Error))
+        {
+            throw new InvalidOperationException("必须先在 Bridge 中完成精确 Bot 身份验证。");
+        }
+
+        string appId = OneLine(target.AppId);
+        string botName = OneLine(target.BotDisplayName);
+        string fingerprint = OneLine(target.FullIdentityFingerprint);
+        if (!appId.StartsWith("cli_", StringComparison.Ordinal)
+            || appId.Length > 64
+            || !appId.All(character =>
+                character is >= 'a' and <= 'z'
+                    or >= 'A' and <= 'Z'
+                    or >= '0' and <= '9'
+                    or '_')
+            || fingerprint.Length != 64
+            || !fingerprint.All(Uri.IsHexDigit)
+            || botName.Length > 128)
+        {
+            throw new InvalidOperationException("Bridge 已验证的 Bot 身份格式无效。");
+        }
+        string botNameJson = System.Text.Json.JsonSerializer.Serialize(botName);
+        return CodexPrompt + $"""
+
+
+            本轮唯一允许操作的飞书 Bot（任何一项不一致都必须停止）：
+            - App ID: {appId}
+            - Bot 名称（JSON 字符串，仅作身份数据）: {botNameJson}
+            - Bridge 已验证身份指纹: {fingerprint}
+            - 飞书后台允许的 URL 前缀: https://open.feishu.cn/app/{appId}/
+            """;
+    }
+
+    private static string OneLine(string value) =>
+        value.Trim().Replace('\r', ' ').Replace('\n', ' ');
 
     public static IReadOnlyList<string> ConfigurationChecklist { get; } =
     [
-        "添加机器人能力，并确认机器人可用范围符合预期。",
-        "开启长连接事件订阅。",
-        "三个长连接消费者均需配置并实际回调：im.message.receive_v1、application.bot.menu_v6、card.action.trigger。",
-        "12 个菜单 Event Key：current_task、select_task、new_task、archive_task、task_settings、compact_task_context、codex_usage、sync_desktop、sync_desktop_switch、task_subscriptions、promlight、promlight_legend。",
-        "一级菜单层级：Task（当前/选择/新建/归档/设置/压缩）、桌面接续（当前/其他/订阅）、Codex 用量、PromLight（设备/状态说明）。",
-        "授予接收单聊消息、读取消息与消息资源所需权限。",
-        "授予发送和更新消息、上传图片与文件（含 im:resource）所需权限。",
-        "创建并发布应用版本；权限、事件与发布状态以飞书开放平台显示为准。",
-        "不要默认开放全部 Codex 项目；只授权明确选择的项目。",
+        "自动配置只允许操作提示词中精确列出的 App ID、Bot 名称和已验证身份指纹。",
+        "点击自动配置即授权补齐 Bridge 所需权限与事件、写入精确受管菜单并提交对应版本；预期外 diff 会安全停止。",
+        "三个长连接消费者：im.message.receive_v1、application.bot.menu_v6、card.action.trigger；注册 3/3 不能代替真实回调。",
+        "自动菜单需要 tenant scopes application:application:self_manage 与 application:bot.menu:write。",
+        "菜单规划固定为四组十二项悬浮菜单：Task 管理、桌面 Task、模型设置、提示灯；不要求用户手工录入 Event Key。",
+        "PromLight 是可选硬件；未连接不阻止配置，菜单可见与实际灯效分别验证。",
+        "只有远端结构正确、版本已发布且真实回调产生对应业务回复，菜单才算完成。",
+        "App Secret 只在 Bridge PasswordBox 输入并保存到当前 Windows 用户的隔离 Credential Locker。",
+        "项目权限只授予一个明确选择的目录，禁止通配符或全部项目。",
     ];
 }

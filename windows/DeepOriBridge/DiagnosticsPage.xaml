@@ -4,6 +4,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Loaded="OnLoaded"
+    Unloaded="OnUnloaded"
     KeyDown="OnPageKeyDown"
     AutomationProperties.AutomationId="DeepOriBridge.Diagnostics.Page">
     <Grid AutomationProperties.AutomationId="DeepOriBridge.Diagnostics.Page" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
@@ -28,16 +29,18 @@
         <Grid RowDefinitions="Auto,*">
             <CommandBar Background="Transparent" DefaultLabelPosition="Right">
                 <AppBarButton x:Name="BackButton" AutomationProperties.Name="返回首页" Click="OnBackClicked" Icon="Back" Label="返回" />
-                <AppBarButton x:Name="RefreshButton" AutomationProperties.Name="刷新运行诊断" Click="OnRefreshClicked" Icon="Refresh" Label="重新检查" />
+                <AppBarButton x:Name="RefreshButton" AutomationProperties.Name="刷新运行诊断" Click="OnRefreshClicked" Icon="Refresh" IsEnabled="False" Label="重新检查" />
             </CommandBar>
             <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
-                <Grid x:Name="ContentGrid" MaxWidth="1000" Padding="28,20,28,40" HorizontalAlignment="Stretch">
+                <Grid x:Name="ContentGrid" MaxWidth="1040" Padding="28,20,28,40" HorizontalAlignment="Stretch">
                     <StackPanel Spacing="18">
                         <StackPanel Spacing="6">
-                            <TextBlock AutomationProperties.AutomationId="DeepOriBridge.Diagnostics.Page" FontSize="32" FontWeight="SemiBold" Text="运行诊断" />
+                            <TextBlock AutomationProperties.AutomationId="DeepOriBridge.Diagnostics.Page" Style="{StaticResource BridgePageTitleStyle}" Text="运行诊断" />
                             <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="所有探测均为只读：不会打开数据库正文，不会修改 Codex 状态，也不会创建 Task。" />
                         </StackPanel>
                         <InfoBar x:Name="SummaryStatus" IsClosable="False" IsOpen="True" Message="正在核验本机 Windows Codex 接口…" Severity="Informational" Title="检查中" />
+                        <InfoBar x:Name="ProductIdentityStatus" IsClosable="False" IsOpen="True" Severity="Warning" Title="Windows 包身份仍是开发 Gate" />
+                        <InfoBar x:Name="FeishuConsumerStatus" IsClosable="False" IsOpen="True" Severity="Informational" Title="飞书消费者注册状态" />
                         <Grid ColumnSpacing="14" RowSpacing="14">
                             <Grid.ColumnDefinitions><ColumnDefinition x:Name="DiagnosticsPrimaryColumn" Width="*" /><ColumnDefinition x:Name="DiagnosticsSecondaryColumn" Width="*" /></Grid.ColumnDefinitions>
                             <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>

@@ -1,5 +1,4 @@
 using Microsoft.UI.Xaml;
-using DeepOriBridge.Models;
 
 namespace DeepOriBridge;
 
@@ -18,16 +17,13 @@ public sealed partial class MainWindow : Window
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         AppWindow.SetIcon("Assets/AppIcon.ico");
-        AppWindow.Resize(new Windows.Graphics.SizeInt32(1600, 1000));
+        var workArea = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id,
+            Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea;
+        AppWindow.Resize(new Windows.Graphics.SizeInt32(Math.Min(1600, Math.Max(320, workArea.Width - 32)),
+            Math.Min(1000, Math.Max(320, workArea.Height - 32))));
         AppWindow.Closing += OnAppWindowClosing;
 
-        var services = ((App)Application.Current).Services;
-        FeishuStoredCredential credential = services.FeishuCredentials.Load();
-        bool setupComplete = credential.HasSecret
-            && credential.HasVerifiedIdentity
-            && services.FeishuCredentials.LoadOwnerBinding().IsBound
-            && services.FeishuCredentials.LoadProjectAuthorization().IsAuthorized;
-        RootFrame.Navigate(setupComplete ? typeof(MainPage) : typeof(ConnectionSetupPage));
+        RootFrame.Navigate(typeof(MainPage));
     }
 
     private async void OnAppWindowClosing(
@@ -48,6 +44,7 @@ public sealed partial class MainWindow : Window
         _shutdownStarted = true;
         try
         {
+            Services.BridgeCrashRecovery.Disarm();
             await ((App)Application.Current).Services.ShutdownAsync();
         }
         finally

@@ -13,13 +13,17 @@
                 <VisualState x:Name="Compact">
                     <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="0" /></VisualState.StateTriggers>
                     <VisualState.Setters>
+                        <Setter Target="AdaptiveActionRow1.Orientation" Value="Vertical" />
+                        <Setter Target="AdaptiveActionRow2.Orientation" Value="Vertical" />
+                        <Setter Target="AdaptiveActionRow3.Orientation" Value="Vertical" />
+                        <Setter Target="AdaptiveActionRow4.Orientation" Value="Vertical" />
                         <Setter Target="ContentGrid.Padding" Value="16,18,16,32" />
                         <Setter Target="CredentialPanel.(Grid.Row)" Value="1" />
                         <Setter Target="CredentialPanel.(Grid.Column)" Value="0" />
                         <Setter Target="ConfigurationSecondaryColumn.Width" Value="0" />
                     </VisualState.Setters>
                 </VisualState>
-                <VisualState x:Name="Wide"><VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="760" /></VisualState.StateTriggers></VisualState>
+                <VisualState x:Name="Wide"><VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="900" /></VisualState.StateTriggers></VisualState>
             </VisualStateGroup>
         </VisualStateManager.VisualStateGroups>
         <Grid RowDefinitions="Auto,*">
@@ -31,8 +35,8 @@
                 <Grid x:Name="ContentGrid" MaxWidth="1040" Padding="28,20,28,40" HorizontalAlignment="Stretch">
                     <StackPanel Spacing="18">
                         <StackPanel Spacing="6">
-                            <TextBlock AutomationProperties.AutomationId="DeepOriBridge.Configuration.Page" FontSize="32" FontWeight="SemiBold" Text="配置桥接" />
-                            <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="管理当前 Windows 用户的安全凭据、飞书长连接和 owner-only 人工确认工具。" />
+                            <TextBlock AutomationProperties.AutomationId="DeepOriBridge.Configuration.Page" Style="{StaticResource BridgePageTitleStyle}" Text="配置桥接" />
+                            <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="管理当前 Windows 用户的安全凭据、飞书长连接、使用者和明确项目授权。完成一次性授权后，普通只读消息自动处理。" />
                         </StackPanel>
                         <Grid ColumnSpacing="14" RowSpacing="14">
                             <Grid.ColumnDefinitions><ColumnDefinition x:Name="ConfigurationPrimaryColumn" Width="*" /><ColumnDefinition x:Name="ConfigurationSecondaryColumn" Width="*" /></Grid.ColumnDefinitions>
@@ -42,16 +46,16 @@
                                     <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="飞书消息连接" />
                                     <TextBlock x:Name="FeishuEventStatusText" FontWeight="SemiBold" Text="未连接" />
                                     <TextBlock x:Name="FeishuEventCountText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="尚未收到消息事件。" TextWrapping="Wrap" />
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <Button x:Name="FeishuConnectButton" AutomationProperties.Name="启动飞书连接" Click="OnFeishuConnectClicked" Content="启动连接" Style="{StaticResource AccentButtonStyle}" />
-                                        <Button x:Name="FeishuDisconnectButton" AutomationProperties.Name="停止飞书连接" Click="OnFeishuDisconnectClicked" Content="停止连接" />
+                                    <StackPanel x:Name="AdaptiveActionRow1" Orientation="Horizontal" Spacing="8">
+                                        <Button x:Name="FeishuConnectButton" AutomationProperties.Name="启动飞书连接" Click="OnFeishuConnectClicked" Content="启动连接" IsEnabled="False" Style="{StaticResource AccentButtonStyle}" />
+                                        <Button x:Name="FeishuDisconnectButton" AutomationProperties.Name="停止飞书连接" Click="OnFeishuDisconnectClicked" Content="停止连接" IsEnabled="False" />
                                     </StackPanel>
                                     <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
                                     <TextBlock FontWeight="SemiBold" Text="使用者授权" />
                                     <TextBlock x:Name="FeishuOwnerStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="尚未绑定 owner。" TextWrapping="Wrap" />
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <Button x:Name="FeishuOwnerBindButton" Click="OnFeishuOwnerBindClicked" Content="添加使用者" />
-                                        <Button x:Name="FeishuOwnerClearButton" Click="OnFeishuOwnerClearClicked" Content="撤销全部用户" />
+                                    <StackPanel x:Name="AdaptiveActionRow2" Orientation="Horizontal" Spacing="8">
+                                        <Button x:Name="FeishuOwnerBindButton" Click="OnFeishuOwnerBindClicked" Content="添加使用者" IsEnabled="False" />
+                                        <Button x:Name="FeishuOwnerClearButton" Click="OnFeishuOwnerClearClicked" Content="撤销全部用户" IsEnabled="False" />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
@@ -59,42 +63,36 @@
                                 <StackPanel Spacing="12">
                                     <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="当前 Windows 用户凭据" />
                                     <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="凭据只进入 Windows Credential Locker；App Secret 不回填、不写入配置或日志。" TextWrapping="Wrap" />
-                                    <TextBox x:Name="FeishuAppIdTextBox" AutomationProperties.Name="飞书 App ID" Header="App ID" MaxLength="128" PlaceholderText="cli_…" TextChanged="OnAppIdTextChanged" />
-                                    <PasswordBox x:Name="FeishuAppSecretPasswordBox" AutomationProperties.Name="飞书 App Secret" Header="App Secret" MaxLength="256" PasswordRevealMode="Peek" PlaceholderText="仅在此安全输入" />
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <Button x:Name="FeishuVerifyButton" Click="OnFeishuVerifyClicked" Content="保存并验证" Style="{StaticResource AccentButtonStyle}" />
-                                        <Button x:Name="FeishuClearButton" AutomationProperties.Name="重置本机飞书数据" Click="OnFeishuClearClicked" Content="重置本机飞书数据…" />
+                                    <TextBox x:Name="FeishuAppIdTextBox" AutomationProperties.Name="飞书 App ID" Header="App ID" IsEnabled="False" MaxLength="128" PlaceholderText="cli_…" TextChanged="OnAppIdTextChanged" />
+                                    <PasswordBox x:Name="FeishuAppSecretPasswordBox" AutomationProperties.Name="飞书 App Secret" Header="App Secret" IsEnabled="False" MaxLength="256" PasswordRevealMode="Peek" PlaceholderText="仅在此安全输入" />
+                                    <StackPanel x:Name="AdaptiveActionRow3" Orientation="Horizontal" Spacing="8">
+                                        <Button x:Name="FeishuVerifyButton" Click="OnFeishuVerifyClicked" Content="保存并验证" IsEnabled="False" Style="{StaticResource AccentButtonStyle}" />
+                                        <Button x:Name="FeishuClearButton" AutomationProperties.Name="重置本机飞书数据" Click="OnFeishuClearClicked" Content="重置本机飞书数据…" IsEnabled="False" />
                                     </StackPanel>
                                     <InfoBar x:Name="FeishuCredentialStatus" IsClosable="False" IsOpen="True" Message="正在读取安全存储…" Severity="Informational" Title="凭据状态" />
                                     <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
                                     <TextBlock FontWeight="SemiBold" Text="明确项目授权" />
-                                    <TextBox x:Name="ProjectPathTextBox" AutomationProperties.Name="允许的 Codex 项目目录" Header="项目目录" PlaceholderText="一个明确存在的完整目录路径" TextWrapping="Wrap" />
-                                    <Button x:Name="SaveProjectAuthorizationButton" HorizontalAlignment="Left" Click="OnSaveProjectAuthorizationClicked" Content="保存项目授权" />
+                                    <TextBox x:Name="ProjectPathTextBox" AutomationProperties.Name="允许的 Codex 项目目录" Header="项目目录" IsEnabled="False" PlaceholderText="一个明确存在的完整目录路径" TextWrapping="Wrap" />
+                                    <Button x:Name="SaveProjectAuthorizationButton" HorizontalAlignment="Left" Click="OnSaveProjectAuthorizationClicked" Content="保存项目授权" IsEnabled="False" />
                                     <InfoBar x:Name="ProjectAuthorizationStatus" IsClosable="False" IsOpen="True" Message="不允许空值、通配符或所有项目授权。" Severity="Warning" Title="项目授权尚未完成" />
                                 </StackPanel>
                             </Border>
                         </Grid>
-                        <Expander Header="测试回执与只读 Codex 路由（每次均需本机人工确认）" IsExpanded="False">
+                        <Expander Header="自动只读路由与安全诊断" IsExpanded="False">
                             <StackPanel Padding="0,14,0,4" Spacing="16">
-                                <TextBlock FontWeight="SemiBold" Text="单次 Bot 回执" />
-                                <Button x:Name="FeishuReplyTestButton" HorizontalAlignment="Left" Click="OnFeishuReplyTestClicked" Content="准备下一条回执测试" />
-                                <TextBlock x:Name="FeishuReplyStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="测试回执未准备。" TextWrapping="Wrap" />
+                                <TextBlock FontWeight="SemiBold" Text="自动 Bot 回执" />
+                                <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="已绑定的使用者可直接发送“Windows Bridge 回执测试”；无需先在电脑上点击准备。" TextWrapping="Wrap" />
+                                <TextBlock x:Name="FeishuReplyStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="尚未发送自动回执。" TextWrapping="Wrap" />
                                 <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
-                                <TextBlock FontWeight="SemiBold" Text="通用只读路由" />
-                                <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="捕获下一条以“Windows Codex：”开头的 owner 单聊；核对预览并在 120 秒内点击确认后才创建只读 Task。" TextWrapping="Wrap" />
-                                <TextBox x:Name="FeishuReadOnlyPromptPreview" MinHeight="72" MaxHeight="160" AcceptsReturn="True" AutomationProperties.Name="待授权只读提示词预览" IsReadOnly="True" TextWrapping="Wrap" />
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <Button x:Name="FeishuReadOnlyRouteCaptureButton" Click="OnFeishuReadOnlyRouteCaptureClicked" Content="准备下一条消息" Style="{StaticResource AccentButtonStyle}" />
-                                    <Button x:Name="FeishuReadOnlyRouteExecuteButton" Click="OnFeishuReadOnlyRouteExecuteClicked" Content="确认执行" />
-                                    <Button x:Name="FeishuReadOnlyRouteClearButton" Click="OnFeishuReadOnlyRouteClearClicked" Content="取消" />
-                                </StackPanel>
-                                <TextBlock x:Name="FeishuReadOnlyRouteStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="未准备；不会自动创建 Task 或回复飞书。" TextWrapping="Wrap" />
+                                <TextBlock FontWeight="SemiBold" Text="通用只读路由（自动）" />
+                                <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="已绑定的使用者在单聊中发送“Windows Codex：你的问题”后，Bridge 会在已明确授权的项目中自动创建只读 Codex Task，并把完成文本回复到飞书。凭据、项目授权和写操作仍保留人工 Gate。" TextWrapping="Wrap" />
+                                <TextBlock x:Name="FeishuReadOnlyRouteStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="等待满足 owner 与项目授权的只读消息。" TextWrapping="Wrap" />
                                 <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
                                 <TextBlock FontWeight="SemiBold" Text="固定端到端测试" />
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <Button x:Name="FeishuCodexRouteCaptureButton" Click="OnFeishuCodexRouteCaptureClicked" Content="准备固定测试" />
-                                    <Button x:Name="FeishuCodexRouteExecuteButton" Click="OnFeishuCodexRouteExecuteClicked" Content="确认执行" />
-                                    <Button x:Name="FeishuCodexRouteClearButton" Click="OnFeishuCodexRouteClearClicked" Content="取消" />
+                                <StackPanel x:Name="AdaptiveActionRow4" Orientation="Horizontal" Spacing="8">
+                                    <Button x:Name="FeishuCodexRouteCaptureButton" Click="OnFeishuCodexRouteCaptureClicked" Content="准备固定测试" IsEnabled="False" />
+                                    <Button x:Name="FeishuCodexRouteExecuteButton" Click="OnFeishuCodexRouteExecuteClicked" Content="确认执行" IsEnabled="False" />
+                                    <Button x:Name="FeishuCodexRouteClearButton" Click="OnFeishuCodexRouteClearClicked" Content="取消" IsEnabled="False" />
                                 </StackPanel>
                                 <TextBlock x:Name="FeishuCodexRouteStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="固定测试未准备。" TextWrapping="Wrap" />
                             </StackPanel>

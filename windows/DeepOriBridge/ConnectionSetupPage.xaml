@@ -19,6 +19,10 @@
                         <AdaptiveTrigger MinWindowWidth="0" />
                     </VisualState.StateTriggers>
                     <VisualState.Setters>
+                        <Setter Target="AdaptiveActionRow1.Orientation" Value="Vertical" />
+                        <Setter Target="AdaptiveActionRow2.Orientation" Value="Vertical" />
+                        <Setter Target="AdaptiveActionRow3.Orientation" Value="Vertical" />
+                        <Setter Target="AdaptiveActionRow4.Orientation" Value="Vertical" />
                         <Setter Target="SetupContent.Padding" Value="16,18,16,32" />
                         <Setter Target="ManualChoiceCard.(Grid.Row)" Value="1" />
                         <Setter Target="ManualChoiceCard.(Grid.Column)" Value="0" />
@@ -33,7 +37,7 @@
                 </VisualState>
                 <VisualState x:Name="Wide">
                     <VisualState.StateTriggers>
-                        <AdaptiveTrigger MinWindowWidth="760" />
+                        <AdaptiveTrigger MinWindowWidth="1040" />
                     </VisualState.StateTriggers>
                 </VisualState>
             </VisualStateGroup>
@@ -64,8 +68,36 @@
                     <Grid x:Name="ChoiceView">
                         <StackPanel Spacing="20">
                             <StackPanel Spacing="7">
-                                <TextBlock FontSize="28" FontWeight="SemiBold" Text="选择配置方式" />
-                                <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="你可以让 Codex 协助完成大部分设置，也可以按四步向导自己操作。两种方式使用相同的安全规则。" />
+                                <TextBlock Style="{StaticResource BridgePageTitleStyle}" Text="先连接你的飞书 Bot" />
+                                <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="还没有企业自建应用时，可先打开创建指导和完整清单；Bot 身份验证完成前，所有敏感配置路径与 sidecar 均保持关闭。" />
+                            </StackPanel>
+                            <Border Style="{StaticResource BridgeCardStyle}">
+                                <StackPanel Spacing="12">
+                                    <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="还没有飞书应用？" />
+                                    <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="此只读入口只展示创建企业自建应用的第一步和完整配置清单，不安装 Codex Skill、不签发握手，也不启动任何连接。" />
+                                    <StackPanel x:Name="AdaptiveActionRow1" Orientation="Horizontal" Spacing="8">
+                                        <Button x:Name="OpenApplicationCreationGuidanceButton" AutomationProperties.AutomationId="DeepOriBridge.ConnectionSetup.ApplicationCreationGuidance" AutomationProperties.Name="查看应用创建指导" Click="OnOpenApplicationCreationGuidanceClicked" Content="查看应用创建指导" />
+                                        <Button AutomationProperties.Name="打开飞书开放平台创建应用" Click="OnOpenDeveloperConsoleClicked" Content="打开飞书开放平台" />
+                                        <Button AutomationProperties.Name="查看首次配置完整清单" Click="OnShowChecklistClicked" Content="查看完整清单" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource BridgeCardStyle}">
+                                <StackPanel Spacing="14">
+                                    <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="验证机器人身份" />
+                                    <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="Bridge 会通过飞书官方接口验证 Bot 身份。App Secret 只进入下方 PasswordBox，不会交给 Codex、命令行或配置文件。" />
+                                    <TextBox x:Name="SetupAppIdTextBox" AutomationProperties.Name="飞书 App ID" Header="App ID" MaxLength="128" PlaceholderText="cli_…" TextChanged="OnSetupAppIdTextChanged" />
+                                    <PasswordBox x:Name="SetupAppSecretPasswordBox" AutomationProperties.Name="飞书 App Secret" Header="App Secret" MaxLength="256" PasswordRevealMode="Peek" PlaceholderText="仅在此安全输入" />
+                                    <StackPanel x:Name="AdaptiveActionRow2" Orientation="Horizontal" Spacing="8">
+                                        <Button x:Name="VerifyCredentialButton" AutomationProperties.Name="保存并验证飞书凭据" Click="OnVerifyCredentialClicked" Content="保存并验证" Style="{StaticResource AccentButtonStyle}" />
+                                        <Button x:Name="ClearCredentialButton" AutomationProperties.Name="重置本机飞书数据" Click="OnClearCredentialClicked" Content="重置本机飞书数据…" />
+                                    </StackPanel>
+                                    <InfoBar x:Name="CredentialStatus" IsClosable="False" IsOpen="True" Message="请先完成 Bot 身份验证，再选择配置方式。" Severity="Informational" Title="等待验证" />
+                                </StackPanel>
+                            </Border>
+                            <StackPanel Spacing="7">
+                                <TextBlock FontSize="24" FontWeight="SemiBold" Text="验证后选择配置方式" />
+                                <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="验证成功后，可让 Codex 协助完成后续设置，也可以继续使用四步核对向导。" />
                             </StackPanel>
                             <Grid x:Name="ChoiceCardsGrid" ColumnSpacing="16" RowSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -80,34 +112,42 @@
                                     <StackPanel Spacing="14">
                                         <FontIcon HorizontalAlignment="Left" FontSize="34" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" Glyph="&#xE945;" />
                                         <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="让 Codex 帮我配置" />
-                                        <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="跨应用身份契约正在安全审计。审计通过前，Codex 自动配置保持阻断，避免误操作同机 DeepOri Agent Mesh。" />
+                                        <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="本机预览版会先核验精确 Bridge 进程、窗口、页面与单次握手；不会搜索或操作 DeepOri Agent Mesh。" />
                                         <Border HorizontalAlignment="Left" Style="{StaticResource BridgeBadgeStyle}">
-                                            <TextBlock Text="安全审计阻断" />
+                                            <TextBlock Text="本机预览可用" />
                                         </Border>
-                                        <Button x:Name="ChooseCodexButton" AutomationProperties.Name="Codex 配置因身份审计而禁用" Click="OnChooseCodexClicked" Content="身份审计通过后开放" IsEnabled="False" />
+                                        <Button x:Name="ChooseCodexButton" AutomationProperties.Name="让 Codex 帮我配置" Click="OnChooseCodexClicked" Content="让 Codex 帮我配置" IsEnabled="False" />
                                     </StackPanel>
                                 </Border>
                                 <Border x:Name="ManualChoiceCard" Grid.Column="1" Style="{StaticResource BridgeCardStyle}">
                                     <StackPanel Spacing="14">
                                         <FontIcon HorizontalAlignment="Left" FontSize="34" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" Glyph="&#xE7C9;" />
-                                        <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="我自己手动配置" />
-                                        <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="按照四步向导创建飞书应用、连接凭据、配置机器人，并添加可以使用的飞书账号。" />
+                                        <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="使用引导式配置" />
+                                        <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="按照四步向导核对应用与身份；Bridge 会自动读取、比较并写入受管 Bot 菜单，不需要手工录入 Event Key。" />
                                         <Border HorizontalAlignment="Left" Style="{StaticResource BridgeBadgeStyle}">
                                             <TextBlock Text="适合逐项核对" />
                                         </Border>
-                                        <Button x:Name="ChooseManualButton" AutomationProperties.Name="使用手动向导" Click="OnChooseManualClicked" Content="使用手动向导" />
+                                        <Button x:Name="ChooseManualButton" AutomationProperties.Name="使用引导式向导" Click="OnChooseManualClicked" Content="使用引导式向导" IsEnabled="False" />
                                     </StackPanel>
                                 </Border>
                             </Grid>
-                            <InfoBar IsClosable="False" IsOpen="True" Message="无论选择哪种方式，App Secret 都只在 Bridge 的 PasswordBox 中输入，并由当前 Windows 用户的 Credential Locker 保存。Codex 自动配置当前 fail-closed；请使用右侧手动向导。" Severity="Warning" Title="本机安全边界" />
+                            <InfoBar x:Name="LocalPreviewSecurityStatus" IsClosable="False" IsOpen="True" Message="正在核验精确 Bridge 进程、窗口和首次连接页面。App Secret 只在 Bridge 的 PasswordBox 中输入，Codex 不会读取或记录。" Severity="Informational" Title="正在核验本机预览安全边界" />
                         </StackPanel>
                     </Grid>
 
                     <Grid x:Name="CodexView" Visibility="Collapsed">
                         <StackPanel Spacing="18">
+                            <InfoBar x:Name="CodexAssistedModeStatus" AutomationProperties.Name="Codex 自动配置进行中" IsClosable="False" IsOpen="True" Message="Bridge 已锁定其他配置入口。请只完成 Codex 明确指出的人工 Gate；不要同时返回手动向导或修改配置。" Severity="Informational" Title="Codex 自动配置进行中">
+                                <InfoBar.ActionButton>
+                                    <Button x:Name="ExitCodexAssistedButton" AutomationProperties.Name="退出 Codex 自动配置" Click="OnExitCodexAssistedClicked" Content="退出自动接管" />
+                                </InfoBar.ActionButton>
+                            </InfoBar>
                             <StackPanel Spacing="7">
-                                <TextBlock FontSize="28" FontWeight="SemiBold" Text="把这段指令发给你的 Codex" />
-                                <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="配置助手安装到当前 Windows 用户的 Codex Skills。App Secret 不会进入下面的指令。" />
+                                <StackPanel Orientation="Horizontal" Spacing="12">
+                                    <ProgressRing x:Name="CodexAssistedProgressRing" Width="24" Height="24" IsActive="True" />
+                                    <TextBlock Style="{StaticResource BridgePageTitleStyle}" Text="授权 Codex 完成配置" />
+                                </StackPanel>
+                                <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="配置助手安装到当前 Windows 用户的 Codex Skills。提示词会绑定已验证的唯一 Bot；App Secret 不会进入指令。点击后即授权 Codex 自动补齐预期权限、菜单并提交对应版本。" />
                             </StackPanel>
                             <Grid ColumnSpacing="16" RowSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -121,18 +161,28 @@
                                 <Border Style="{StaticResource BridgeCardStyle}">
                                     <StackPanel Spacing="10">
                                         <TextBlock FontWeight="SemiBold" Text="Windows 专用配置指令" />
-                                        <TextBox x:Name="CodexPromptTextBox" MinHeight="320" AcceptsReturn="True" AutomationProperties.Name="Windows Codex 配置指令" FontFamily="Consolas" IsReadOnly="True" TextWrapping="Wrap" />
+                                        <TextBox x:Name="CodexPromptTextBox" Height="320" AcceptsReturn="True" AutomationProperties.Name="Windows Codex 配置指令" FontFamily="Consolas" IsReadOnly="True" TextWrapping="Wrap" />
                                     </StackPanel>
                                 </Border>
                                 <Border x:Name="CodexSidePanel" Grid.Column="1" Style="{StaticResource BridgeCardStyle}">
                                     <StackPanel Spacing="14">
-                                        <InfoBar x:Name="CodexSkillStatus" IsClosable="False" IsOpen="True" Message="正在准备本地配置助手…" Severity="Informational" Title="准备中" />
-                                        <TextBlock FontWeight="SemiBold" Text="人工 Gate" />
-                                        <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="登录或二次验证；在 Bridge 中输入 Secret；批准权限并发布版本；明确选择项目权限。" />
-                                        <Button x:Name="CopyAndOpenCodexButton" AutomationProperties.Name="复制指令并打开 Codex" Click="OnCopyAndOpenCodexClicked" Content="复制指令并打开 Codex" IsEnabled="False" Style="{StaticResource AccentButtonStyle}" />
-                                        <Button x:Name="CopyCodexPromptButton" AutomationProperties.Name="仅复制指令" Click="OnCopyCodexPromptClicked" Content="仅复制指令" />
-                                        <Button AutomationProperties.Name="改用手动配置" Click="OnChooseManualClicked" Content="改用手动配置" />
-                                        <Button AutomationProperties.Name="返回配置方式选择" Click="OnReturnToChoiceClicked" Content="返回选择" />
+                                        <InfoBar x:Name="CodexSkillStatus" IsClosable="False" IsOpen="True" Message="正在准备本地配置助手…" Severity="Informational" Title="准备中">
+                                            <InfoBar.ActionButton>
+                                                <Button x:Name="OpenPermissionConsoleButton" AutomationProperties.Name="打开飞书权限管理" Click="OnOpenDeveloperConsoleClicked" Content="打开飞书权限管理" Visibility="Collapsed" />
+                                            </InfoBar.ActionButton>
+                                        </InfoBar>
+                                        <TextBlock FontWeight="SemiBold" Text="需要你确认" />
+                                        <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="通常只需处理登录或二次验证、在 Bridge 中输入 Secret，以及明确选择项目目录；预期权限、菜单和版本提交由 Codex 连续完成。" />
+                                         <Button x:Name="CopyAndOpenCodexButton" AutomationProperties.Name="授权自动配置并打开 Codex" Click="OnCopyAndOpenCodexClicked" Content="授权自动配置并打开 Codex" IsEnabled="False" Style="{StaticResource AccentButtonStyle}" />
+                                         <Button x:Name="CopyCodexPromptButton" AutomationProperties.Name="授权并复制指令" Click="OnCopyCodexPromptClicked" Content="授权并复制指令" IsEnabled="False" />
+                                         <Button x:Name="CodexOwnerGateButton" AutomationProperties.Name="添加飞书授权用户" Click="OnCodexOwnerGateClicked" Content="添加飞书授权用户" Visibility="Collapsed" Style="{StaticResource AccentButtonStyle}" />
+                                         <StackPanel x:Name="CodexProjectGatePanel" Spacing="8" Visibility="Collapsed">
+                                             <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="人工 Gate：选择一个明确存在的 Codex 项目目录。" />
+                                             <TextBox x:Name="CodexProjectPathTextBox" AutomationProperties.Name="自动配置允许的 Codex 项目目录" PlaceholderText="完整项目目录路径" />
+                                             <Button AutomationProperties.Name="保存自动配置项目授权" Click="OnSaveCodexProjectAuthorizationClicked" Content="保存项目授权" Style="{StaticResource AccentButtonStyle}" />
+                                         </StackPanel>
+                                         <TextBlock x:Name="CodexRoundTripStatus" Style="{StaticResource BridgeSecondaryTextStyle}" Text="等待身份握手。" TextWrapping="Wrap" />
+                                         <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="需要改用手动配置时，请先点击上方“退出自动接管”；当前 nonce 会立即失效。" TextWrapping="Wrap" />
                                     </StackPanel>
                                 </Border>
                             </Grid>
@@ -142,8 +192,8 @@
                     <Grid x:Name="ManualView" Visibility="Collapsed">
                         <StackPanel Spacing="18">
                             <StackPanel Spacing="7">
-                                <TextBlock FontSize="28" FontWeight="SemiBold" Text="手动配置" />
-                                <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="四步完成飞书应用、Credential Locker、机器人发布与 owner 项目授权。" />
+                                <TextBlock Style="{StaticResource BridgePageTitleStyle}" Text="引导式配置" />
+                                <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="四步完成飞书应用、Credential Locker、自动菜单配置与 owner 项目授权。" />
                             </StackPanel>
                             <ScrollViewer HorizontalScrollBarVisibility="Auto" HorizontalScrollMode="Enabled" VerticalScrollMode="Disabled">
                                 <Grid x:Name="ManualProgressGrid" MinWidth="680" ColumnSpacing="8">
@@ -153,8 +203,8 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
-                                    <Button x:Name="ManualStep1Button" AutomationProperties.Name="第 1 步 创建应用" Click="OnStepButtonClicked" Content="1  创建应用" Tag="1" />
-                                    <Button x:Name="ManualStep2Button" Grid.Column="1" AutomationProperties.Name="第 2 步 连接应用" Click="OnStepButtonClicked" Content="2  连接应用" Tag="2" />
+                                    <Button x:Name="ManualStep1Button" AutomationProperties.Name="第 1 步 核对应用" Click="OnStepButtonClicked" Content="1  核对应用" Tag="1" />
+                                    <Button x:Name="ManualStep2Button" Grid.Column="1" AutomationProperties.Name="第 2 步 核对身份" Click="OnStepButtonClicked" Content="2  核对身份" Tag="2" />
                                     <Button x:Name="ManualStep3Button" Grid.Column="2" AutomationProperties.Name="第 3 步 配置机器人" Click="OnStepButtonClicked" Content="3  配置机器人" Tag="3" />
                                     <Button x:Name="ManualStep4Button" Grid.Column="3" AutomationProperties.Name="第 4 步 添加使用者" Click="OnStepButtonClicked" Content="4  添加使用者" Tag="4" />
                                 </Grid>
@@ -171,41 +221,34 @@
                                 <Border Style="{StaticResource BridgeCardStyle}">
                                     <Grid>
                                         <StackPanel x:Name="ManualStep1Panel" Spacing="14">
-                                            <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="创建企业自建应用" />
-                                            <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="在飞书开放平台创建由你管理的企业自建应用，并确认当前账号拥有应用管理权限。" />
+                                            <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="核对企业自建应用" />
+                                            <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="创建企业自建应用并确认当前账号拥有管理权限。此步骤不会读取凭据、安装 Codex Skill、签发握手或启动 sidecar。" />
                                             <Button AutomationProperties.Name="打开飞书开放平台" Click="OnOpenDeveloperConsoleClicked" Content="打开飞书开放平台" />
                                             <Button AutomationProperties.Name="查看完整配置清单" Click="OnShowChecklistClicked" Content="查看完整配置清单" />
                                             <CheckBox x:Name="Step1Confirmation" Checked="OnCompletionInputChanged" Content="我已创建应用并确认拥有管理权限" />
                                         </StackPanel>
                                         <StackPanel x:Name="ManualStep2Panel" Spacing="14" Visibility="Collapsed">
-                                            <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="连接你的飞书应用" />
-                                            <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="App Secret 只在下方 PasswordBox 中输入，不显示、不写入命令行或文件。" />
-                                            <TextBox x:Name="SetupAppIdTextBox" AutomationProperties.Name="飞书 App ID" Header="App ID" MaxLength="128" PlaceholderText="cli_…" TextChanged="OnSetupAppIdTextChanged" />
-                                            <PasswordBox x:Name="SetupAppSecretPasswordBox" AutomationProperties.Name="飞书 App Secret" Header="App Secret" MaxLength="256" PasswordRevealMode="Peek" PlaceholderText="仅在此安全输入" />
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <Button x:Name="VerifyCredentialButton" AutomationProperties.Name="保存并验证飞书凭据" Click="OnVerifyCredentialClicked" Content="保存并验证" Style="{StaticResource AccentButtonStyle}" />
-                                                <Button x:Name="ClearCredentialButton" AutomationProperties.Name="重置本机飞书数据" Click="OnClearCredentialClicked" Content="重置本机飞书数据…" />
-                                            </StackPanel>
-                                            <InfoBar x:Name="CredentialStatus" IsClosable="False" IsOpen="True" Message="等待验证。" Severity="Informational" Title="连接检查" />
+                                            <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="Bot 身份已验证" />
+                                            <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="App ID 与 App Secret 已在选择配置方式之前完成官方身份验证。Secret 不会在此页回填。" />
+                                            <InfoBar IsClosable="False" IsOpen="True" Message="如果需要更换 Bot 或重新验证凭据，请返回配置方式页面。身份变化会立即废止旧连接、用户绑定和项目授权。" Severity="Success" Title="公共前置检查已完成" />
+                                            <Button AutomationProperties.Name="返回重新验证飞书身份" Click="OnReturnToChoiceClicked" Content="返回重新验证身份" />
                                         </StackPanel>
                                         <StackPanel x:Name="ManualStep3Panel" Spacing="14" Visibility="Collapsed">
-                                            <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="配置机器人并发布" />
-                                            <TextBlock Text="1. 开启机器人能力" />
-                                            <TextBlock Text="2. 添加消息、卡片、菜单事件与所需权限" />
-                                            <TextBlock Text="3. 创建并发布应用版本" />
-                                            <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="Bridge 只能验证 Bot 身份与飞书网络；权限、事件和发布状态仍以开放平台为准。" />
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="自动配置 Bot 菜单并发布" />
+                                            <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="启动连接后，Bridge 会通过飞书官方 API 读取并比较远端菜单；空菜单或仅含 DeepOri 受管键的旧菜单会幂等修复。发现未知自定义菜单或链接时立即停止，不会覆盖。" />
+                                            <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="菜单固定为与 Mac 相同的四组十二项悬浮菜单。点击下方按钮即授权 Bridge 校验、幂等写入并提交这一份精确菜单；发现未知自定义菜单时会安全停止。" />
+                                            <StackPanel x:Name="AdaptiveActionRow3" Orientation="Horizontal" Spacing="8">
+                                                <Button x:Name="StartSetupConnectionButton" AutomationProperties.Name="启动连接并自动配置菜单" Click="OnStartSetupConnectionClicked" Content="启动连接并自动配置菜单" Style="{StaticResource AccentButtonStyle}" />
                                                 <Button Click="OnOpenDeveloperConsoleClicked" Content="打开飞书开放平台" />
                                                 <Button Click="OnShowChecklistClicked" Content="查看完整配置清单" />
                                             </StackPanel>
-                                            <Button x:Name="CheckBotConfigurationButton" AutomationProperties.Name="完成机器人配置并开始检查" Click="OnCheckBotConfigurationClicked" Content="我已完成，开始检查" Style="{StaticResource AccentButtonStyle}" />
-                                            <InfoBar x:Name="BotConfigurationStatus" IsClosable="False" IsOpen="True" Message="完成开放平台设置后执行基础连接检查。" Severity="Informational" Title="等待人工配置" />
+                                            <InfoBar x:Name="BotConfigurationStatus" IsClosable="False" IsOpen="True" Message="等待启动。菜单可用性不会用消费者 3/3 代替。" Severity="Informational" Title="尚未读取远端菜单" />
+                                            <Button x:Name="ConfirmMenuPublishButton" AutomationProperties.Name="重试提交 Bot 菜单版本" Click="OnConfirmMenuPublishClicked" Content="重试提交菜单版本" IsEnabled="False" Visibility="Collapsed" />
                                         </StackPanel>
                                         <StackPanel x:Name="ManualStep4Panel" Spacing="14" Visibility="Collapsed">
                                             <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="添加使用者并授权项目" />
                                             <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="启动长连接后生成随机 6 位一次性验证码。验证码两分钟有效，只接受发送该验证码的飞书单聊用户。" />
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <Button x:Name="StartSetupConnectionButton" AutomationProperties.Name="启动飞书长连接" Click="OnStartSetupConnectionClicked" Content="启动飞书连接" />
+                                            <StackPanel x:Name="AdaptiveActionRow4" Orientation="Horizontal" Spacing="8">
                                                 <Button x:Name="ArmOwnerBindingButton" AutomationProperties.Name="添加飞书授权用户" Click="OnArmOwnerBindingClicked" Content="添加使用者" />
                                                 <Button x:Name="ClearOwnerBindingButton" AutomationProperties.Name="撤销全部飞书用户授权" Click="OnClearOwnerBindingClicked" Content="撤销全部用户" />
                                             </StackPanel>

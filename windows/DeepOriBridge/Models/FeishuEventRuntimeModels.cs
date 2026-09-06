@@ -10,6 +10,22 @@ public enum FeishuEventRuntimeState
     Faulted,
 }
 
+public enum FeishuMenuConfigurationStage
+{
+    NotStarted,
+    Inspecting,
+    Writing,
+    WrittenPendingPublish,
+    Publishing,
+    SubmittedPendingReview,
+    PublishRejected,
+    PublishedPendingClientSync,
+    VisibleVerified,
+    CustomConflict,
+    CapabilityGate,
+    Failed,
+}
+
 public sealed record FeishuEventRuntimeSnapshot(
     FeishuEventRuntimeState State,
     int ReceivedEventCount = 0,
@@ -40,4 +56,22 @@ public sealed record FeishuEventRuntimeSnapshot(
     string? OwnerBindingCode = null,
     DateTimeOffset? OwnerBindingExpiresAt = null,
     int MenuEventCount = 0,
-    int CardActionEventCount = 0);
+    int CardActionEventCount = 0,
+    int RegisteredConsumerCount = 0,
+    int ExpectedConsumerCount = 3,
+    int? LastOwnerBindingTrimmedLength = null,
+    bool? LastOwnerBindingWasSixAsciiDigits = null,
+    bool? LastOwnerBindingMatchedIgnoringExpiry = null,
+    bool? LastOwnerBindingWasUnexpiredAtArrival = null,
+    string? OwnerBindingGeneration = null,
+    bool ReadOnlyRouteExecuting = false,
+    FeishuMenuConfigurationStage MenuConfigurationStage = FeishuMenuConfigurationStage.NotStarted,
+    string? MenuConfigurationDetail = null,
+    string? MenuRemoteDiff = null,
+    string? MenuVersionState = null,
+    string? MenuVersion = null,
+    bool MenuConfigurationBusy = false,
+    bool MenuPublishConfirmationRequired = false,
+    int MenuBusinessReplySentCount = 0,
+    DateTimeOffset? LastMenuBusinessReplyAt = null,
+    string? MenuBusinessReplyError = null);

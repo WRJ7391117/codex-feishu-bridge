@@ -225,7 +225,8 @@ internal sealed class FeishuRouteGateCoordinator : IDisposable
         bool approvedTarget,
         bool ownerMatches,
         DateTimeOffset now,
-        string? projectPath = null)
+        string? projectPath = null,
+        bool allowAutomaticReadOnly = false)
     {
         lock (_sync)
         {
@@ -269,9 +270,11 @@ internal sealed class FeishuRouteGateCoordinator : IDisposable
                     _controlledArmVersion);
                 controlledCaptured = true;
             }
-            else if (_readOnlyArmed
+            else if ((_readOnlyArmed || allowAutomaticReadOnly)
                 && string.Equals(approvedAction, "codex-readonly", StringComparison.Ordinal)
-                && !string.IsNullOrWhiteSpace(readOnlyPrompt))
+                && !string.IsNullOrWhiteSpace(readOnlyPrompt)
+                && (!allowAutomaticReadOnly || !string.IsNullOrWhiteSpace(projectPath))
+                && _readOnlyTicket is null)
             {
                 _readOnlyArmed = false;
                 _readOnlyArmedAtTimestamp = null;

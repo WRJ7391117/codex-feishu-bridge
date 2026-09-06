@@ -12,6 +12,8 @@ windows/**/obj/
 windows/**/AppPackages/
 windows/**/.vs/
 windows/DeepOriBridge/Tools/*.exe
+windows/DeepOriBridge/Tools/*.manifest.json
+windows/DeepOriBridge/Tools/*.g.cs
 
 # Local bridge state and sensitive runtime material
 windows/**/config.json

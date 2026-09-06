@@ -5,12 +5,26 @@ public sealed record FeishuStoredCredential(
     bool HasSecret,
     string? Error = null,
     bool HasVerifiedIdentity = false,
-    string AppFingerprint = "");
+    string AppFingerprint = "",
+    string BotDisplayName = "",
+    string IdentityGeneration = "",
+    string FullIdentityFingerprint = "");
 
 public sealed record FeishuVerificationResult(
     bool Success,
     string Message,
-    int? ExpiresInSeconds = null);
+    int? ExpiresInSeconds = null,
+    string BotDisplayName = "",
+    string IdentityFingerprint = "",
+    bool CredentialWriteSucceeded = false,
+    bool CurrentlyVerified = false);
+
+internal sealed record FeishuRuntimeCredential(
+    string AppId,
+    string Secret,
+    string BotDisplayName,
+    string IdentityFingerprint,
+    string IdentityGeneration);
 
 public sealed record FeishuOwnerBindingState(
     bool IsBound,
