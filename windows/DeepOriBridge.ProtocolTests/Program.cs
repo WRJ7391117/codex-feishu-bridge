@@ -1101,13 +1101,16 @@ Assert(
     && FeishuCurrentTaskCardBuilder.ProjectStatus("running", routeExecuting: false, routePending: false) == "运行中"
     && FeishuCurrentTaskCardBuilder.ProjectStatus("notLoaded", routeExecuting: false, routePending: true) == "等待执行",
     "current Task cards must project Codex transport states into the Mac business statuses");
+var currentCardUpdatedAt = new DateTimeOffset(2026, 9, 4, 14, 56, 0, TimeSpan.FromHours(8));
+string expectedCurrentCardTime = TimeZoneInfo.ConvertTime(currentCardUpdatedAt, TimeZoneInfo.Local)
+    .ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
 using (JsonDocument currentTaskCard = JsonDocument.Parse(FeishuCurrentTaskCardBuilder.Build(
     "Bridge｜总控与集成",
     "Codex-Feishu-Bridge",
     "空闲",
     activeRuns: 0,
     queuedInputs: 0,
-    new DateTimeOffset(2026, 9, 4, 14, 56, 0, TimeSpan.FromHours(8)),
+    currentCardUpdatedAt,
     "11111111111111111111111111111111",
     "22222222222222222222222222222222")))
 {
@@ -1127,7 +1130,7 @@ using (JsonDocument currentTaskCard = JsonDocument.Parse(FeishuCurrentTaskCardBu
     Assert(
         currentTaskBody.Contains("当前状态", StringComparison.Ordinal)
         && currentTaskBody.Contains("空闲", StringComparison.Ordinal)
-        && currentTaskBody.Contains("运行中：0 · 排队：0 · 更新：14:56:00", StringComparison.Ordinal)
+        && currentTaskBody.Contains("运行中：0 · 排队：0 · 更新：" + expectedCurrentCardTime, StringComparison.Ordinal)
         && currentTaskElements[1].GetProperty("name").GetString() == "deepori.card.current.refresh"
         && currentTaskElements[2].GetProperty("name").GetString() == "deepori.card.selector.open"
         && !currentTaskBody.Contains("notLoaded", StringComparison.Ordinal),
