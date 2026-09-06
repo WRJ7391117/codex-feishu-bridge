@@ -1292,7 +1292,7 @@ Assert(
     && !feishuRuntimeSource.Contains("deepori.execute.", StringComparison.Ordinal),
     "menu cards must use one-use owner-bound capabilities, not the shared execute placeholder");
 string bridgeRuntimeSource = File.ReadAllText(Path.Combine(
-    WorkingDirectory, "windows", "DeepOriBridge", "Services", "BridgeRuntime.cs"));
+    WorkingDirectory, "windows", "DeepOriBridge", "Services", "BridgeRuntime.cs")).ReplaceLineEndings("\n");
 Assert(
     bridgeRuntimeSource.Contains("SelectProjectThreadAsync", StringComparison.Ordinal)
     && bridgeRuntimeSource.Contains("GetProjectThreadsAsync(\n            projectRoot", StringComparison.Ordinal)
