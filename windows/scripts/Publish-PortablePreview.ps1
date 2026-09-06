@@ -48,14 +48,21 @@ foreach ($framework in $runtime.runtimeOptions.includedFrameworks) {
 }
 Push-Location (Join-Path $repo 'windows\FeishuEventSidecar')
 try {
-    $modules = @(& go list -m -f '{{.Path}}|{{.Version}}|{{.Dir}}' all)
+    # Enumerate only dependencies actually linked into the shipped sidecar.
+    # `go list -m all` also fetches unrelated transitive test/tool modules.
+    $modules = @(& go list -deps -f '{{if .Module}}{{.Module.Path}}|{{.Module.Version}}|{{.Module.Dir}}{{end}}' . | Sort-Object -Unique)
     if ($LASTEXITCODE -ne 0) { throw 'Cannot collect Go dependency notices.' }
     foreach ($module in $modules) {
         $fields = $module.Split('|')
         if ($fields.Length -eq 3 -and $fields[2]) { Copy-PackageNotices $fields[2] ($fields[0] + '-' + $fields[1]) }
     }
 } finally { Pop-Location }
+Copy-PackageNotices ((& go env GOROOT).Trim()) 'Go-runtime'
 Copy-PackageNotices $repo 'DeepOriBridge'
+if ((& git -C $repo rev-parse HEAD).Trim() -ne $source -or
+    (!$AllowDirtyLocalBuild -and @(& git -C $repo status --porcelain).Count -ne 0)) {
+    throw 'Source changed during publish; no release archive created.'
+}
 & (Join-Path $PSScriptRoot 'New-PortableManifest.ps1') -Directory $payload -SourceCommit $source -SourceDirty:$dirty
 $zip = Join-Path $output 'DeepOriBridge-Windows-x64-unsigned-preview.zip'
 Compress-Archive -LiteralPath $payload -DestinationPath $zip
