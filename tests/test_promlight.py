@@ -271,7 +271,7 @@ class PromLightTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.bridge.set_promlight_task_subscription("ou_member", lamp, "task-x", True)
 
-    def test_task_card_always_shows_add_and_remove_association_actions(self):
+    def test_task_card_separates_add_from_associated_only_removal(self):
         lamp = self.bind("ou_admin", "relay-a", "Desk")
 
         available = self.bridge.build_promlight_task_card(
@@ -283,14 +283,17 @@ class PromLightTests(unittest.TestCase):
             if element.get("tag") == "button"
         }
         self.assertIn("关联这个 Task", buttons)
-        self.assertIn("取消关联这个 Task", buttons)
         self.assertNotIn("disabled", buttons["关联这个 Task"])
         self.assertEqual(
             buttons["关联这个 Task"]["behaviors"][0]["value"]["action"],
             "promlight_add_task",
         )
-        self.assertTrue(buttons["取消关联这个 Task"]["disabled"])
-        self.assertNotIn("behaviors", buttons["取消关联这个 Task"])
+        self.assertFalse(
+            any(
+                element.get("tag") == "form"
+                for element in available["body"]["elements"]
+            )
+        )
 
         self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-a", True)
         associated = self.bridge.build_promlight_task_card(
@@ -303,11 +306,292 @@ class PromLightTests(unittest.TestCase):
         }
         self.assertTrue(buttons["关联这个 Task"]["disabled"])
         self.assertNotIn("behaviors", buttons["关联这个 Task"])
-        self.assertNotIn("disabled", buttons["取消关联这个 Task"])
+        self.assertIn("取消全部关联", buttons)
         self.assertEqual(
-            buttons["取消关联这个 Task"]["behaviors"][0]["value"]["action"],
-            "promlight_remove_task",
+            buttons["取消全部关联"]["behaviors"][0]["value"]["action"],
+            "promlight_remove_all_tasks",
         )
+        self.assertGreater(
+            buttons["取消全部关联"]["behaviors"][0]["value"][
+                "lamp_revision"
+            ],
+            0,
+        )
+        form = next(
+            element
+            for element in associated["body"]["elements"]
+            if element.get("tag") == "form"
+        )
+        selector = next(
+            element
+            for element in form["elements"]
+            if element.get("tag") == "multi_select_static"
+        )
+        self.assertEqual(
+            [option["value"] for option in selector["options"]],
+            ["task-a"],
+        )
+        self.assertEqual(
+            next(
+                element
+                for element in form["elements"]
+                if element.get("tag") == "button"
+            )["name"],
+            "promlight_remove_selected_tasks",
+        )
+
+    def test_remove_selected_tasks_uses_only_the_associated_task_list(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-a", True)
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-x", True)
+        with self.bridge._state_lock:
+            state = self.bridge.load_state()
+            card = self.bridge.build_promlight_task_card("ou_admin", lamp, state)
+            self.bridge.remember_card_context(
+                state,
+                "ou_admin",
+                "om_remove_selected",
+                card,
+                "promlight_tasks",
+            )
+        self.bridge.patch_promlight_event_card = mock.Mock()
+
+        handled = self.bridge.handle_promlight_button_action(
+            {
+                "operator_id": "ou_admin",
+                "message_id": "om_remove_selected",
+                "action_tag": "button",
+                "action_name": "promlight_remove_selected_tasks",
+                "form_value": json.dumps(
+                    {"promlight_remove_task_ids": ["task-a"]}
+                ),
+            },
+            {},
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            self.bridge.load_state()["promlight"]["lamps"][lamp]["task_ids"],
+            ["task-x"],
+        )
+        self.assertEqual(self.bridge.patch_promlight_event_card.call_count, 2)
+        processing = self.bridge.patch_promlight_event_card.call_args_list[0].args[2]
+        form = next(
+            element
+            for element in processing["body"]["elements"]
+            if element.get("tag") == "form"
+        )
+        submit = next(
+            element
+            for element in form["elements"]
+            if element.get("tag") == "button"
+        )
+        self.assertEqual(submit["text"]["content"], "正在处理…")
+        self.assertTrue(submit["disabled"])
+
+    def test_remove_all_tasks_clears_the_lamp_in_one_action(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-a", True)
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-x", True)
+        card = self.bridge.build_promlight_task_card(
+            "ou_admin", lamp, self.bridge.load_state()
+        )
+        button = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "button"
+            and element.get("text", {}).get("content") == "取消全部关联"
+        )
+        payload = button["behaviors"][0]["value"]
+        self.bridge.patch_promlight_event_card = mock.Mock()
+
+        handled = self.bridge.handle_promlight_button_action(
+            {"operator_id": "ou_admin", "message_id": "om_remove_all"},
+            payload,
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            self.bridge.load_state()["promlight"]["lamps"][lamp]["task_ids"],
+            [],
+        )
+        final = json.dumps(
+            self.bridge.patch_promlight_event_card.call_args_list[-1].args[2],
+            ensure_ascii=False,
+        )
+        self.assertIn("已取消关联 2 个 Task", final)
+
+    def test_stale_remove_all_card_does_not_remove_newer_associations(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-a", True)
+        old_card = self.bridge.build_promlight_task_card(
+            "ou_admin", lamp, self.bridge.load_state()
+        )
+        old_button = next(
+            element
+            for element in old_card["body"]["elements"]
+            if element.get("tag") == "button"
+            and element.get("text", {}).get("content") == "取消全部关联"
+        )
+        old_payload = old_button["behaviors"][0]["value"]
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-x", True)
+        self.bridge.patch_promlight_event_card = mock.Mock()
+
+        handled = self.bridge.handle_promlight_button_action(
+            {"operator_id": "ou_admin", "message_id": "om_stale_remove_all"},
+            old_payload,
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            self.bridge.load_state()["promlight"]["lamps"][lamp]["task_ids"],
+            ["task-a", "task-x"],
+        )
+        self.assertEqual(self.bridge.patch_promlight_event_card.call_count, 1)
+        rendered = json.dumps(
+            self.bridge.patch_promlight_event_card.call_args.args[2],
+            ensure_ascii=False,
+        )
+        self.assertIn("关联列表已变化，请重新选择", rendered)
+
+    def test_catalog_filter_invalidates_an_older_remove_all_card(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-a", True)
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-x", True)
+        old_card = self.bridge.build_promlight_task_card(
+            "ou_admin", lamp, self.bridge.load_state()
+        )
+        old_payload = next(
+            element
+            for element in old_card["body"]["elements"]
+            if element.get("tag") == "button"
+            and element.get("text", {}).get("content") == "取消全部关联"
+        )["behaviors"][0]["value"]
+        previous_revision = old_payload["lamp_revision"]
+
+        self.tasks["ou_admin"] = [self.tasks["ou_admin"][0]]
+        self.bridge.build_promlight_task_card(
+            "ou_admin", lamp, self.bridge.load_state()
+        )
+        filtered = self.bridge.load_state()["promlight"]["lamps"][lamp]
+        self.assertEqual(filtered["task_ids"], ["task-a"])
+        self.assertGreater(filtered["revision"], previous_revision)
+        self.bridge.patch_promlight_event_card = mock.Mock()
+
+        handled = self.bridge.handle_promlight_button_action(
+            {"operator_id": "ou_admin", "message_id": "om_filtered_remove_all"},
+            old_payload,
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            self.bridge.load_state()["promlight"]["lamps"][lamp]["task_ids"],
+            ["task-a"],
+        )
+        rendered = json.dumps(
+            self.bridge.patch_promlight_event_card.call_args.args[2],
+            ensure_ascii=False,
+        )
+        self.assertIn("关联列表已变化，请重新选择", rendered)
+
+    def test_stale_remove_selected_form_does_not_remove_newer_associations(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-a", True)
+        with self.bridge._state_lock:
+            state = self.bridge.load_state()
+            old_card = self.bridge.build_promlight_task_card("ou_admin", lamp, state)
+            self.bridge.remember_card_context(
+                state,
+                "ou_admin",
+                "om_stale_selected",
+                old_card,
+                "promlight_tasks",
+            )
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-x", True)
+        self.bridge.patch_promlight_event_card = mock.Mock()
+
+        handled = self.bridge.handle_promlight_button_action(
+            {
+                "operator_id": "ou_admin",
+                "message_id": "om_stale_selected",
+                "action_name": "promlight_remove_selected_tasks",
+                "form_value": json.dumps(
+                    {"promlight_remove_task_ids": ["task-a"]}
+                ),
+            },
+            {},
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            self.bridge.load_state()["promlight"]["lamps"][lamp]["task_ids"],
+            ["task-a", "task-x"],
+        )
+        rendered = json.dumps(
+            self.bridge.patch_promlight_event_card.call_args.args[2],
+            ensure_ascii=False,
+        )
+        self.assertIn("关联列表已变化，请重新选择", rendered)
+
+    def test_bulk_remove_fails_closed_for_another_user_or_missing_context(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-a", True)
+        card = self.bridge.build_promlight_task_card(
+            "ou_admin", lamp, self.bridge.load_state()
+        )
+        remove_all = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "button"
+            and element.get("text", {}).get("content") == "取消全部关联"
+        )["behaviors"][0]["value"]
+        self.bridge.patch_promlight_event_card = mock.Mock()
+
+        self.bridge.handle_promlight_button_action(
+            {"operator_id": "ou_member", "message_id": "om_cross_user"},
+            remove_all,
+        )
+        self.bridge.handle_promlight_button_action(
+            {
+                "operator_id": "ou_admin",
+                "message_id": "om_missing_context",
+                "action_name": "promlight_remove_selected_tasks",
+                "form_value": json.dumps(
+                    {"promlight_remove_task_ids": ["task-a"]}
+                ),
+            },
+            {},
+        )
+
+        self.assertEqual(
+            self.bridge.load_state()["promlight"]["lamps"][lamp]["task_ids"],
+            ["task-a"],
+        )
+
+    def test_batch_remove_saves_and_refreshes_once(self):
+        lamp = self.bind("ou_admin", "relay-a", "Desk")
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-a", True)
+        self.bridge.set_promlight_task_subscription("ou_admin", lamp, "task-x", True)
+        revision = self.bridge.load_state()["promlight"]["lamps"][lamp]["revision"]
+
+        with mock.patch.object(
+            self.bridge,
+            "save_state",
+            wraps=self.bridge.save_state,
+        ) as save, mock.patch.object(
+            self.bridge,
+            "refresh_promlight_lamp",
+        ) as refresh:
+            removed = self.bridge.remove_promlight_task_subscriptions(
+                "ou_admin",
+                lamp,
+                ["task-a", "task-x"],
+                revision,
+            )
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(save.call_count, 1)
+        refresh.assert_called_once_with(lamp, force=True)
 
     def test_project_selector_without_action_name_refreshes_task_options(self):
         lamp = self.bind("ou_admin", "relay-a", "Desk")
@@ -563,7 +847,8 @@ class PromLightTests(unittest.TestCase):
         self.assertIn("正在处理…", processing_json)
         self.assertIn('"disabled": true', processing_json)
         self.assertIn("已关联这个 Task", final_json)
-        self.assertIn("取消关联这个 Task", final_json)
+        self.assertIn("取消选中的关联", final_json)
+        self.assertIn("取消全部关联", final_json)
         self.assertNotIn("取消关注这个 Task", final_json)
         self.assertEqual(
             self.bridge.load_state()["promlight"]["lamps"][lamp]["task_ids"],

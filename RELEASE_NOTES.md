@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.11.14 (build 94)
+
+- Separates PromLight Task association from removal: adding still uses the authorized Task catalog, while removal lists only Tasks already associated with the selected light.
+- Supports selecting and removing multiple associated Tasks in one action, plus a confirmed “remove all associations” action.
+- Disables the submitted control while processing and rejects stale removal cards so a newly added or permission-filtered association cannot be removed accidentally.
+
 ## 1.11.13 (build 93)
 
 - Replaces the App's custom GitHub Release discovery loop with Sparkle 2.9.6, using a signed appcast and launch or Bridge-event-triggered checks, without scheduled polling.

@@ -955,6 +955,36 @@ def set_promlight_task_subscription(
     return enabled
 
 
+def remove_promlight_task_subscriptions(
+    user_id: str,
+    lamp_id: str,
+    task_ids: list[str],
+    expected_revision: int,
+) -> int:
+    requested_ids = {str(value) for value in task_ids if str(value)}
+    with _state_lock:
+        state = load_state()
+        lamp = owned_promlight_lamp(state, user_id, lamp_id)
+        if int(lamp.get("revision") or 0) != expected_revision:
+            raise ValueError("提示灯关联列表已变化")
+        previous_ids = [str(value) for value in lamp.get("task_ids", []) if str(value)]
+        remaining_ids = [task_id for task_id in previous_ids if task_id not in requested_ids]
+        removed_count = len(previous_ids) - len(remaining_ids)
+        if not removed_count:
+            return 0
+        lamp["task_ids"] = remaining_ids
+        lamp["revision"] = int(lamp.get("revision") or 0) + 1
+        if remaining_ids:
+            lamp["pending_idle"] = False
+        else:
+            lamp["pending_idle"] = True
+            lamp["next_retry_at"] = 0
+        promlight_state(state)["selected_lamps"][user_id] = lamp_id
+        save_state(state)
+    refresh_promlight_lamp(lamp_id, force=True)
+    return removed_count
+
+
 def aggregate_promlight_status(statuses: list[str]) -> str:
     effective = [status for status in statuses if status in PROMLIGHT_STATUS_PRIORITY]
     if not effective:
@@ -7985,6 +8015,7 @@ def promlight_button(
     *,
     lamp_id: str = "",
     task_id: str = "",
+    lamp_revision: int | None = None,
     style: str = "default",
     confirm: tuple[str, str] | None = None,
     disabled: bool = False,
@@ -7994,6 +8025,8 @@ def promlight_button(
         value["lamp_id"] = lamp_id
     if task_id:
         value["task_id"] = task_id
+    if lamp_revision is not None:
+        value["lamp_revision"] = lamp_revision
     button: dict[str, Any] = {
         "tag": "button",
         "text": {"tag": "plain_text", "content": text},
@@ -8019,19 +8052,24 @@ def promlight_action_processing_card(
     elements = processing_card.get("body", {}).get("elements", [])
     if not isinstance(elements, list):
         return processing_card
+    candidates = list(elements)
     for element in elements:
+        if isinstance(element, dict) and element.get("tag") == "form":
+            nested = element.get("elements")
+            if isinstance(nested, list):
+                candidates.extend(nested)
+    for element in candidates:
         if not isinstance(element, dict) or element.get("tag") != "button":
             continue
         callbacks = element.get("behaviors")
-        if not isinstance(callbacks, list):
-            continue
-        if not any(
+        callback_matches = isinstance(callbacks, list) and any(
             isinstance(callback, dict)
             and callback.get("type") == "callback"
             and isinstance(callback.get("value"), dict)
             and callback["value"].get("action") == action
             for callback in callbacks
-        ):
+        )
+        if element.get("name") != action and not callback_matches:
             continue
         element["text"] = {"tag": "plain_text", "content": "正在处理…"}
         element["type"] = "default"
@@ -8269,7 +8307,11 @@ def build_promlight_task_card(
     lamp = owned_promlight_lamp(state, user_id, lamp_id)
     tasks = recent_tasks(user_id)
     valid_ids = {task["id"] for task in tasks}
-    lamp["task_ids"] = [task_id for task_id in lamp.get("task_ids", []) if task_id in valid_ids]
+    previous_task_ids = [str(task_id) for task_id in lamp.get("task_ids", []) if str(task_id)]
+    lamp["task_ids"] = [task_id for task_id in previous_task_ids if task_id in valid_ids]
+    if lamp["task_ids"] != previous_task_ids:
+        lamp["revision"] = int(lamp.get("revision") or 0) + 1
+    subscribed = [task for task in tasks if task["id"] in lamp.get("task_ids", [])]
     projects = list(dict.fromkeys(task["project"] for task in tasks))
     active_project = str(namespace["selected_projects"].get(user_id) or "")
     if active_project not in projects:
@@ -8291,10 +8333,11 @@ def build_promlight_task_card(
             "content": (
                 (f"✅ **{card_markdown_escape(change)}**\n\n" if change else "")
                 + f"正在管理：**{card_markdown_escape(str(lamp.get('name') or 'PromLight'))}**\n"
-                "只有这里显式关联的 Task 会影响这盏灯。保存时会再次校验项目权限和归档状态。"
+                "新增时从授权项目中选择；取消时只显示这盏灯已关联的 Task。"
             ),
         }
     ]
+    elements.append({"tag": "markdown", "content": "**新增关联**"})
     if projects:
         elements.append(
             {
@@ -8332,8 +8375,7 @@ def build_promlight_task_card(
         if selected:
             elements.append(task_identity_element(selected))
         associated = selected_id in lamp.get("task_ids", [])
-        elements.extend(
-            [
+        elements.append(
             promlight_button(
                 "关联这个 Task",
                 "promlight_add_task",
@@ -8341,19 +8383,10 @@ def build_promlight_task_card(
                 task_id=selected_id,
                 style="primary_filled",
                 disabled=associated,
-            ),
-            promlight_button(
-                "取消关联这个 Task",
-                "promlight_remove_task",
-                lamp_id=lamp_id,
-                task_id=selected_id,
-                disabled=not associated,
-            ),
-            ]
+            )
         )
     else:
         elements.append({"tag": "markdown", "content": "当前项目没有可关联的 Task。"})
-    subscribed = [task for task in tasks if task["id"] in lamp.get("task_ids", [])]
     elements.append(
         {
             "tag": "markdown",
@@ -8367,6 +8400,61 @@ def build_promlight_task_card(
             ),
         }
     )
+    if subscribed:
+        elements.extend(
+            [
+                {
+                    "tag": "form",
+                    "name": "promlight_remove_tasks_form",
+                    "direction": "vertical",
+                    "vertical_spacing": "12px",
+                    "elements": [
+                        {
+                            "tag": "multi_select_static",
+                            "name": "promlight_remove_task_ids",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "选择要取消关联的 Task",
+                            },
+                            "options": [
+                                {
+                                    "text": {
+                                        "tag": "plain_text",
+                                        "content": task_selector_option_text(task),
+                                    },
+                                    "value": task["id"],
+                                }
+                                for task in subscribed
+                            ],
+                            "required": True,
+                            "width": "fill",
+                        },
+                        {
+                            "tag": "button",
+                            "name": "promlight_remove_selected_tasks",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "取消选中的关联",
+                            },
+                            "type": "danger_filled",
+                            "width": "fill",
+                            "form_action_type": "submit",
+                        },
+                    ],
+                },
+                promlight_button(
+                    "取消全部关联",
+                    "promlight_remove_all_tasks",
+                    lamp_id=lamp_id,
+                    lamp_revision=int(lamp.get("revision") or 0),
+                    style="danger",
+                    confirm=(
+                        "确认取消全部关联？",
+                        f"将取消这盏灯已关联的 {len(subscribed)} 个 Task。",
+                    ),
+                ),
+            ]
+        )
     elements.extend(
         [
             promlight_button("返回我的提示灯", "show_promlight"),
@@ -9019,6 +9107,27 @@ def promlight_card_lamp_id(card: dict[str, Any] | None) -> str:
     return ""
 
 
+def promlight_card_lamp_revision(card: dict[str, Any] | None) -> int:
+    if not isinstance(card, dict):
+        return 0
+    for element in card.get("body", {}).get("elements", []):
+        if not isinstance(element, dict) or element.get("tag") != "button":
+            continue
+        for behavior in element.get("behaviors", []):
+            if not isinstance(behavior, dict):
+                continue
+            value = behavior.get("value")
+            if not isinstance(value, dict):
+                continue
+            try:
+                revision = int(value.get("lamp_revision") or 0)
+            except (TypeError, ValueError):
+                revision = 0
+            if revision > 0:
+                return revision
+    return 0
+
+
 def task_card_with_notice(card: dict[str, Any], notice: str) -> dict[str, Any]:
     elements = card.get("body", {}).get("elements", [])
     if isinstance(elements, list):
@@ -9062,6 +9171,11 @@ def remember_card_context(
             else ""
         ),
         "lamp_id": promlight_card_lamp_id(card) if context_type == "promlight_tasks" else "",
+        "lamp_revision": (
+            promlight_card_lamp_revision(card)
+            if context_type == "promlight_tasks"
+            else 0
+        ),
         "project": (
             promlight_card_active_project(card)
             if context_type == "promlight_tasks"
@@ -11156,6 +11270,17 @@ def action_payload(event: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def card_form_payload(event: dict[str, Any]) -> dict[str, Any]:
+    value = event.get("form_value")
+    if isinstance(value, dict):
+        return value
+    try:
+        payload = json.loads(str(value or ""))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def patch_promlight_event_card(
     event: dict[str, Any],
     user_id: str,
@@ -11183,6 +11308,8 @@ def handle_promlight_button_action(
     payload: dict[str, Any],
 ) -> bool:
     action = str(payload.get("action") or "")
+    if not action and event.get("action_name") == "promlight_remove_selected_tasks":
+        action = "promlight_remove_selected_tasks"
     recognized = {
         "show_promlight",
         "promlight_refresh",
@@ -11190,6 +11317,8 @@ def handle_promlight_button_action(
         "promlight_manage_tasks",
         "promlight_add_task",
         "promlight_remove_task",
+        "promlight_remove_selected_tasks",
+        "promlight_remove_all_tasks",
         "promlight_toggle_task",
         "promlight_set_default",
         "promlight_start_rename",
@@ -11202,6 +11331,17 @@ def handle_promlight_button_action(
         return False
     user_id = str(event.get("operator_id") or "")
     lamp_id = str(payload.get("lamp_id") or "")
+    expected_revision_value: Any = payload.get("lamp_revision")
+    if action == "promlight_remove_selected_tasks" and not lamp_id:
+        with _state_lock:
+            context = card_context_details(
+                load_state(),
+                user_id,
+                str(event.get("message_id") or ""),
+            )
+        if context.get("type") == "promlight_tasks":
+            lamp_id = str(context.get("lamp_id") or "")
+            expected_revision_value = context.get("lamp_revision")
     if action in {"promlight_local_pairing", "promlight_mobile_pairing"}:
         reconcile_promlight_state()
         with _state_lock:
@@ -11252,6 +11392,61 @@ def handle_promlight_button_action(
             build_promlight_device_settings_card(lamp_copy),
             "promlight_device",
         )
+        return True
+    if action in {"promlight_remove_selected_tasks", "promlight_remove_all_tasks"}:
+        try:
+            expected_revision = int(expected_revision_value or 0)
+        except (TypeError, ValueError):
+            expected_revision = 0
+        if expected_revision <= 0 or int(lamp_copy.get("revision") or 0) != expected_revision:
+            with _state_lock:
+                state = load_state()
+                card = build_promlight_task_card(
+                    user_id,
+                    lamp_id,
+                    state,
+                    "关联列表已变化，请重新选择后再取消",
+                )
+            patch_promlight_event_card(event, user_id, card, "promlight_tasks")
+            return True
+        if action == "promlight_remove_all_tasks":
+            task_ids = [str(value) for value in lamp_copy.get("task_ids", []) if str(value)]
+        else:
+            selected_values = card_form_payload(event).get("promlight_remove_task_ids")
+            task_ids = (
+                [str(value) for value in selected_values if str(value)]
+                if isinstance(selected_values, list)
+                else []
+            )
+        with _state_lock:
+            state = load_state()
+            processing_card = promlight_action_processing_card(
+                build_promlight_task_card(user_id, lamp_id, state),
+                action,
+            )
+        patch_promlight_event_card(
+            event,
+            user_id,
+            processing_card,
+        )
+        try:
+            removed_count = remove_promlight_task_subscriptions(
+                user_id,
+                lamp_id,
+                task_ids,
+                expected_revision,
+            )
+            change = (
+                f"已取消关联 {removed_count} 个 Task"
+                if removed_count
+                else "没有选择已关联的 Task"
+            )
+        except ValueError:
+            change = "关联列表已变化，请重新选择后再取消"
+        with _state_lock:
+            state = load_state()
+            card = build_promlight_task_card(user_id, lamp_id, state, change)
+        patch_promlight_event_card(event, user_id, card, "promlight_tasks")
         return True
     if action in {"promlight_add_task", "promlight_remove_task", "promlight_toggle_task"}:
         task_id = str(payload.get("task_id") or "")
@@ -15171,6 +15366,8 @@ def ui_intent_key(event: dict[str, Any]) -> str:
     if action_tag != "button":
         return ""
     action = str(action_payload(event).get("action") or "")
+    if not action and action_name == "promlight_remove_selected_tasks":
+        action = action_name
     if action in {
         "task_page",
         "archived_task_page",
@@ -15193,6 +15390,8 @@ def ui_intent_key(event: dict[str, Any]) -> str:
         "show_promlight",
         "promlight_refresh",
         "promlight_manage_tasks",
+        "promlight_remove_selected_tasks",
+        "promlight_remove_all_tasks",
     }:
         return f"{user_id}:{message_id}:{action}"
     return ""
