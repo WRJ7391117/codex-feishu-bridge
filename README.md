@@ -92,7 +92,7 @@ App 已内置桥接所需的专用 `lark-cli`；普通用户无需先安装命�
 
 从 [Releases](https://github.com/WRJ7391117/codex-feishu-bridge/releases) 下载 `Codex-Feishu-Bridge-macOS-universal.zip`，解压后把 `Codex 飞书桥接.app` 拖入“应用程序”。
 
-若 Release 标注为 ad-hoc 签名且未经过 Apple 公证，另一台 Mac 首次打开时请在 Finder 中右键 App →“打开”。不要用脚本移除系统隔离属性。构建流程已支持 Developer ID 签名与 Apple 公证，是否已签名以对应 Release 说明和 `codesign` 验证结果为准。
+当前 Release 使用 ad-hoc 签名且不经过 Apple 公证，另一台 Mac 首次打开时请在 Finder 中右键 App →“打开”。不要用脚本移除系统隔离属性。
 
 ### 3. 添加飞书 Bot，再使用首次连接向导
 
@@ -234,7 +234,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 `install-local.sh` 会重新构建并先安全更新 LaunchAgent 实际使用的运行脚本，再复制 App；存在活动飞书运行或待处理队列时会拒绝覆盖。
 
-使用 Developer ID 和 Keychain 中的 notarytool Profile 构建正式公证包：
+将来如需恢复 Apple Developer 发布，可使用 Developer ID 和 Keychain 中的 notarytool Profile 构建公证包：
 
 ```bash
 CODE_SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
@@ -242,9 +242,9 @@ NOTARY_PROFILE="codex-feishu-notary" \
 ./scripts/build-app.sh
 ```
 
-没有这两个凭证时构建脚本只生成 ad-hoc 包，不会伪装成已公证。每次构建同时生成 `.sha256` 和 `update.json`；Release 工作流从 `MACOS_CERTIFICATE_P12_BASE64`、`MACOS_CERTIFICATE_PASSWORD`、`MACOS_CODE_SIGN_IDENTITY`、`APPLE_NOTARY_KEY_P8_BASE64`、`APPLE_NOTARY_KEY_ID`、`APPLE_NOTARY_ISSUER_ID` 导入一次性签名/公证 Keychain，再使用 `SPARKLE_PRIVATE_KEY` 生成 `appcast.xml`，结束时删除 runner 上的临时凭据。同一 Sparkle 私钥的恢复副本只保存在发布 Mac 的登录 Keychain，不写入仓库或日志。
+没有这两个凭证时构建脚本生成 ad-hoc 包，不会伪装成已公证。每次构建同时生成 `.sha256` 和 `update.json`。当前 Release 工作流使用 ad-hoc 签名，并继续通过 `SPARKLE_PRIVATE_KEY` 生成签名 `appcast.xml`；Sparkle 私钥不写入仓库或日志。
 
-发布时由版本标签触发 `.github/workflows/release.yml`，该工作流是 GitHub Release 的唯一发布入口。发布者只提交并推送版本代码，再推送与 App 版本一致的 `vX.Y.Z` 标签；不要提前手动执行 `gh release create`。工作流在 Developer ID 或公证凭据不可用时直接失败；凭据齐备时先创建并校验草稿 Release，再公开，且拒绝覆盖同版本的签名资产。`update.json` 与旧更新助手暂时保留，用于 `1.11.12` 升级到首个 Sparkle 版本。
+发布时由版本标签触发 `.github/workflows/release.yml`，该工作流是 GitHub Release 的唯一发布入口。发布者只提交并推送版本代码，再推送与 App 版本一致的 `vX.Y.Z` 标签；不要提前手动执行 `gh release create`。工作流会构建并验证 ad-hoc Universal App，生成签名 appcast，先创建并校验草稿 Release，再公开，且拒绝覆盖同版本资产。`update.json` 与旧更新助手暂时保留，用于 `1.11.12` 升级到首个 Sparkle 版本。
 
 构建产物：
 

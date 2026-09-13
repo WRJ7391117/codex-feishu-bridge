@@ -27,7 +27,7 @@ Updated: 2026-09-03
 | Apple Silicon clean account | macOS 13+ | no clean-account install evidence yet | Not tested |
 | Intel Mac | macOS 13+ | x86_64 binary exists; no real Intel launch evidence | Not tested |
 | Gatekeeper | ad-hoc Release download | documented Finder right-click Open path | Not tested on another Mac |
-| Signed/notarized package | Developer ID | build path exists; six Developer ID/notarization GitHub Secrets are still missing | Blocked by credential |
+| Signed/notarized package | Developer ID | not required for the current ad-hoc Release path | Out of current scope |
 | Keep-data uninstall | isolated temporary home | runtime removed; config and state preserved | Pass |
 | Full purge | isolated temporary home | cancellation before change is tested; real Profile purge is not exercised | Partial |
 | GitHub CI | macOS runner | implementation commit `fc04752` passed tests, type-check, Universal build, and package verification in run `33694636004` | Pass |

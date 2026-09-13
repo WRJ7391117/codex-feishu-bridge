@@ -5,6 +5,7 @@
 - Separates PromLight Task association from removal: adding still uses the authorized Task catalog, while removal lists only Tasks already associated with the selected light.
 - Supports selecting and removing multiple associated Tasks in one action, plus a confirmed “remove all associations” action.
 - Disables the submitted control while processing and rejects stale removal cards so a newly added or permission-filtered association cannot be removed accidentally.
+- Publishes the current macOS package with ad-hoc signing and a signed Sparkle appcast; Apple Developer ID signing and notarization are not required for this release.
 
 ## 1.11.13 (build 93)
 
