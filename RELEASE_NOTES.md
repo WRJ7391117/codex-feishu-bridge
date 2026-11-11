@@ -1,5 +1,13 @@
 # Release Notes
 
+## 1.11.15 (build 95)
+
+- Separates Task subscription addition from removal: adding uses the authorized Task catalog, while removal lists only the current user's subscribed Tasks and supports multi-select or confirmed removal of all subscriptions.
+- Rejects stale subscription cards and disables submitted controls while processing so a concurrent subscription change cannot remove the wrong Task.
+- Prefers the current Codex Desktop-bundled CLI path, refreshes a stale cached executable, and keeps new empty Tasks available while hiding older Tasks whose local conversation record has been lost.
+- Keeps Desktop-unavailable and failed-turn details on the original progress card instead of sending duplicate failure messages.
+- Bounds obsolete card-patch and optional workflow-recovery retries, preserving terminal audit state without continuing unrecoverable background submissions.
+
 ## 1.11.14 (build 94)
 
 - Separates PromLight Task association from removal: adding still uses the authorized Task catalog, while removal lists only Tasks already associated with the selected light.

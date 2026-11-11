@@ -117,12 +117,14 @@ class MultiUserTests(unittest.TestCase):
                         title TEXT,
                         project_id TEXT,
                         cwd TEXT,
-                        archived INTEGER
+                        archived INTEGER,
+                        preview TEXT,
+                        rollout_path TEXT
                     )
                     """
                 )
                 connection.execute(
-                    "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         "task-new",
                         None,
@@ -130,6 +132,8 @@ class MultiUserTests(unittest.TestCase):
                         None,
                         resolved_project_root,
                         0,
+                        "",
+                        None,
                     ),
                 )
             self.bridge.DESKTOP_CATALOG_DB = catalog
@@ -202,13 +206,13 @@ class MultiUserTests(unittest.TestCase):
                 )
             with sqlite3.connect(state_db) as connection:
                 connection.execute(
-                    "CREATE TABLE threads (id TEXT, archived INTEGER, preview TEXT)"
+                    "CREATE TABLE threads (id TEXT, archived INTEGER, preview TEXT, rollout_path TEXT)"
                 )
                 connection.executemany(
-                    "INSERT INTO threads VALUES (?, ?, ?)",
+                    "INSERT INTO threads VALUES (?, ?, ?, ?)",
                     [
-                        ("task-active", 0, "preview"),
-                        ("task-archived", 1, "preview"),
+                        ("task-active", 0, "", None),
+                        ("task-archived", 1, "", None),
                     ],
                 )
             self.bridge.DESKTOP_CATALOG_DB = catalog
@@ -262,11 +266,11 @@ class MultiUserTests(unittest.TestCase):
                 )
             with sqlite3.connect(state_db) as connection:
                 connection.execute(
-                    "CREATE TABLE threads (id TEXT, archived INTEGER, preview TEXT)"
+                    "CREATE TABLE threads (id TEXT, archived INTEGER, preview TEXT, rollout_path TEXT)"
                 )
                 connection.execute(
-                    "INSERT INTO threads VALUES (?, ?, ?)",
-                    ("task-empty", 0, ""),
+                    "INSERT INTO threads VALUES (?, ?, ?, ?)",
+                    ("task-empty", 0, "", None),
                 )
             self.bridge.DESKTOP_CATALOG_DB = catalog
             self.bridge.state_db_path = lambda: state_db
@@ -291,6 +295,76 @@ class MultiUserTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_task_with_history_but_missing_rollout_is_not_listed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.db"
+            state_db = Path(directory) / "state.db"
+            project_root = Path(directory) / "evolution"
+            project_root.mkdir()
+            missing_rollout = Path(directory) / "missing.jsonl"
+            with sqlite3.connect(catalog) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE local_thread_catalog (
+                        thread_id TEXT,
+                        display_title TEXT,
+                        project_id TEXT,
+                        cwd TEXT,
+                        host_id TEXT,
+                        missing_candidate INTEGER,
+                        source_recency_at INTEGER
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO local_thread_catalog VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "task-missing",
+                        "历史记录已丢失",
+                        "project-1",
+                        str(project_root),
+                        "local",
+                        0,
+                        1,
+                    ),
+                )
+            with sqlite3.connect(state_db) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE threads (
+                        id TEXT,
+                        archived INTEGER,
+                        preview TEXT,
+                        rollout_path TEXT
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES (?, ?, ?, ?)",
+                    (
+                        "task-missing",
+                        0,
+                        "已经有过对话",
+                        str(missing_rollout),
+                    ),
+                )
+            self.bridge.DESKTOP_CATALOG_DB = catalog
+            self.bridge.state_db_path = lambda: state_db
+            self.bridge.desktop_project_names = lambda: {}
+            self.bridge.desktop_projects = lambda: [
+                {
+                    "id": "project-1",
+                    "name": "Evolution",
+                    "root": str(project_root.resolve()),
+                }
+            ]
+
+            tasks = self.bridge.recent_tasks("ou_admin")
+            task = self.bridge.task_by_id("task-missing", "ou_admin")
+
+        self.assertEqual(tasks, [])
+        self.assertIsNone(task)
 
     def test_unauthorized_user_events_are_ignored(self):
         self.bridge.load_state = lambda: self.fail("unauthorized event read state")

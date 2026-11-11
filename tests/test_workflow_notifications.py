@@ -562,6 +562,31 @@ class WorkflowStoreTests(unittest.TestCase):
         )
         self.assertEqual(due_key, keys[0])
 
+    def test_existing_recovery_over_retry_limit_is_closed_immediately(self):
+        payload = workflow_payload(event_id="retry-limit")
+        self.store.enqueue(payload, "ori-one-mind", now=100)
+        record = self.store.record_for_event(
+            payload["workflow_id"], payload["event_id"]
+        )
+        self.store.consume_token_decision(
+            payload["workflow_id"],
+            payload["event_id"],
+            record["decision_token"],
+            "recommended",
+            now=110,
+        )
+        state = self.store.load()
+        key, recovery = next(iter(state["recoveries"].items()))
+        recovery["attempts"] = self.workflow.MAX_WORKFLOW_RECOVERY_ATTEMPTS
+        recovery["next_attempt_at"] = 10_000
+        self.store.save(state)
+
+        self.assertIsNone(self.store.due_recovery(now=111))
+
+        recovery = self.store.load()["recoveries"][key]
+        self.assertEqual(recovery["status"], "delivery_unknown")
+        self.assertNotIn("next_attempt_at", recovery)
+
     def test_status_contains_counts_but_no_identifiers(self):
         self.store.enqueue(workflow_payload(), "ori-one-mind", now=100)
         status = self.store.safe_status()
@@ -2412,6 +2437,63 @@ class WorkflowBridgeTests(unittest.TestCase):
         delivered = next(iter(self.bridge._workflow_store.load()["recoveries"].values()))
         self.assertEqual(delivered["status"], "delivered")
 
+    def test_missing_workflow_task_closes_recovery_without_retrying(self):
+        payload = self.enqueue_delivered_request()
+        record = self.bridge._workflow_store.record_for_event(
+            payload["workflow_id"], payload["event_id"]
+        )
+        self.bridge._workflow_store.consume_token_decision(
+            payload["workflow_id"],
+            payload["event_id"],
+            record["decision_token"],
+            "recommended",
+            now=110,
+        )
+
+        with mock.patch.object(
+            self.bridge, "workflow_recovery_in_rollout", return_value=False
+        ), mock.patch.object(
+            self.bridge, "active_run_for_task", return_value=None
+        ), mock.patch.object(
+            self.bridge, "task_by_id", return_value=None
+        ):
+            self.assertTrue(self.bridge.retry_workflow_recoveries(now=110))
+
+        recovery = next(iter(self.bridge._workflow_store.load()["recoveries"].values()))
+        self.assertEqual(recovery["status"], "delivery_unknown")
+        self.assertEqual(recovery["attempts"], 1)
+
+    def test_recovery_stops_submitting_after_retry_limit(self):
+        payload = self.enqueue_delivered_request()
+        record = self.bridge._workflow_store.record_for_event(
+            payload["workflow_id"], payload["event_id"]
+        )
+        self.bridge._workflow_store.consume_token_decision(
+            payload["workflow_id"],
+            payload["event_id"],
+            record["decision_token"],
+            "recommended",
+            now=110,
+        )
+        state = self.bridge._workflow_store.load()
+        key, recovery = next(iter(state["recoveries"].items()))
+        recovery["attempts"] = self.bridge.MAX_WORKFLOW_RECOVERY_ATTEMPTS - 1
+        self.bridge._workflow_store.save(state)
+
+        with mock.patch.object(
+            self.bridge,
+            "submit_workflow_recovery",
+            return_value=("retry", "Codex Desktop 未接受恢复请求"),
+        ):
+            self.assertTrue(self.bridge.retry_workflow_recoveries(now=110))
+
+        recovery = self.bridge._workflow_store.load()["recoveries"][key]
+        self.assertEqual(recovery["status"], "delivery_unknown")
+        self.assertEqual(
+            recovery["attempts"],
+            self.bridge.MAX_WORKFLOW_RECOVERY_ATTEMPTS,
+        )
+
     def test_recovery_prompt_uses_resolve_contract_without_local_token(self):
         payload = self.enqueue_delivered_request()
         record = self.bridge._workflow_store.record_for_event(
@@ -2870,12 +2952,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.11.14")
-        self.assertEqual(info["CFBundleVersion"], "94")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.11.15")
+        self.assertEqual(info["CFBundleVersion"], "95")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.11.14 (build 94)", readme)
-        self.assertIn("1.11.14 (build 94", release_notes)
+        self.assertIn("1.11.15 (build 95)", readme)
+        self.assertIn("1.11.15 (build 95", release_notes)
 
 
 class AppPromLightHomeTests(unittest.TestCase):

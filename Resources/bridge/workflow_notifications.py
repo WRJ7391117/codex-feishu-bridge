@@ -60,6 +60,7 @@ RESTRICTED_VISIBLE_TEXT_PATTERNS = (
 )
 MAX_NOTIFICATIONS = 500
 DELIVERY_DELAYS = (15, 30, 60, 120, 300, 600, 1800, 3600)
+MAX_WORKFLOW_RECOVERY_ATTEMPTS = 8
 
 
 class WorkflowNotificationError(ValueError):
@@ -1023,6 +1024,19 @@ class WorkflowStore:
         timestamp = time.time() if now is None else now
         with self._lock:
             state = self.load()
+            changed = False
+            for recovery in state["recoveries"].values():
+                if (
+                    isinstance(recovery, dict)
+                    and recovery.get("status") == "pending"
+                    and int(recovery.get("attempts") or 0)
+                    >= MAX_WORKFLOW_RECOVERY_ATTEMPTS
+                ):
+                    recovery["status"] = "delivery_unknown"
+                    recovery.pop("next_attempt_at", None)
+                    changed = True
+            if changed:
+                self.save(state)
             pending = sorted(
                 (
                     float(recovery.get("created_at") or 0),
@@ -1122,8 +1136,9 @@ class WorkflowStore:
             attempts = int(recovery.get("attempts") or 0) + 1
             recovery["attempts"] = attempts
             recovery["last_failure"] = reason[:160]
-            if retryable:
+            if retryable and attempts < MAX_WORKFLOW_RECOVERY_ATTEMPTS:
                 recovery["next_attempt_at"] = timestamp + delivery_delay(attempts)
             else:
                 recovery["status"] = "delivery_unknown"
+                recovery.pop("next_attempt_at", None)
             self.save(state)

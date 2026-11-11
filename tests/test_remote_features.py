@@ -1375,6 +1375,307 @@ class RemoteFeatureTests(unittest.TestCase):
         self.assertEqual(set(subscriptions["ou_admin"]), {"task-a"})
         self.assertEqual(set(subscriptions["ou_miller"]), {"task-b"})
 
+    def test_subscription_card_removes_only_from_the_subscribed_task_list(self):
+        subscriptions = {
+            "task-a": {"task_id": "task-a"},
+            "task-c": {"task_id": "task-c"},
+        }
+
+        card = self.bridge.build_task_subscriptions_card(
+            self.tasks(),
+            subscriptions,
+            "task-b",
+            "deepori",
+            subscription_revision=4,
+        )
+
+        form = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "form"
+        )
+        selector = next(
+            element
+            for element in form["elements"]
+            if element.get("tag") == "multi_select_static"
+        )
+        self.assertEqual(
+            [option["value"] for option in selector["options"]],
+            ["task-a", "task-c"],
+        )
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertIn("取消选中的订阅", rendered)
+        self.assertIn("取消全部订阅", rendered)
+        self.assertNotIn("取消订阅这个 Task", rendered)
+        clear_button = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "button"
+            and element.get("text", {}).get("content") == "取消全部订阅"
+        )
+        self.assertEqual(
+            clear_button["behaviors"][0]["value"]["subscription_revision"],
+            4,
+        )
+
+    def test_remove_selected_task_subscriptions_updates_once(self):
+        self.bridge.latest_rollout_turn = lambda path: {
+            "status": "none",
+            "turn_id": "",
+            "message": "",
+            "images": [],
+            "cursor_offset": 0,
+        }
+        self.bridge.rollout_path_for_task = lambda task_id: None
+        self.bridge.toggle_task_subscription("ou_admin", self.tasks()[0])
+        self.bridge.toggle_task_subscription("ou_admin", self.tasks()[1])
+        state = self.bridge.load_state()
+        revision = self.bridge.task_subscription_revision(state, "ou_admin")
+
+        with mock.patch.object(
+            self.bridge,
+            "save_state",
+            wraps=self.bridge.save_state,
+        ) as save:
+            removed = self.bridge.remove_task_subscriptions(
+                "ou_admin",
+                ["task-a", "not-subscribed"],
+                revision,
+            )
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(save.call_count, 1)
+        subscriptions = self.bridge.load_state()["task_subscriptions"]["ou_admin"]
+        self.assertEqual(set(subscriptions), {"task-b"})
+
+    def test_subscription_form_removes_multiple_tasks_and_disables_while_processing(self):
+        tasks = self.tasks()
+        self.bridge.recent_tasks = lambda user_id: tasks
+        self.bridge.task_by_id = lambda task_id, user_id: next(
+            (task for task in tasks if task["id"] == task_id),
+            None,
+        )
+        self.bridge.latest_rollout_turn = lambda path: {
+            "status": "none",
+            "turn_id": "",
+            "message": "",
+            "images": [],
+            "cursor_offset": 0,
+        }
+        self.bridge.rollout_path_for_task = lambda task_id: None
+        self.bridge.toggle_task_subscription("ou_admin", tasks[0])
+        self.bridge.toggle_task_subscription("ou_admin", tasks[1])
+        with self.bridge._state_lock:
+            state = self.bridge.load_state()
+            card = self.bridge.task_subscriptions_card_for_state("ou_admin", state)
+            self.bridge.remember_card_context(
+                state,
+                "ou_admin",
+                "om_remove_subscriptions",
+                card,
+                "task_subscriptions",
+            )
+        self.bridge.update_card = mock.Mock(return_value=False)
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge._handle_card_event_once(
+            {
+                "operator_id": "ou_admin",
+                "event_id": "evt_remove_subscriptions",
+                "message_id": "om_remove_subscriptions",
+                "action_tag": "button",
+                "action_name": "remove_selected_task_subscriptions",
+                "form_value": json.dumps(
+                    {"remove_task_subscription_ids": ["task-a", "task-b"]}
+                ),
+            }
+        )
+
+        self.assertEqual(
+            self.bridge.load_state()["task_subscriptions"]["ou_admin"],
+            {},
+        )
+        self.assertEqual(self.bridge.patch_card.call_count, 2)
+        processing = self.bridge.patch_card.call_args_list[0].args[1]
+        processing_form = next(
+            element
+            for element in processing["body"]["elements"]
+            if element.get("tag") == "form"
+        )
+        submit = next(
+            element
+            for element in processing_form["elements"]
+            if element.get("tag") == "button"
+        )
+        self.assertEqual(submit["text"]["content"], "正在处理…")
+        self.assertTrue(submit["disabled"])
+        final = json.dumps(
+            self.bridge.patch_card.call_args_list[-1].args[1],
+            ensure_ascii=False,
+        )
+        self.assertIn("已取消订阅 2 个 Task", final)
+
+    def test_stale_subscription_clear_card_does_not_remove_new_subscription(self):
+        tasks = self.tasks()
+        self.bridge.recent_tasks = lambda user_id: tasks
+        self.bridge.task_by_id = lambda task_id, user_id: next(
+            (task for task in tasks if task["id"] == task_id),
+            None,
+        )
+        self.bridge.latest_rollout_turn = lambda path: {
+            "status": "none",
+            "turn_id": "",
+            "message": "",
+            "images": [],
+            "cursor_offset": 0,
+        }
+        self.bridge.rollout_path_for_task = lambda task_id: None
+        self.bridge.toggle_task_subscription("ou_admin", tasks[0])
+        card = self.bridge.task_subscriptions_card_for_state(
+            "ou_admin",
+            self.bridge.load_state(),
+        )
+        old_payload = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "button"
+            and element.get("text", {}).get("content") == "取消全部订阅"
+        )["behaviors"][0]["value"]
+        self.bridge.toggle_task_subscription("ou_admin", tasks[1])
+        self.bridge.update_card = mock.Mock(return_value=False)
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge._handle_card_event_once(
+            {
+                "operator_id": "ou_admin",
+                "event_id": "evt_stale_clear_subscriptions",
+                "message_id": "om_stale_clear_subscriptions",
+                "action_tag": "button",
+                "action_value": json.dumps(old_payload),
+            }
+        )
+
+        subscriptions = self.bridge.load_state()["task_subscriptions"]["ou_admin"]
+        self.assertEqual(set(subscriptions), {"task-a", "task-b"})
+        rendered = json.dumps(self.bridge.patch_card.call_args.args[1], ensure_ascii=False)
+        self.assertIn("订阅列表已变化，请重新选择", rendered)
+
+    def test_subscription_clear_removes_all_in_one_action(self):
+        tasks = self.tasks()
+        self.bridge.recent_tasks = lambda user_id: tasks
+        self.bridge.task_by_id = lambda task_id, user_id: next(
+            (task for task in tasks if task["id"] == task_id),
+            None,
+        )
+        self.bridge.latest_rollout_turn = lambda path: {
+            "status": "none",
+            "turn_id": "",
+            "message": "",
+            "images": [],
+            "cursor_offset": 0,
+        }
+        self.bridge.rollout_path_for_task = lambda task_id: None
+        self.bridge.toggle_task_subscription("ou_admin", tasks[0])
+        self.bridge.toggle_task_subscription("ou_admin", tasks[1])
+        card = self.bridge.task_subscriptions_card_for_state(
+            "ou_admin",
+            self.bridge.load_state(),
+        )
+        payload = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "button"
+            and element.get("text", {}).get("content") == "取消全部订阅"
+        )["behaviors"][0]["value"]
+        self.bridge.update_card = mock.Mock(return_value=False)
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge._handle_card_event_once(
+            {
+                "operator_id": "ou_admin",
+                "event_id": "evt_clear_subscriptions",
+                "message_id": "om_clear_subscriptions",
+                "action_tag": "button",
+                "action_value": json.dumps(payload),
+            }
+        )
+
+        self.assertEqual(
+            self.bridge.load_state()["task_subscriptions"]["ou_admin"],
+            {},
+        )
+        final = json.dumps(self.bridge.patch_card.call_args.args[1], ensure_ascii=False)
+        self.assertIn("已取消订阅 2 个 Task", final)
+
+    def test_subscription_form_without_owned_card_context_fails_closed(self):
+        task = self.tasks()[0]
+        self.bridge.latest_rollout_turn = lambda path: {
+            "status": "none",
+            "turn_id": "",
+            "message": "",
+            "images": [],
+            "cursor_offset": 0,
+        }
+        self.bridge.rollout_path_for_task = lambda task_id: None
+        self.bridge.recent_tasks = lambda user_id: self.tasks()
+        self.bridge.task_by_id = lambda task_id, user_id: task
+        self.bridge.toggle_task_subscription("ou_admin", task)
+        self.bridge.update_card = mock.Mock(return_value=False)
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge._handle_card_event_once(
+            {
+                "operator_id": "ou_admin",
+                "event_id": "evt_missing_subscription_context",
+                "message_id": "om_missing_subscription_context",
+                "action_tag": "button",
+                "action_name": "remove_selected_task_subscriptions",
+                "form_value": json.dumps(
+                    {"remove_task_subscription_ids": ["task-a"]}
+                ),
+            }
+        )
+
+        self.assertIn(
+            "task-a",
+            self.bridge.load_state()["task_subscriptions"]["ou_admin"],
+        )
+        rendered = json.dumps(self.bridge.patch_card.call_args.args[1], ensure_ascii=False)
+        self.assertIn("订阅列表已变化，请重新选择", rendered)
+
+    def test_old_subscription_toggle_card_cannot_cancel_an_existing_subscription(self):
+        task = self.tasks()[0]
+        self.bridge.recent_tasks = lambda user_id: self.tasks()
+        self.bridge.task_by_id = lambda task_id, user_id: task
+        self.bridge.latest_rollout_turn = lambda path: {
+            "status": "none",
+            "turn_id": "",
+            "message": "",
+            "images": [],
+            "cursor_offset": 0,
+        }
+        self.bridge.rollout_path_for_task = lambda task_id: None
+        self.bridge.toggle_task_subscription("ou_admin", task)
+        self.bridge.update_card = mock.Mock(return_value=False)
+        self.bridge.patch_card = mock.Mock(return_value=True)
+
+        self.bridge._handle_card_event_once(
+            {
+                "operator_id": "ou_admin",
+                "event_id": "evt_old_toggle_subscription",
+                "message_id": "om_old_toggle_subscription",
+                "action_tag": "button",
+                "action_value": json.dumps(
+                    {"action": "toggle_task_subscription", "task_id": "task-a"}
+                ),
+            }
+        )
+
+        subscriptions = self.bridge.load_state()["task_subscriptions"]["ou_admin"]
+        self.assertIn("task-a", subscriptions)
+        rendered = json.dumps(self.bridge.patch_card.call_args.args[1], ensure_ascii=False)
+        self.assertIn("请在已订阅列表中取消", rendered)
+
     def test_subscription_card_retains_valid_task_missing_from_recent_catalog(self):
         task = self.tasks()[0]
         state = {
@@ -3851,7 +4152,7 @@ class RemoteFeatureTests(unittest.TestCase):
         patched = []
         self.bridge.patch_card = lambda message_id, card: patched.append(card) or True
         self.bridge.reply = lambda *args, **kwargs: True
-        self.bridge.reply_or_queue = lambda *args, **kwargs: True
+        self.bridge.reply_or_queue = mock.Mock(return_value=True)
 
         def unavailable(*args, **kwargs):
             raise self.bridge.DesktopUnavailableError("no-client-found")
@@ -3880,6 +4181,11 @@ class RemoteFeatureTests(unittest.TestCase):
             [tag["text"]["content"] for tag in patched[-1]["header"]["text_tag_list"]],
             ["当前 Task", "等待选择"],
         )
+        self.assertIn(
+            "Codex Desktop 当前没有打开或接管这个 Task",
+            patched[-1]["body"]["elements"][0]["content"],
+        )
+        self.bridge.reply_or_queue.assert_not_called()
 
     def test_progress_card_patch_moves_transient_failure_to_background(self):
         failure = subprocess.CompletedProcess(

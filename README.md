@@ -4,7 +4,7 @@
 
 DeepOri Bridge 是独立开源工具，并非 OpenAI、飞书或 Lark 官方产品。
 
-版本说明：当前源码和本机构建为 `1.11.14 (build 94)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.11.15 (build 95)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
 
 面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
@@ -177,7 +177,7 @@ lark-cli --profile codex-notify event consume im.message.receive_v1 \
 
 - 点击 Bot 菜单“Task 管理”→“当前 Task” → 在聊天底部打开最新状态卡；仅在尚未选择 Task 时进入选择页面
 - 点击 Bot 菜单“Task 管理”→“切换 Task” → 卡片只负责先选择项目、再从完整列表中切换到 `项目 · Task 标题`；取消切换时保持原 Task
-- 点击 Bot 菜单“桌面task”→“订阅桌面 Task” → 按项目筛选并逐个订阅或取消订阅；订阅不改变当前 Task，Desktop 以后出现的人工门和完成结果会自动推送，收到结果后当前 Task 跟随该结果以便直接追问
+- 点击 Bot 菜单“桌面task”→“订阅桌面 Task” → 新增订阅时按项目筛选授权 Task；取消时只列出本人已订阅的 Task，可多选一次取消或直接取消全部；订阅不改变当前 Task，Desktop 以后出现的人工门和完成结果会自动推送，收到结果后当前 Task 跟随该结果以便直接追问
 - 点击 Bot 菜单“桌面task”→“接续当前 Task” → 卡片显示本人的桥接当前 Task、所属项目和桌面状态；确认“接续当前 Task”后，已完成结果立即推送，运行中的结果跨桥接重启持续跟踪并在完成后推送
 - 点击 Bot 菜单“桌面task”→“接续其他 Task” → 先切换 Task，再通过“接续选定的 Task”确认；没有有效当前 Task 时“接续当前 Task”也会进入同一选择流程，不会自动猜测其他 Task
 - 点击 Bot 菜单“模型设置”→“修改当前 Task 模型” → 修改当前 Task 的模型、分析强度和标准/快速速度；设置仅影响下一条尚未开始的消息，运行中的这一轮不会改变

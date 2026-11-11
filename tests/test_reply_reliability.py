@@ -347,6 +347,25 @@ class ReplyReliabilityTests(unittest.TestCase):
         self.assertEqual(item["reason"], "飞书 API 请求超时")
         self.assertEqual(item["next_attempt_at"], 145)
 
+    def test_expired_card_patch_is_discarded_without_another_api_call(self):
+        self.bridge.queue_pending_card_patch(
+            "om_old_card",
+            {"schema": "2.0"},
+            "飞书 API 调用失败",
+            now=100,
+        )
+        state = self.bridge.load_state()
+        item = state["pending_replies"][0]
+        item["attempts"] = self.bridge.MAX_PENDING_CARD_PATCH_ATTEMPTS
+        item["next_attempt_at"] = 10_000
+        self.bridge.save_state(state)
+
+        with mock.patch.object(self.bridge, "patch_card") as patch:
+            self.assertTrue(self.bridge.retry_pending_replies(now=101))
+
+        patch.assert_not_called()
+        self.assertEqual(self.bridge.load_state()["pending_replies"], [])
+
     def test_slow_pending_delivery_does_not_hold_global_state_lock(self):
         self.bridge.queue_pending_reply(
             "om_test",

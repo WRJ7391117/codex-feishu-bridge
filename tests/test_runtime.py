@@ -138,6 +138,36 @@ class RuntimeCompatibilityTests(unittest.TestCase):
             )
         self.assertEqual(selected, configured)
 
+    def test_codex_cli_search_paths_include_current_desktop_bundle_layout(self):
+        self.assertIn(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+            self.bridge.CODEX_CLI_SEARCH_PATHS,
+        )
+        self.assertIn(
+            "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex",
+            self.bridge.CODEX_CLI_SEARCH_PATHS,
+        )
+
+    def test_missing_cached_codex_cli_path_is_resolved_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            replacement = self.executable(directory, "replacement-codex")
+            self.bridge.CODEX_CLI = str(Path(directory) / "removed-codex")
+            with mock.patch.object(
+                self.bridge,
+                "find_executable",
+                return_value=replacement,
+            ) as find_executable:
+                selected = self.bridge.codex_cli_executable()
+
+        self.assertEqual(selected, replacement)
+        self.assertEqual(self.bridge.CODEX_CLI, replacement)
+        find_executable.assert_called_once_with(
+            "codex_cli_path",
+            ("codex",),
+            self.bridge.CODEX_CLI_SEARCH_PATHS,
+            prefer_paths=True,
+        )
+
     def test_version_tuple_accepts_cli_output_with_prerelease(self):
         self.assertEqual(
             self.bridge.version_tuple("codex-cli 0.148.0-alpha.21"),
