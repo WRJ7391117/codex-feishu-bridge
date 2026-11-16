@@ -1777,19 +1777,53 @@ def _read_tasks_by_archive_state(archived: bool) -> list[sqlite3.Row]:
                    catalog.project_id AS project_id,
                    catalog.cwd AS cwd,
                    state.threads.preview AS preview,
-                   state.threads.rollout_path AS rollout_path
+                   state.threads.rollout_path AS rollout_path,
+                   catalog.source_recency_at AS sort_recency
             FROM local_thread_catalog AS catalog
             JOIN state.threads ON state.threads.id = catalog.thread_id
             WHERE catalog.host_id = 'local'
               AND catalog.missing_candidate = 0
               AND state.threads.archived = ?
-            ORDER BY catalog.source_recency_at DESC, catalog.thread_id DESC
             """,
             (int(archived),),
         ).fetchall()
+        catalog_ids = {str(row["id"]) for row in rows}
+        missing_assigned_ids = [
+            thread_id
+            for thread_id in desktop_project_names()
+            if thread_id not in catalog_ids
+        ]
+        for offset in range(0, len(missing_assigned_ids), 500):
+            chunk = missing_assigned_ids[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(
+                connection.execute(
+                    f"""
+                    SELECT state.threads.id AS id,
+                           COALESCE(
+                               NULLIF(state.threads.name, ''),
+                               NULLIF(state.threads.title, ''),
+                               '未命名 Task'
+                           ) AS task_name,
+                           state.threads.project_id AS project_id,
+                           state.threads.cwd AS cwd,
+                           state.threads.preview AS preview,
+                           state.threads.rollout_path AS rollout_path,
+                           state.threads.recency_at AS sort_recency
+                    FROM state.threads
+                    WHERE state.threads.id IN ({placeholders})
+                      AND state.threads.archived = ?
+                    """,
+                    (*chunk, int(archived)),
+                ).fetchall()
+            )
     finally:
         connection.close()
-    return rows
+    return sorted(
+        rows,
+        key=lambda row: (float(row["sort_recency"] or 0), str(row["id"])),
+        reverse=True,
+    )
 
 
 def task_record_is_available(row: sqlite3.Row) -> bool:

@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.11.16 (build 96)
+
+- Restores project-assigned Desktop Tasks missing from the legacy local catalog by supplementing the catalog with the Desktop's explicit project assignments and local Task state.
+- Keeps catalog titles authoritative, deduplicates supplemented Tasks, and orders both sources together by recency while preserving archive, access, and conversation-record checks.
+- Fixes incomplete Task lists in subscriptions, Task switching, Desktop handoff, and PromLight associations without scanning unrelated internal agent threads.
+
 ## 1.11.15 (build 95)
 
 - Separates Task subscription addition from removal: adding uses the authorized Task catalog, while removal lists only the current user's subscribed Tasks and supports multi-select or confirmed removal of all subscriptions.

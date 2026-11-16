@@ -366,6 +366,84 @@ class MultiUserTests(unittest.TestCase):
         self.assertEqual(tasks, [])
         self.assertIsNone(task)
 
+    def test_project_assigned_task_missing_from_catalog_is_listed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.db"
+            state_db = Path(directory) / "state.db"
+            project_root = Path(directory) / "3dmaker"
+            project_root.mkdir()
+            rollout = Path(directory) / "assigned.jsonl"
+            rollout.write_text("{}\n", encoding="utf-8")
+            with sqlite3.connect(catalog) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE local_thread_catalog (
+                        thread_id TEXT,
+                        display_title TEXT,
+                        project_id TEXT,
+                        cwd TEXT,
+                        host_id TEXT,
+                        missing_candidate INTEGER,
+                        source_recency_at INTEGER
+                    )
+                    """
+                )
+            with sqlite3.connect(state_db) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE threads (
+                        id TEXT,
+                        name TEXT,
+                        title TEXT,
+                        project_id TEXT,
+                        cwd TEXT,
+                        archived INTEGER,
+                        preview TEXT,
+                        rollout_path TEXT,
+                        recency_at INTEGER
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "task-assigned",
+                        "设计 WRJ 方形印章 Logo",
+                        "",
+                        None,
+                        str(project_root),
+                        0,
+                        "已有对话",
+                        str(rollout),
+                        100,
+                    ),
+                )
+            self.bridge.DESKTOP_CATALOG_DB = catalog
+            self.bridge.state_db_path = lambda: state_db
+            self.bridge.desktop_project_names = lambda: {
+                "task-assigned": "三维造物 3DMaker"
+            }
+            self.bridge.desktop_projects = lambda: [
+                {
+                    "id": "project-1",
+                    "name": "三维造物 3DMaker",
+                    "root": str(project_root.resolve()),
+                }
+            ]
+
+            tasks = self.bridge.recent_tasks("ou_admin")
+
+        self.assertEqual(
+            tasks,
+            [
+                {
+                    "id": "task-assigned",
+                    "title": "设计 WRJ 方形印章 Logo",
+                    "project": "三维造物 3DMaker",
+                }
+            ],
+        )
+
     def test_unauthorized_user_events_are_ignored(self):
         self.bridge.load_state = lambda: self.fail("unauthorized event read state")
         self.bridge.handle_message_event(
