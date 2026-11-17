@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import nullcontext
 import fcntl
 import hashlib
 import json
@@ -73,6 +74,7 @@ STATE_PATH = HOME / ".codex/feishu-bridge/state.json"
 LOG_PATH = HOME / ".codex/log/feishu-bridge.log"
 DESKTOP_STATE_PATH = HOME / ".codex/.codex-global-state.json"
 DESKTOP_CATALOG_DB = HOME / ".codex/sqlite/codex-dev.db"
+THREAD_HISTORY_DB = HOME / ".codex/thread_history_1.sqlite"
 DESKTOP_IPC_SOCKET = HOME / ".codex/ipc/ipc.sock"
 WORKFLOW_STATE_PATH = HOME / ".codex/feishu-bridge/workflow-state.json"
 WORKFLOW_DECISION_INBOX_PATH = (
@@ -1404,7 +1406,7 @@ def poll_promlight_task_statuses() -> bool:
         previous = dict(namespace["task_statuses"])
     for task_id in watched:
         try:
-            snapshot = latest_rollout_turn(rollout_path_for_task(task_id))
+            snapshot = latest_task_turn(task_id)
         except (OSError, sqlite3.Error):
             continue
         snapshot_status = str(snapshot.get("status") or "none")
@@ -1745,6 +1747,13 @@ def available_project_names(user_id: str) -> list[str]:
     )
 
 
+def task_project_options(user_id: str, tasks: list[dict[str, str]]) -> list[str]:
+    return list(dict.fromkeys(
+        [task["project"] for task in tasks if user_can_access_task(user_id, task)]
+        + available_project_names(user_id)
+    ))
+
+
 def retry_sqlite_read(operation: Callable[[], Any]) -> Any:
     for attempt in range(len(SQLITE_READ_RETRY_DELAYS) + 1):
         try:
@@ -1834,7 +1843,9 @@ def task_record_is_available(row: sqlite3.Row) -> bool:
     rollout_path = (
         str(row["rollout_path"] or "").strip() if "rollout_path" in keys else ""
     )
-    return bool(rollout_path and Path(rollout_path).expanduser().is_file())
+    return bool(
+        rollout_path and Path(rollout_path).expanduser().is_file()
+    ) or database_task_exists(str(row["id"]))
 
 
 def tasks_by_archive_state(
@@ -1969,6 +1980,164 @@ def rollout_path_for_task(thread_id: str) -> Path | None:
     finally:
         connection.close()
     return Path(str(row[0])) if row and row[0] else None
+
+
+def database_task_exists(thread_id: str) -> bool:
+    if not THREAD_HISTORY_DB.is_file():
+        return False
+    connection = sqlite3.connect(
+        f"file:{THREAD_HISTORY_DB}?mode=ro", uri=True, timeout=2
+    )
+    try:
+        return connection.execute(
+            "SELECT 1 FROM thread_turns WHERE thread_id = ? LIMIT 1", (thread_id,)
+        ).fetchone() is not None
+    finally:
+        connection.close()
+
+
+def database_task_turns(
+    thread_id: str,
+    *,
+    latest: bool = False,
+    turn_id: str = "",
+    after_ordinal: int | None = None,
+) -> list[dict[str, Any]]:
+    """Read Codex's paginated history without changing its databases."""
+    if not THREAD_HISTORY_DB.is_file():
+        return []
+    connection = sqlite3.connect(
+        f"file:{THREAD_HISTORY_DB}?mode=ro", uri=True, timeout=2
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        conditions = ["thread_id = ?"]
+        values: list[Any] = [thread_id]
+        if turn_id:
+            conditions.append("turn_id = ?")
+            values.append(turn_id)
+        if after_ordinal is not None:
+            conditions.append(
+                "(COALESCE(rollout_end_ordinal, rollout_ordinal) > ? OR status = 'inProgress')"
+            )
+            values.append(after_ordinal)
+        rows = connection.execute(
+            "SELECT * FROM thread_turns WHERE "
+            + " AND ".join(conditions)
+            + (" ORDER BY rollout_ordinal DESC LIMIT 1" if latest else " ORDER BY rollout_ordinal"),
+            values,
+        ).fetchall()
+        snapshots = []
+        for row in rows:
+            status = {
+                "completed": "completed", "failed": "failed",
+                "interrupted": "failed", "inProgress": "running",
+            }.get(row["status"], "missing")
+            message = ""
+            if row["final_agent_item_id"]:
+                item = connection.execute(
+                    "SELECT item_json FROM thread_items "
+                    "WHERE thread_id = ? AND turn_id = ? AND item_id = ?",
+                    (thread_id, row["turn_id"], row["final_agent_item_id"]),
+                ).fetchone()
+                if item:
+                    payload = json.loads(item[0])
+                    if payload.get("type") == "agentMessage":
+                        message = str(payload.get("text") or "")
+            if status == "failed":
+                message = message or "Codex Desktop 没有完成这一轮运行。"
+            images = []
+            for item in connection.execute(
+                "SELECT item_json FROM thread_items "
+                "WHERE thread_id = ? AND turn_id = ? AND item_type = 'imageGeneration' "
+                "ORDER BY rollout_ordinal",
+                (thread_id, row["turn_id"]),
+            ):
+                payload = json.loads(item[0])
+                image = normalized_image_reference(
+                    str(payload.get("savedPath") or ""), trusted_local=True
+                )
+                if image and image not in images:
+                    images.append(image)
+            snapshots.append({
+                "status": status,
+                "turn_id": str(row["turn_id"]),
+                "message": message,
+                "images": images,
+                "cursor_offset": int(row["rollout_end_ordinal"] or row["rollout_ordinal"]),
+                "history_backend": "database",
+            })
+        return snapshots
+    finally:
+        connection.close()
+
+
+def latest_task_turn(thread_id: str) -> dict[str, Any]:
+    snapshot = latest_rollout_turn(rollout_path_for_task(thread_id))
+    if snapshot.get("status") != "none":
+        return snapshot
+    turns = database_task_turns(thread_id, latest=True)
+    return turns[0] if turns else snapshot
+
+
+def advance_task_turn(
+    thread_id: str,
+    turn_id: str,
+    cursor_offset: int,
+    existing_images: list[str] | None = None,
+) -> dict[str, Any]:
+    snapshot = advance_rollout_turn(
+        rollout_path_for_task(thread_id), turn_id, cursor_offset, existing_images
+    )
+    if snapshot.get("status") != "missing":
+        return snapshot
+    turns = database_task_turns(thread_id, turn_id=turn_id)
+    return turns[0] if turns else snapshot
+
+
+def scan_database_subscription(
+    thread_id: str, entry: dict[str, Any]
+) -> dict[str, Any]:
+    cursor = int(entry.get("cursor_offset") or 0)
+    if entry.get("history_backend") != "database":
+        # Existing byte cursors cannot be compared to database ordinals.
+        # Establish a fresh baseline rather than replaying historical results.
+        latest = database_task_turns(thread_id, latest=True)
+        snapshot = latest[0] if latest else {}
+        active_id = str(entry.get("active_turn_id") or "")
+        tracked = database_task_turns(thread_id, turn_id=active_id) if active_id else []
+        deliveries = [
+            {**turn, "active_turn_id": "", "remaining_images": []}
+            for turn in tracked if turn["status"] in {"completed", "failed"}
+        ]
+        return {
+            "available": bool(latest), "deliveries": deliveries,
+            "cursor_offset": int(snapshot.get("cursor_offset") or 0),
+            "active_turn_id": snapshot.get("turn_id", "")
+            if snapshot.get("status") == "running" else "",
+            "images": snapshot.get("images", []),
+            "history_backend": "database",
+        }
+    turns = database_task_turns(thread_id, after_ordinal=cursor)
+    deliveries = []
+    active = str(entry.get("active_turn_id") or "")
+    images = list(entry.get("images") or [])
+    for snapshot in turns:
+        cursor = max(cursor, int(snapshot["cursor_offset"]))
+        if snapshot["status"] == "running":
+            active = snapshot["turn_id"]
+            images = snapshot["images"]
+        elif snapshot["status"] in {"completed", "failed"}:
+            active = ""
+            images = []
+            deliveries.append({
+                **snapshot, "active_turn_id": "", "remaining_images": [],
+            })
+    return {
+        "available": True, "deliveries": deliveries,
+        "cursor_offset": cursor, "active_turn_id": active, "images": images,
+        "history_backend": "database",
+    }
 
 
 def complete_jsonl_size(handle: Any, file_size: int) -> int:
@@ -7541,12 +7710,15 @@ def build_task_card(
     favorite_ids: set[str] | None = None,
     recent_ids: list[str] | None = None,
     task_scope: str = "all",
+    project_names: list[str] | None = None,
 ) -> dict[str, Any]:
     favorites = favorite_ids or set()
     recent = recent_ids or []
     active_scope = task_scope if task_scope in {"all", "recent", "favorites"} else "all"
     selected = next((task for task in tasks if task["id"] == selected_id), None)
-    projects = list(dict.fromkeys(task["project"] for task in tasks))
+    projects = list(dict.fromkeys(
+        [task["project"] for task in tasks] + (project_names or [])
+    ))
     active_project = (
         project_filter
         if project_filter in projects
@@ -7680,7 +7852,7 @@ def build_task_card(
     }
     if selected and selected in visible_tasks:
         selector["initial_option"] = selected["id"]
-    if tasks:
+    if projects:
         elements.append(project_selector)
         if not archived:
             elements.append(
@@ -7911,10 +8083,13 @@ def build_task_subscriptions_card(
     page: int = 0,
     change: str = "",
     subscription_revision: int = 0,
+    project_names: list[str] | None = None,
 ) -> dict[str, Any]:
     subscribed_ids = set(subscriptions)
     selected = next((task for task in tasks if task["id"] == selected_id), None)
-    projects = list(dict.fromkeys(task["project"] for task in tasks))
+    projects = list(dict.fromkeys(
+        [task["project"] for task in tasks] + (project_names or [])
+    ))
     active_project = (
         project_filter
         if project_filter in projects
@@ -8465,7 +8640,7 @@ def build_promlight_task_card(
     if lamp["task_ids"] != previous_task_ids:
         lamp["revision"] = int(lamp.get("revision") or 0) + 1
     subscribed = [task for task in tasks if task["id"] in lamp.get("task_ids", [])]
-    projects = list(dict.fromkeys(task["project"] for task in tasks))
+    projects = task_project_options(user_id, tasks)
     active_project = str(namespace["selected_projects"].get(user_id) or "")
     if active_project not in projects:
         active_project = projects[0] if projects else ""
@@ -9508,13 +9683,14 @@ def remove_task_subscriptions(
 
 
 def new_task_subscription(task: dict[str, str]) -> dict[str, Any]:
-    snapshot = latest_rollout_turn(rollout_path_for_task(str(task["id"])))
+    snapshot = latest_task_turn(str(task["id"]))
     running = snapshot.get("status") == "running"
     return {
         "task_id": str(task["id"]),
         "cursor_offset": int(snapshot.get("cursor_offset") or 0),
         "active_turn_id": str(snapshot.get("turn_id") or "") if running else "",
         "images": list(snapshot.get("images") or []) if running else [],
+        "history_backend": str(snapshot.get("history_backend") or "rollout"),
         "created_at": time.time(),
     }
 
@@ -9795,7 +9971,7 @@ def task_subscriptions_card_for_state(
             selected_id = ""
         project_map = state.setdefault("subscription_last_projects", {})
         project_filter = str(project_map.get(user_id) or "")
-        projects = list(dict.fromkeys(task["project"] for task in tasks))
+        projects = task_project_options(user_id, tasks)
         if project_filter not in projects:
             project_filter = (
                 next(
@@ -9822,6 +9998,7 @@ def task_subscriptions_card_for_state(
             page,
             change,
             subscription_revision,
+            project_names=projects,
         )
 
 
@@ -9924,6 +10101,7 @@ def update_task_subscription_checkpoint(
     cursor_offset: int,
     active_turn_id: str,
     images: list[str],
+    history_backend: str = "rollout",
 ) -> None:
     with _state_lock:
         state = load_state()
@@ -9936,11 +10114,13 @@ def update_task_subscription_checkpoint(
             int(entry.get("cursor_offset") or 0) == next_cursor
             and str(entry.get("active_turn_id") or "") == active_turn_id
             and [str(item) for item in entry.get("images", [])] == next_images
+            and str(entry.get("history_backend") or "rollout") == history_backend
         ):
             return
         entry["cursor_offset"] = next_cursor
         entry["active_turn_id"] = active_turn_id
         entry["images"] = next_images
+        entry["history_backend"] = history_backend
         save_state(state)
 
 
@@ -10006,14 +10186,20 @@ def poll_task_subscriptions() -> bool:
         active_turn_id = str(entry.get("active_turn_id") or "")
         existing_images = tuple(str(item) for item in entry.get("images", []))
         checkpoint = (cursor_offset, active_turn_id, existing_images)
-        scan_key = (task_id, cursor_offset, active_turn_id, existing_images)
+        scan_key = (
+            task_id, cursor_offset, active_turn_id, existing_images,
+            str(entry.get("history_backend") or "rollout"),
+        )
         if scan_key not in scan_cache:
-            scan_cache[scan_key] = scan_task_subscription_rollout(
-                rollout_paths[task_id],
-                cursor_offset,
-                active_turn_id,
-                list(existing_images),
-            )
+            path = rollout_paths[task_id]
+            if entry.get("history_backend") == "database" or (
+                (path is None or not path.is_file()) and database_task_exists(task_id)
+            ):
+                scan_cache[scan_key] = scan_database_subscription(task_id, entry)
+            else:
+                scan_cache[scan_key] = scan_task_subscription_rollout(
+                    path, cursor_offset, active_turn_id, list(existing_images)
+                )
         scan = scan_cache[scan_key]
         if not scan.get("available"):
             continue
@@ -10034,6 +10220,7 @@ def poll_task_subscriptions() -> bool:
                 int(delivery.get("cursor_offset") or 0),
                 str(delivery.get("active_turn_id") or ""),
                 [str(item) for item in delivery.get("remaining_images", [])],
+                str(scan.get("history_backend") or "rollout"),
             )
             checkpoint = (
                 int(delivery.get("cursor_offset") or 0),
@@ -10048,13 +10235,16 @@ def poll_task_subscriptions() -> bool:
             str(scan.get("active_turn_id") or ""),
             tuple(str(item) for item in scan.get("images", [])),
         )
-        if final_checkpoint != checkpoint:
+        if final_checkpoint != checkpoint or str(
+            entry.get("history_backend") or "rollout"
+        ) != str(scan.get("history_backend") or "rollout"):
             update_task_subscription_checkpoint(
                 user_id,
                 task_id,
                 final_checkpoint[0],
                 final_checkpoint[1],
                 list(final_checkpoint[2]),
+                str(scan.get("history_backend") or "rollout"),
             )
     return did_work
 
@@ -10073,7 +10263,7 @@ def desktop_sync_current_snapshot(
         )
         return None, {"status": "none"}
     rollout_started = time.monotonic()
-    snapshot = latest_rollout_turn(rollout_path_for_task(str(task["id"])))
+    snapshot = latest_task_turn(str(task["id"]))
     rollout_scan_ms = round((time.monotonic() - rollout_started) * 1000)
     log(
         "latency desktop_sync_snapshot "
@@ -10179,7 +10369,7 @@ def confirm_desktop_sync(
     message_id: str,
     chat_id: str,
 ) -> None:
-    snapshot = latest_rollout_turn(rollout_path_for_task(str(task["id"])))
+    snapshot = latest_task_turn(str(task["id"]))
     card = build_desktop_sync_card(
         task,
         str(snapshot.get("status") or "none"),
@@ -10250,8 +10440,8 @@ def retry_desktop_result_subscriptions(now: float | None = None) -> bool:
             "message": "本次桌面接续已失效，请重新点击“接续当前 Task”。",
         }
     else:
-        snapshot = advance_rollout_turn(
-            rollout_path_for_task(task_id),
+        snapshot = advance_task_turn(
+            task_id,
             turn_id,
             int(subscription.get("cursor_offset") or 0),
             [str(item) for item in subscription.get("images", [])],
@@ -10325,8 +10515,8 @@ def retry_recoverable_runs(now: float | None = None) -> bool:
             "images": list(recovery.get("images") or []),
         }
     else:
-        snapshot = advance_rollout_turn(
-            rollout_path_for_task(task_id),
+        snapshot = advance_task_turn(
+            task_id,
             turn_id,
             int(recovery.get("cursor_offset") or 0),
             [str(item) for item in recovery.get("images", [])],
@@ -10971,6 +11161,7 @@ def task_card_for_state(
             favorite_ids=favorites,
             recent_ids=recent,
             task_scope=scope,
+            project_names=task_project_options(user_id, tasks),
         )
 
 
@@ -11814,7 +12005,7 @@ def handle_promlight_selector_action(event: dict[str, Any]) -> bool:
         else:
             tasks = recent_tasks(user_id)
             if action_name == "promlight_project_selector":
-                projects = {task["project"] for task in tasks}
+                projects = set(task_project_options(user_id, tasks))
                 if selected_value not in projects:
                     return True
                 namespace["selected_projects"][user_id] = selected_value
@@ -12122,7 +12313,7 @@ def persist_recoverable_run(run: dict[str, Any]) -> bool:
         return False
     snapshot: dict[str, Any] = {}
     try:
-        snapshot = latest_rollout_turn(rollout_path_for_task(task_id))
+        snapshot = latest_task_turn(task_id)
     except (OSError, sqlite3.Error):
         snapshot = {}
     same_turn = str(snapshot.get("turn_id") or "") == turn_id
@@ -12986,7 +13177,7 @@ def remember_bridge_turn(turn_id: str, user_id: str = "") -> None:
 
 
 def wait_for_desktop_turn(
-    rollout_path: Path,
+    rollout_path: Path | None,
     start_offset: int,
     turn_id: str,
     on_progress: Callable[[str], None] | None = None,
@@ -12995,13 +13186,20 @@ def wait_for_desktop_turn(
     cancel_confirmed: threading.Event | None = None,
     ipc_connection: socket.socket | None = None,
     on_ipc_response: Callable[[dict[str, Any]], bool] | None = None,
+    thread_id: str = "",
 ) -> tuple[bool, str, list[str]]:
     deadline = time.monotonic() + 3600
     cancelled_at: float | None = None
     last_elapsed_update = 0.0
     images: list[str] = []
-    with rollout_path.open("r", encoding="utf-8") as handle:
-        handle.seek(start_offset)
+    history = (
+        rollout_path.open("r", encoding="utf-8")
+        if not thread_id and rollout_path is not None and rollout_path.is_file()
+        else nullcontext(None)
+    )
+    with history as handle:
+        if handle is not None:
+            handle.seek(start_offset)
         while time.monotonic() < deadline:
             now = time.monotonic()
             if cancel_event is not None and cancel_event.is_set():
@@ -13040,6 +13238,18 @@ def wait_for_desktop_turn(
                             if isinstance(change, dict) and on_approval is not None:
                                 for approval in approval_requests_from_stream_change(change):
                                     on_approval(approval)
+            if handle is None:
+                turns = database_task_turns(thread_id, turn_id=turn_id)
+                snapshot = turns[0] if turns else {}
+                if snapshot.get("status") in {"completed", "failed"}:
+                    drain_ready_ipc_responses(ipc_connection, on_ipc_response)
+                    return (
+                        snapshot["status"] == "completed",
+                        str(snapshot.get("message") or "Codex 已完成，但没有返回文字结果。"),
+                        list(snapshot.get("images") or []),
+                    )
+                time.sleep(0.25)
+                continue
             line = handle.readline()
             if not line:
                 time.sleep(0.25)
@@ -13219,10 +13429,11 @@ def run_codex_via_desktop(
     if not DESKTOP_IPC_SOCKET.exists():
         log("desktop unavailable reason=ipc-socket-missing")
         return "unavailable", "ipc-socket-missing", []
-    if not rollout_path or not rollout_path.exists():
+    has_rollout = rollout_path is not None and rollout_path.is_file()
+    if not has_rollout and not database_task_exists(thread_id):
         log("desktop unavailable reason=task-record-missing")
         return "unavailable", "task-record-missing", []
-    start_offset = rollout_path.stat().st_size
+    start_offset = rollout_path.stat().st_size if has_rollout else 0
     turn_request_attempted = False
     turn_confirmed = False
     try:
@@ -13314,6 +13525,7 @@ def run_codex_via_desktop(
                 cancel_confirmed,
                 connection,
                 on_ipc_response,
+                **({"thread_id": thread_id} if not has_rollout else {}),
             )
             return ("completed" if success else "failed"), result, images
     except (ConnectionError, FileNotFoundError, socket.timeout) as exc:
@@ -14374,9 +14586,7 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
                     patch_card(message_id, card)
                 log("card handled action=confirm_desktop_sync result=task-selector")
                 return
-            snapshot = latest_rollout_turn(
-                rollout_path_for_task(str(task["id"]))
-            )
+            snapshot = latest_task_turn(str(task["id"]))
             if requested_task_id != str(task["id"]):
                 if message_id:
                     patch_card(
@@ -14577,9 +14787,7 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
                 )
                 context_type_override = ""
             elif context_type == "desktop_sync_selection":
-                snapshot = latest_rollout_turn(
-                    rollout_path_for_task(str(task["id"]))
-                )
+                snapshot = latest_task_turn(str(task["id"]))
                 card = build_desktop_sync_confirmation_card(
                     task,
                     str(snapshot.get("status") or "none"),
@@ -15050,7 +15258,7 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
         or (not action_name and recognized_subscription_card)
     ):
         tasks = recent_tasks(user_id)
-        projects = {task["project"] for task in tasks}
+        projects = set(task_project_options(user_id, tasks))
         task_by_value = {task["id"]: task for task in tasks}
         if not action_name:
             if selected_value in projects:
@@ -15273,7 +15481,7 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
         )
         return
     if action_name not in {"project_selector", "task_selector", "task_scope_selector"}:
-        projects = {task["project"] for task in tasks}
+        projects = set(task_project_options(user_id, tasks))
         task_ids = {task["id"] for task in tasks}
         if recognized_card and selected_value in projects:
             action_name = "project_selector"
@@ -15314,7 +15522,7 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
             save_state(state)
             card = task_card_for_state(user_id, state)
         elif action_name == "project_selector":
-            projects = {task["project"] for task in tasks}
+            projects = set(task_project_options(user_id, tasks))
             if selected_value not in projects:
                 log("card ignored reason=unknown-project")
                 return
@@ -15354,9 +15562,7 @@ def _handle_card_event_once(event: dict[str, Any]) -> None:
                     remember_recent_task(state, user_id, str(selected["id"]))
                     save_state(state)
                     if context_type == "desktop_sync_selection":
-                        snapshot = latest_rollout_turn(
-                            rollout_path_for_task(str(selected["id"]))
-                        )
+                        snapshot = latest_task_turn(str(selected["id"]))
                         card = build_desktop_sync_confirmation_card(
                             selected,
                             str(snapshot.get("status") or "none"),

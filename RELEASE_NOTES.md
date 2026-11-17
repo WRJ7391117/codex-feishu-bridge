@@ -1,5 +1,13 @@
 # Release Notes
 
+## 1.11.17 (build 97)
+
+- Lists authorized local projects independently of their currently available Tasks, so an empty or filtered Task list no longer hides its project in subscription, switching, or PromLight cards.
+- Recognizes real conversation history in Codex Desktop's paginated history database instead of treating a migrated JSONL file as lost history.
+- Reads final text, generated image references, and turn status from database history for subscriptions, Desktop handoff, restart recovery, and PromLight status.
+- Allows database-backed Tasks to run through Desktop and follows their actual turn result while retaining IPC approval handling.
+- Persists the subscription history backend and cursor, avoids historical backfill and duplicate delivery, and preserves a tracked running turn when switching from file history to database history.
+
 ## 1.11.16 (build 96)
 
 - Restores project-assigned Desktop Tasks missing from the legacy local catalog by supplementing the catalog with the Desktop's explicit project assignments and local Task state.

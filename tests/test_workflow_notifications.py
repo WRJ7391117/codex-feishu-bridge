@@ -2952,12 +2952,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.11.16")
-        self.assertEqual(info["CFBundleVersion"], "96")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.11.17")
+        self.assertEqual(info["CFBundleVersion"], "97")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.11.16 (build 96)", readme)
-        self.assertIn("1.11.16 (build 96", release_notes)
+        self.assertIn("1.11.17 (build 97)", readme)
+        self.assertIn("1.11.17 (build 97", release_notes)
 
 
 class AppPromLightHomeTests(unittest.TestCase):

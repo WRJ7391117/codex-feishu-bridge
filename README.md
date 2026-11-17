@@ -4,7 +4,7 @@
 
 DeepOri Bridge 是独立开源工具，并非 OpenAI、飞书或 Lark 官方产品。
 
-版本说明：当前源码和本机构建为 `1.11.16 (build 96)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
+版本说明：当前源码和本机构建为 `1.11.17 (build 97)`，支持 `macOS 13` 或更高版本。不得用旧版本或同版本不同构建覆盖。
 
 面向其他 macOS 用户的 BYOA 产品边界和 2.0 验收标准见 [`docs/PRODUCTIZATION.md`](docs/PRODUCTIZATION.md)，当前已验证与待实机验证范围见 [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md)。
 
@@ -15,6 +15,7 @@ DeepOri Bridge 是独立开源工具，并非 OpenAI、飞书或 Lark 官方产�
 - “桌面task”→“接续当前 Task”只读取该飞书用户在桥接中选择的当前 Task，并先显示项目、Task 标题和桌面状态供确认；没有有效当前 Task 时只打开选择卡，不自动猜测其他 Task
 - 每位授权用户可独立订阅最多 20 个有权访问的 Task；这些 Task 在 Codex Desktop 出现人工门时自动推送操作卡片，完成新运行后自动推送结果，订阅前的历史结果不会补发
 - 按 `项目 · Task 标题` 显示所有未归档本地 Task，每页 50 条，可翻页和按标题搜索
+- 项目筛选独立列出已授权的本地项目；兼容 Codex Desktop 的 JSONL 和数据库分页历史，迁入数据库的对话不会再因旧文件不存在而被隐藏
 - 选中后持续保持当前 Task；并行 Task 返回最终结果时，当前 Task 自动跟随最后送达的结果，便于直接继续追问
 - 运行、排队、授权和结果卡片按真实关系显示“当前 Task”“运行 Task”“排队 Task”或“结果所属 Task”，避免切换后旧卡误称当前
 - Desktop 尚未加载目标 Task 时，桥接会通过 Desktop 官方 deep link 自动激活一次、恢复原前台 App 后再沿 IPC 提交；只有激活失败才显示“重试 Desktop”“使用备用 CLI”或取消，备用 CLI 仍需用户主动确认
