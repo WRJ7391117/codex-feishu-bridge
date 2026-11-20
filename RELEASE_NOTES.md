@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.11.18 (build 98)
+
+- Includes every configured root of the Task's explicitly assigned local project when validating result images, audio, and file attachments, fixing valid secondary-root images being replaced with an unavailable marker.
+- Keeps attachment access limited to that project, the Task working directory, and controlled output storage; resolves symbolic links before checking directory boundaries.
+- Sends explicitly linked `.3mf` result models as file attachments and preserves them in the durable retry queue, without extending accepted incoming file types.
+
 ## 1.11.17 (build 97)
 
 - Lists authorized local projects independently of their currently available Tasks, so an empty or filtered Task list no longer hides its project in subscription, switching, or PromLight cards.

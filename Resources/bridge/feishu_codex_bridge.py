@@ -290,6 +290,7 @@ DOCUMENT_SUFFIXES = {
 AUDIO_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"}
 NATIVE_AUDIO_SUFFIXES = {".ogg", ".opus"}
 FILE_SUFFIXES = DOCUMENT_SUFFIXES | AUDIO_SUFFIXES
+RESULT_DOCUMENT_SUFFIXES = DOCUMENT_SUFFIXES | {".3mf"}
 MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^)\n]+)\s*\)")
 MARKDOWN_FILE_PATTERN = re.compile(
     r"(?<!!)\[([^\]\n]*)\]\(\s*(<[^>\n]+>|[^)\n]+)\s*\)"
@@ -3896,7 +3897,10 @@ def queue_pending_local_file(
     if (
         operation not in {"audio_reply", "file_reply"}
         or source.suffix.lower()
-        not in (AUDIO_SUFFIXES if operation == "audio_reply" else FILE_SUFFIXES)
+        not in (
+            AUDIO_SUFFIXES if operation == "audio_reply"
+            else RESULT_DOCUMENT_SUFFIXES | AUDIO_SUFFIXES
+        )
         or size <= 0
         or size > MAX_PENDING_FILE_BYTES
     ):
@@ -4788,6 +4792,27 @@ def result_roots_for_task(task: dict[str, Any]) -> tuple[Path, ...]:
             working_directory = ""
         if working_directory:
             roots.append(Path(working_directory).resolve())
+        try:
+            desktop_state = json.loads(DESKTOP_STATE_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            desktop_state = {}
+        assignments = desktop_state.get("thread-project-assignments", {})
+        projects = desktop_state.get("local-projects", {})
+        assignment = assignments.get(task_id, {}) if isinstance(assignments, dict) else {}
+        project = (
+            projects.get(assignment.get("projectId"), {})
+            if isinstance(projects, dict) and isinstance(assignment, dict)
+            and assignment.get("projectKind") == "local"
+            else {}
+        )
+        project_roots = project.get("rootPaths", []) if isinstance(project, dict) else []
+        if isinstance(project_roots, list):
+            for raw_root in project_roots:
+                if not isinstance(raw_root, str) or not raw_root.strip():
+                    continue
+                root = Path(raw_root).expanduser()
+                if root.is_dir():
+                    roots.append(root.resolve())
     controlled_output = STATE_PATH.parent / "result-attachments"
     if controlled_output.is_dir():
         roots.append(controlled_output.resolve())
@@ -4927,7 +4952,7 @@ def normalized_file_reference(
     reference: str,
     allowed_roots: tuple[Path, ...] = (),
 ) -> str | None:
-    return normalized_local_result_reference(reference, DOCUMENT_SUFFIXES, allowed_roots)
+    return normalized_local_result_reference(reference, RESULT_DOCUMENT_SUFFIXES, allowed_roots)
 
 
 def is_native_opus(path: str | Path) -> bool:

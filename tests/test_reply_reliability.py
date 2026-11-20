@@ -53,6 +53,18 @@ class ReplyReliabilityTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_3mf_result_is_cached_and_retried_as_a_file(self):
+        model = Path(self.temporary.name) / "model.3mf"
+        model.write_bytes(b"model")
+        self.assertTrue(self.bridge.queue_pending_file(
+            "om_test", str(model), 1, "network", now=100
+        ))
+        with mock.patch.object(self.bridge, "reply_file", return_value=True) as send:
+            self.assertTrue(self.bridge.retry_pending_replies(now=1000))
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(Path(send.call_args.args[1]).suffix, ".3mf")
+        self.assertEqual(self.bridge.load_state()["pending_replies"], [])
+
     def failure(self, stderr: str, returncode: int = 4):
         return subprocess.CompletedProcess([], returncode, "", stderr)
 

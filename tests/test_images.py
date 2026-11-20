@@ -41,6 +41,55 @@ class ImageReplyTests(unittest.TestCase):
     def setUp(self):
         self.bridge = load_bridge()
 
+    def test_result_images_include_all_roots_of_the_assigned_local_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, products, other = [root / name for name in ("workspace", "products", "private")]
+            for path in (workspace, products, other):
+                path.mkdir()
+            image = products / "真实剖面.png"
+            image.write_bytes(b"png")
+            private_image = other / "private.png"
+            private_image.write_bytes(b"private")
+            escaping_link = products / "escape.png"
+            escaping_link.symlink_to(private_image)
+            self.bridge.DESKTOP_STATE_PATH = root / "desktop.json"
+            self.bridge.DESKTOP_STATE_PATH.write_text(json.dumps({
+                "local-projects": {
+                    "project-3d": {"rootPaths": [str(workspace), str(products)]},
+                    "project-private": {"rootPaths": [str(other)]},
+                },
+                "thread-project-assignments": {
+                    "task-3d": {"projectKind": "local", "projectId": "project-3d"},
+                },
+            }), encoding="utf-8")
+            self.bridge.task_working_directory = lambda task_id: str(workspace)
+
+            allowed = self.bridge.result_roots_for_task({"id": "task-3d"})
+            clean, images = self.bridge.prepare_result_images(
+                f"![图](<{image}>) ![私有](<{private_image}>) ![逃逸](<{escaping_link}>)",
+                [], allowed,
+            )
+
+            self.assertIn(products.resolve(), allowed)
+            self.assertNotIn(other.resolve(), allowed)
+            self.assertEqual(images, [str(image.resolve())])
+            self.assertEqual(clean.count("图片不可用"), 2)
+
+            unknown_roots = self.bridge.result_roots_for_task({"id": "unassigned"})
+            self.assertNotIn(products.resolve(), unknown_roots)
+
+    def test_result_3mf_is_an_attachment_without_allowing_incoming_3mf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "分体结构-勿打印.3mf"
+            model.write_bytes(b"model")
+            clean, files = self.bridge.prepare_result_files(
+                f"[打开分体模型](<{model}>)", (Path(directory).resolve(),)
+            )
+            self.assertEqual(clean, "文件见下方：打开分体模型")
+            self.assertEqual(files, [str(model.resolve())])
+            self.assertNotIn(".3mf", self.bridge.FILE_SUFFIXES)
+
     def test_extracts_local_and_remote_markdown_images(self):
         with tempfile.TemporaryDirectory() as directory:
             local = Path(directory) / "image with space.png"
