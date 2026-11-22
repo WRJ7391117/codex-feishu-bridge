@@ -3652,6 +3652,8 @@ def queue_pending_menu_card(
     kind: str,
     reason: str,
     now: float | None = None,
+    *,
+    context_type_override: str = "",
 ) -> None:
     with _state_lock:
         state = load_state()
@@ -3664,6 +3666,7 @@ def queue_pending_menu_card(
             "user_id": user_id,
             "card": card,
             "kind": kind,
+            "context_type_override": context_type_override,
             "reason": reason or "飞书 API 调用失败",
             "attempts": 0,
             "created_at": timestamp,
@@ -4128,7 +4131,13 @@ def retry_pending_replies(now: float | None = None) -> bool:
                 if chat_id:
                     authorize_chat(state, user_id, chat_id)
                 if message_id:
-                    remember_card_context(state, user_id, message_id, card)
+                    context_type = str(menu_card_item.get("context_type_override") or "")
+                    remember_card_context(state, user_id, message_id, card, context_type)
+                    if context_type == "current_status":
+                        state.setdefault("current_status_cards", {})[user_id] = {
+                            "message_id": message_id,
+                            "chat_id": chat_id or "",
+                        }
                 save_state(state)
                 log("pending menu card delivered")
                 return True
@@ -5459,7 +5468,9 @@ def send_card(
     duration_ms = round((time.monotonic() - started) * 1000)
     if not lark_succeeded(result):
         log(
-            f"card send failed code={result.returncode} duration_ms={duration_ms}"
+            f"card send failed code={result.returncode} duration_ms={duration_ms} "
+            f"{lark_reply_failure_metadata(result)} "
+            f"reason={lark_reply_failure_reason(result=result)}"
         )
         return False, None, None
     log(
@@ -9608,6 +9619,7 @@ def send_menu_card(
             card,
             kind,
             "飞书卡片发送超时或网络失败",
+            context_type_override=context_type_override,
         )
         return False
     with _state_lock:
@@ -11018,12 +11030,21 @@ def update_current_status_card(
     card = current_status_card_for_user(user_id, task, change)
     if message_id and patch_card(message_id, card):
         return True
+    kind = f"current-status-{uuid.uuid4().hex}"
     success, chat_id, new_message_id = send_card(
         user_id,
         card,
-        f"current-status-{uuid.uuid4().hex}",
+        kind,
     )
     if not success or not new_message_id:
+        if ensure and not message_id:
+            queue_pending_menu_card(
+                user_id,
+                card,
+                kind,
+                "当前 Task 状态卡片发送失败",
+                context_type_override="current_status",
+            )
         return False
     if message_id:
         clear_pending_card_patch(message_id)
@@ -15682,13 +15703,14 @@ def _handle_menu_event_once(event: dict[str, Any]) -> None:
             send_task_card(user_id, state, event_id)
             log(f"menu handled key={event_key} result=task-selector")
             return
-        update_current_status_card(
+        delivered = update_current_status_card(
             user_id,
             task=task,
             ensure=True,
             force_new=True,
         )
-        log(f"menu handled key={event_key} result=status-card")
+        result = "status-card" if delivered else "status-card-queued"
+        log(f"menu handled key={event_key} result={result}")
         return
     if event_key == TASK_MENU_EVENT_KEY:
         send_task_card(user_id, state, event_id)

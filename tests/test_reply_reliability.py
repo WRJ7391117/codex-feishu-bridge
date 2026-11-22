@@ -546,6 +546,47 @@ class ReplyReliabilityTests(unittest.TestCase):
         self.assertEqual(state["pending_replies"], [])
         self.assertEqual(state["card_contexts"]["om_task_card"]["type"], "tasks")
 
+    def test_failed_desktop_switch_menu_preserves_handoff_context_after_restart(self):
+        task = {"id": "task-a", "title": "Home", "project": "deepori"}
+        self.bridge.recent_tasks = mock.Mock(return_value=[task])
+        self.bridge.task_project_options = mock.Mock(return_value=["deepori"])
+        self.bridge.selected_task = mock.Mock(return_value=task)
+        with mock.patch.object(self.bridge, "send_card", return_value=(False, None, None)):
+            self.bridge.handle_menu_event({
+                "operator_id": "ou_admin",
+                "event_key": "sync_desktop_switch",
+                "event_id": "evt-switch",
+            })
+        pending = self.bridge.load_state()["pending_replies"][0]
+        restarted = load_bridge()
+        restarted.STATE_PATH = self.bridge.STATE_PATH
+        restarted.LOG_PATH = self.bridge.LOG_PATH
+        with mock.patch.object(restarted, "send_card", return_value=(True, "oc_test", "om_switch")):
+            self.assertTrue(restarted.retry_pending_replies(now=pending["next_attempt_at"]))
+        state = restarted.load_state()
+        self.assertEqual(state["pending_replies"], [])
+        self.assertEqual(state["card_contexts"]["om_switch"]["type"], "desktop_sync_selection")
+
+    def test_failed_current_task_menu_is_retried_and_reuses_recovered_card(self):
+        task = {"id": "task-a", "title": "Home", "project": "deepori"}
+        self.bridge.selected_task = mock.Mock(return_value=task)
+        with mock.patch.object(self.bridge, "send_card", return_value=(False, None, None)):
+            self.bridge.handle_menu_event({
+                "operator_id": "ou_admin",
+                "event_key": "current_task",
+                "event_id": "evt-current",
+            })
+        pending = self.bridge.load_state()["pending_replies"][0]
+        with mock.patch.object(self.bridge, "send_card", return_value=(True, "oc_test", "om_recovered")) as send:
+            self.assertTrue(self.bridge.retry_pending_replies(now=pending["next_attempt_at"]))
+        self.assertEqual(send.call_args.args[2], pending["kind"])
+        state = self.bridge.load_state()
+        self.assertEqual(state["pending_replies"], [])
+        self.assertEqual(state["current_status_cards"]["ou_admin"]["message_id"], "om_recovered")
+        with mock.patch.object(self.bridge, "patch_card", return_value=True) as patch:
+            self.assertTrue(self.bridge.update_current_status_card("ou_admin", task=task))
+        self.assertEqual(patch.call_args.args[0], "om_recovered")
+
     def test_due_queue_card_sets_progress_message_id(self):
         entry = {
             "queue_id": "queue-1",
