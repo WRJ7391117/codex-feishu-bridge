@@ -1,5 +1,12 @@
 # Release Notes
 
+## 1.11.19 (build 99)
+
+- Retries failed current-Task menu status cards with their original idempotency key and restores the delivered card as the user's reusable status card.
+- Preserves explicit menu callback context across delivery retries and restarts, so “接续其他 Task” remains a Desktop handoff selector instead of becoming an ordinary Task selector.
+- Records privacy-safe API failure classifications for card sends and distinguishes queued current-Task cards from immediate delivery in menu logs.
+- Audits all twelve menu entries for both authorized users with isolated state; all 452 Python regression tests pass. Mobile rendering of the originally reported clicks remains a separate acceptance check.
+
 ## 1.11.18 (build 98)
 
 - Includes every configured root of the Task's explicitly assigned local project when validating result images, audio, and file attachments, fixing valid secondary-root images being replaced with an unavailable marker.
