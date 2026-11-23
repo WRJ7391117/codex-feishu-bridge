@@ -366,7 +366,7 @@ class MultiUserTests(unittest.TestCase):
         self.assertEqual(tasks, [])
         self.assertIsNone(task)
 
-    def test_project_assigned_task_missing_from_catalog_is_listed(self):
+    def test_project_assignment_supplements_new_tasks_without_reviving_missing_candidates(self):
         with tempfile.TemporaryDirectory() as directory:
             catalog = Path(directory) / "catalog.db"
             state_db = Path(directory) / "state.db"
@@ -387,6 +387,10 @@ class MultiUserTests(unittest.TestCase):
                         source_recency_at INTEGER
                     )
                     """
+                )
+                connection.execute(
+                    "INSERT INTO local_thread_catalog VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ("task-removed", "旧目录条目", "project-1", str(project_root), "local", 1, 200),
                 )
             with sqlite3.connect(state_db) as connection:
                 connection.execute(
@@ -418,10 +422,18 @@ class MultiUserTests(unittest.TestCase):
                         100,
                     ),
                 )
+                connection.execute(
+                    "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "task-removed", "旧目录条目", "", None,
+                        str(project_root), 0, "", str(rollout), 200,
+                    ),
+                )
             self.bridge.DESKTOP_CATALOG_DB = catalog
             self.bridge.state_db_path = lambda: state_db
             self.bridge.desktop_project_names = lambda: {
-                "task-assigned": "三维造物 3DMaker"
+                "task-assigned": "三维造物 3DMaker",
+                "task-removed": "三维造物 3DMaker",
             }
             self.bridge.desktop_projects = lambda: [
                 {
@@ -432,6 +444,8 @@ class MultiUserTests(unittest.TestCase):
             ]
 
             tasks = self.bridge.recent_tasks("ou_admin")
+            removed_task = self.bridge.task_by_id("task-removed", "ou_admin")
+            new_task = self.bridge.task_by_id("task-assigned", "ou_admin")
 
         self.assertEqual(
             tasks,
@@ -443,6 +457,8 @@ class MultiUserTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertIsNone(removed_task)
+        self.assertEqual(new_task, tasks[0])
 
     def test_unauthorized_user_events_are_ignored(self):
         self.bridge.load_state = lambda: self.fail("unauthorized event read state")

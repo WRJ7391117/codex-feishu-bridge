@@ -1823,6 +1823,12 @@ def _read_tasks_by_archive_state(archived: bool) -> list[sqlite3.Row]:
                     FROM state.threads
                     WHERE state.threads.id IN ({placeholders})
                       AND state.threads.archived = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM local_thread_catalog AS catalog
+                          WHERE catalog.host_id = 'local'
+                            AND catalog.thread_id = state.threads.id
+                            AND catalog.missing_candidate = 1
+                      )
                     """,
                     (*chunk, int(archived)),
                 ).fetchall()
@@ -1933,6 +1939,12 @@ def _read_task_by_id(thread_id: str) -> sqlite3.Row | None:
                 FROM state.threads
                 WHERE state.threads.id = ?
                   AND state.threads.archived = 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM local_thread_catalog AS catalog
+                      WHERE catalog.host_id = 'local'
+                        AND catalog.thread_id = state.threads.id
+                        AND catalog.missing_candidate = 1
+                  )
                 """,
                 (thread_id,),
             ).fetchone()

@@ -1,5 +1,11 @@
 # Release Notes
 
+## 1.11.20 (build 100)
+
+- Respects Codex Desktop's explicit missing-candidate marker when supplementing project-assigned Tasks, so stale project assignments no longer resurrect old Task rows in switching, subscription, or PromLight lists.
+- Applies the same exclusion to direct Task lookup while continuing to resolve genuinely new Tasks that have not yet appeared in the Desktop catalog.
+- Adds a regression covering an explicitly assigned missing candidate beside a valid uncataloged Task; all 452 Python tests pass.
+
 ## 1.11.19 (build 99)
 
 - Retries failed current-Task menu status cards with their original idempotency key and restores the delivered card as the user's reusable status card.
