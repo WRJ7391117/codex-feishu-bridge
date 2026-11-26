@@ -1,48 +1,48 @@
-# DeepOri Bridge 2.0 test matrix
+# DeepOri Bridge test matrix
 
-Status: Working Draft
+Status: `1.11.21 (build 101)` pre-release verification
 
-Updated: 2026-09-03
+Updated: 2026-11-26
+
+“Pass locally” below means source tests or bounded local protocol checks passed. It does not mean the candidate was published, installed, or accepted through a real Feishu round trip.
 
 | Surface | Target | Current evidence | Status |
 | --- | --- | --- | --- |
-| Source tests | isolated temporary HOME on macOS arm64 | 416 Python tests pass without the developer Codex database; Bot setup state transitions are compiled and executed with `swiftc` | Pass |
-| Result audio | normal turn, Desktop sync, and Task subscription | explicit local audio links are separated from files; native Opus and attachment fallback plus durable retry are tested | Pass locally; real Feishu playback pending |
-| Result-file authorization | selected Task workspace | local image/audio/file links outside the Task root are rejected; current-turn image-generation events remain separately scoped | Pass locally |
-| State concurrency | App plus background process | a real subprocess waits on the shared state lock and preserves unrelated queue data while removing an access request | Pass locally |
-| Event durability | message/card/menu dispatch | failed dispatch is not acknowledged; processed-event history retains seven days/up to 10,000 IDs | Pass locally |
-| Public installer | GitHub latest Release | source tests cover digest, identity, signature, Universal architecture, downgrade, and rollback requirements | Pass locally; real clean-Mac install pending |
-| App compiler | macOS 13 deployment target | Swift build passes | Pass |
-| Codex-assisted setup | bundled local Skill, copyable prompt, no Feishu plugin or secret in Task | source, Skill packaging, and prompt-boundary tests pass | Pass |
-| Package | arm64 + x86_64 | App, bundled `lark-cli`, PromLight helper, and Sparkle framework are Universal Mach-O | Pass |
-| Package integrity | ZIP | generated SHA-256 manifest verifies from `dist/` | Pass |
-| Sparkle integration | macOS App bundle | pinned 2.9.6 framework, Universal binary, rpath, event-driven check, signed appcast generation, and idle-install callbacks; latest public `v1.11.12` has no appcast | Pass locally; real upgrade pending |
-| Code signature | local build | deep/strict verification passes; signature is ad-hoc | Pass with limitation |
-| Public/private boundary | general App payload | private workflow components are absent from the App, installer inputs, example config, main README, and public skill | Pass |
-| First connection | existing local Profile | home-page Bot flow and two-step assistant pass source and compiled state tests; current App UI and real Bot round trip not accepted | Not accepted |
-| First connection | new Feishu custom app | requires a second app/tenant and real Bot round trip | Not tested |
-| First user discovery | bounded message listener | implementation and tests pass; real new-app event not yet exercised | Not accepted |
-| Project authorization | Codex sidebar project picker | implementation and static tests pass | Not accepted visually |
-| Runtime | current Mac existing install | installed App reports 1.11.13 (92); source build 93 contains the current setup contract but is not yet installed, and no fresh real Bot round trip was run | Partial |
-| Apple Silicon clean account | macOS 13+ | no clean-account install evidence yet | Not tested |
-| Intel Mac | macOS 13+ | x86_64 binary exists; no real Intel launch evidence | Not tested |
+| Source regression | isolated temporary HOME on macOS arm64 | all 540 Python tests pass; Python 3.9 product import and Shell syntax checks pass; independent review findings have been repaired and covered by regressions | Pass locally |
+| Shared app-server transport | current managed local daemon | Unix/WebSocket initialize and same-Task resume work against the real shared daemon; bounded two-client, approval, and stop checks passed without using the protected App Tools pipe | Pass locally; current installed runtime not migrated |
+| Same-Task integrity | existing Codex Task | source and protocol checks retain the original Task ID and guard uncertain acknowledgements from replay | Pass locally; real Feishu E2E pending |
+| Event observation | subscribed Desktop Task | the shared connection consumes app-server events and uses state-file events to refresh targets; no Task-storage polling was added to the new path | Pass locally; restart E2E pending |
+| Paginated history | database and legacy JSONL | authoritative backend selection, stale-JSONL exclusion, subscription migration, and legacy fallback have regression coverage | Pass locally |
+| Input and output | text, image, audio, and file | event-driven input mapping and durable result-delivery paths have source coverage | Pass locally; real Feishu media round trip pending |
+| Approval and stop | one-time approval and active turn interrupt | real shared-daemon protocol checks passed; Feishu card-to-daemon-to-card acceptance has not been run on the candidate | Pass protocol check; Feishu E2E pending |
+| State concurrency | App plus background process | state locking and durable queue behavior have regression coverage | Pass locally |
+| Event durability | message/card/menu dispatch | failed dispatch is not acknowledged; persisted retries do not rerun Codex | Pass locally |
+| Runtime module manifest | install, update, rollback, and uninstall | `codex_app_server.py` and `codex_event_observer.py` are included in installer preflight/staging, runtime backup/restore, uninstall, and packaging fixtures | Pass locally |
+| Automatic update discovery | Sparkle 2.9.6 | checks are event-driven at App launch, new Bridge activity, and App activation/reopen; activation is rate-limited and guarded against overlapping sessions; no scheduled update timer is configured | Pass locally; real `1.11.20` to `1.11.21` upgrade pending |
+| Idle update installation | active runs, queues, and pending delivery | existing quiesce, nonce acknowledgement, safe-install, and rollback paths remain covered | Pass locally; candidate install pending |
+| App compiler | macOS 13 deployment target | the current host reaches Swift compilation but its Command Line Tools lack the `SwiftUIMacros` plugin used by existing SwiftUI `@State` declarations | Blocked locally; CI required |
+| Universal package | arm64 + x86_64 | release workflow builds the App, bundled `lark-cli`, PromLight helper, and Sparkle framework for both architectures | Candidate package not built |
+| Package integrity | ZIP, SHA-256, and appcast | workflow verifies the archive digest, signed appcast XML, version/build, download URL, length, and Sparkle signature | Candidate assets pending |
+| Code signature | current Release path | workflow requires deep/strict verification and an ad-hoc signature; Developer ID notarization is outside the current release contract | Pending candidate CI |
+| Installed App | current Mac | installed App is `1.11.20 (build 100)`; source is `1.11.21 (build 101)` | Not synchronized |
+| Installed runtime | current Mac | installed `bridge.py` differs from the `1.11.21` candidate; the running Desktop/Bridge path has not migrated to the new shared observer | Not synchronized |
+| Real Feishu acceptance | authorized user and real Bot | no post-change Feishu message, approval, stop, final reply, or media round trip has been accepted on `1.11.21` | Not tested |
+| Public/private boundary | release payload | private workflow components remain excluded from the public App payload and example configuration | Pass locally |
+| Apple Silicon clean account | macOS 13+ | no clean-account install evidence for this candidate | Not tested |
+| Intel Mac | macOS 13+ | CI can build x86_64; no real Intel launch evidence | Not tested |
 | Gatekeeper | ad-hoc Release download | documented Finder right-click Open path | Not tested on another Mac |
-| Signed/notarized package | Developer ID | not required for the current ad-hoc Release path | Out of current scope |
-| Keep-data uninstall | isolated temporary home | runtime removed; config and state preserved | Pass |
-| Full purge | isolated temporary home | cancellation before change is tested; real Profile purge is not exercised | Partial |
-| GitHub CI | macOS runner | implementation commit `fc04752` passed tests, type-check, Universal build, and package verification in run `33694636004` | Pass |
-| GitHub tag Release | public repository | `v1.11.13` does not exist; tag/version gate and immutable artifact workflow are present | Pending |
+| GitHub CI | macOS runner | `v1.11.20` workflows passed; `1.11.21` has not run on CI | Pending |
+| GitHub tag and Release | public repository | tag/version immutability gates and four-asset publication workflow are present; `v1.11.21` is not published | Pending |
 
-## Public beta exit checks
+## `1.11.21` release gates
 
-1. Install the Release ZIP on a second Apple Silicon Mac account that has Codex Desktop but no bridge files.
-2. Create a separate Feishu custom app with no Roger/DeepOri credentials.
-3. Complete the first-connection assistant, permissions, events, callback, menu publication, first-user discovery, and explicit project selection.
-4. Prove text, image, native Opus audio, fallback audio attachment, file, progress card, one card action, final reply, and current-Task persistence with a real round trip.
-5. Stop/start, reboot, keep-data uninstall, reinstall, and state recovery.
-6. Repeat the install/launch/stop/recover subset on an Intel Mac or a real x86_64 macOS environment.
-7. Push a versioned commit, observe CI, create the matching tag, and verify the published ZIP, SHA-256, `update.json`, signed `appcast.xml`, and in-App update path.
+1. Completed locally: 540 Python tests, Python 3.9 product import, Shell syntax checks, and independent source review.
+2. Push the reviewed versioned commit and let the macOS CI build and verify the Universal App.
+3. Create only the matching immutable `v1.11.21` tag; do not replace an existing Release or signed asset.
+4. Verify the published ZIP, SHA-256 file, `update.json`, and signed `appcast.xml` all identify `1.11.21 (build 101)` and the immutable tag URL.
+5. Leave the installed `1.11.20` bundle intact, make the Bridge idle, and relaunch that App so its startup hook must discover, download, and install `1.11.21` through Sparkle. Use the manual “检查更新” action only to expose a Sparkle error if automatic discovery fails; do not use a fallback installer before this evidence is captured.
+6. After Sparkle relaunches the App, verify App/runtime parity, rollback safety, three event consumers, and shared-daemon observer health.
+7. Run a real Feishu E2E on the migrated runtime: same existing Task, final reply, one-time approval, stop, and representative image/audio/file delivery without duplicate execution.
+8. Keep clean-account, second-tenant, Intel, and Gatekeeper checks as separate public-beta exit evidence; do not infer them from CI or the current Mac.
 
-No code-only or local-source check substitutes for the new Feishu app and second-Mac acceptance above.
-
-The second clean Mac and separate Feishu app/tenant checks are deliberately deferred until the hardware is procured. They remain release gates; they are not recorded as passed from the current Mac.
+No source test, local protocol check, or successful package build substitutes for installing the candidate and completing the real Feishu E2E.

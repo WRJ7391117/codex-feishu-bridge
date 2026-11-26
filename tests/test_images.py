@@ -397,7 +397,7 @@ class ImageReplyTests(unittest.TestCase):
                 {"type": "localImage", "path": str(image.resolve())},
             )
 
-    def test_codex_cli_fallback_receives_image_argument(self):
+    def test_codex_cli_fallback_forwards_image_to_public_backend(self):
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / "input.png"
             image.write_bytes(b"png")
@@ -406,35 +406,9 @@ class ImageReplyTests(unittest.TestCase):
                 "",
                 [],
             )
-            self.bridge.rollout_path_for_task = lambda thread_id: None
-            self.bridge.cli_resume_preflight = lambda rollout: (True, "")
-
-            class Process:
-                returncode = 0
-
-                def __init__(self, command):
-                    self.command = command
-
-                def communicate(self, **kwargs):
-                    output = Path(
-                        self.command[
-                            self.command.index("--output-last-message") + 1
-                        ]
-                    )
-                    output.write_text("完成", encoding="utf-8")
-                    return "", ""
-
-                def terminate(self):
-                    pass
-
-                def kill(self):
-                    pass
-
             with mock.patch.object(
-                self.bridge.subprocess,
-                "Popen",
-                side_effect=lambda command, **kwargs: Process(command),
-            ) as popen:
+                self.bridge, "run_codex_via_app_server", return_value=(True, "完成", [])
+            ) as backend:
                 success, message, images = self.bridge.run_codex(
                     "task-id",
                     "请分析",
@@ -445,8 +419,8 @@ class ImageReplyTests(unittest.TestCase):
             self.assertTrue(success)
             self.assertEqual(message, "完成")
             self.assertEqual(images, [])
-            command = popen.call_args.args[0]
-            self.assertEqual(command[command.index("--image") + 1], str(image.resolve()))
+            self.assertEqual(backend.call_args.args, ("task-id", "请分析"))
+            self.assertEqual(backend.call_args.kwargs["input_images"], [str(image)])
 
     def test_image_event_reaches_selected_task_and_temporary_file_is_cleaned(self):
         self.bridge.ALLOWED_USERS.clear()

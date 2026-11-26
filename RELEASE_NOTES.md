@@ -1,5 +1,17 @@
 # Release Notes
 
+## 1.11.21 (build 101)
+
+- Repairs current Desktop compatibility with the official shared local app-server, including WebSocket-over-Unix proxy transport. Desktop and Bridge must share the daemon; an independent CLI process cannot take over a Desktop-owned Task. Existing installations need one safe Desktop restart after upgrade.
+- Continues the original Task with its existing directory, model, effort, speed, approval policy, and permissions. New turns use events for progress, final output, one-time approval, and confirmed interruption; no opaque CLI completion polling is used.
+- Moves shared-mode Task subscriptions and handoff observation to a persistent event connection, with state-file hooks and one reconciliation after reconnect. Legacy observation remains compatible.
+- Uses paginated database history as the authority even when an old JSONL file remains, repairing stale completion, subscription, handoff, restart-recovery, and light status.
+- Batches catalog history checks and backs off transient database failures, preserving Task selections and subscriptions while bounding repeated error logs.
+- Journals submission before execution and retains uncertain runs for reconciliation instead of replaying them or starting the next queued input prematurely.
+- Includes both public transport modules in transactional installation, rollback, and keep-data uninstall.
+- Adds a rate-limited App-activation/reopen update hook alongside startup and real Feishu activity; no scheduled update polling is added.
+- Covers the integrated repair with 540 passing Python tests, Python 3.9 import checks, and independent review. Model/effort/speed edits use supported next-turn parameters, and resolved approvals disable stale cards.
+
 ## 1.11.20 (build 100)
 
 - Respects Codex Desktop's explicit missing-candidate marker when supplementing project-assigned Tasks, so stale project assignments no longer resurrect old Task rows in switching, subscription, or PromLight lists.

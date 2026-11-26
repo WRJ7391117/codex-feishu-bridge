@@ -46,6 +46,8 @@ trap cleanup_quiesce_request EXIT HUP INT TERM
 if ! /usr/bin/python3 -B - \
     --resources \
     "${resource_dir}/feishu_codex_bridge.py" \
+    "${resource_dir}/codex_app_server.py" \
+    "${resource_dir}/codex_event_observer.py" \
     "${resource_dir}/control.sh" \
     "${resource_dir}/diagnose.sh" \
     "${resource_dir}/uninstall.sh" \
@@ -69,6 +71,8 @@ if ! /usr/bin/python3 -B - \
     "${HOME}/.codex/log/feishu-bridge.log" \
     "${HOME}/.codex/log/feishu-bridge-launchd.log" \
     "${support_dir}/bridge.py" \
+    "${support_dir}/codex_app_server.py" \
+    "${support_dir}/codex_event_observer.py" \
     "${support_dir}/control.sh" \
     "${support_dir}/diagnose.sh" \
     "${support_dir}/uninstall.sh" \
@@ -722,6 +726,8 @@ PY
 # Stage every runtime file first, then replace the set transactionally with rollback.
 /usr/bin/python3 - \
     "${resource_dir}/feishu_codex_bridge.py" "${support_dir}/bridge.py" 755 \
+    "${resource_dir}/codex_app_server.py" "${support_dir}/codex_app_server.py" 644 \
+    "${resource_dir}/codex_event_observer.py" "${support_dir}/codex_event_observer.py" 644 \
     "${resource_dir}/control.sh" "${support_dir}/control.sh" 755 \
     "${resource_dir}/diagnose.sh" "${support_dir}/diagnose.sh" 755 \
     "${resource_dir}/uninstall.sh" "${support_dir}/uninstall.sh" 755 \

@@ -46,6 +46,7 @@ class RemoteFeatureTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.bridge.STATE_PATH = Path(self.temporary.name) / "state.json"
         self.bridge.LOG_PATH = Path(self.temporary.name) / "bridge.log"
+        self.bridge.desktop_connection_status = mock.Mock(return_value={"available": True, "reason": ""})
         self.bridge.send_card = mock.Mock(
             return_value=(True, "oc_test", "om_current_status")
         )

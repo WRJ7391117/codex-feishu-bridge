@@ -48,6 +48,71 @@ class DatabaseHistoryTests(unittest.TestCase):
                     }), "agentMessage", ordinal + 4),
                 )
 
+    def configure_history_mode(self, mode="paginated"):
+        path = Path(self.directory.name) / "state.sqlite"
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, history_mode TEXT)")
+            connection.execute("INSERT INTO threads VALUES (?, ?)", ("task-db", mode))
+        self.bridge.state_db_path = lambda: path
+        rollout = Path(self.directory.name) / "old.jsonl"
+        rollout.write_text("\n".join(json.dumps(record) for record in [
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "old"}},
+            {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "old", "last_agent_message": "stale"}},
+        ]) + "\n", encoding="utf-8")
+        self.bridge.rollout_path_for_task = lambda _task_id: rollout
+        return rollout
+
+    def test_paginated_history_ignores_existing_stale_jsonl(self):
+        self.configure_history_mode()
+        self.add_turn("new", 30, text="current")
+        snapshot = self.bridge.latest_task_turn("task-db")
+        self.assertEqual((snapshot["turn_id"], snapshot["message"]), ("new", "current"))
+        self.assertEqual(snapshot["history_backend"], "database")
+
+    def test_paginated_completion_is_not_hidden_by_old_running_jsonl(self):
+        rollout = self.configure_history_mode()
+        rollout.write_text(json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "same"}}) + "\n", encoding="utf-8")
+        self.add_turn("same", 30)
+        self.assertEqual(self.bridge.advance_task_turn("task-db", "same", 0)["status"], "completed")
+
+    def test_new_paginated_subscription_does_not_backfill_stale_file_or_database(self):
+        self.configure_history_mode()
+        self.add_turn("new", 30)
+        entry = self.bridge.new_task_subscription(self.task)
+        self.assertEqual(entry["history_backend"], "database")
+        self.assertEqual(self.bridge.scan_database_subscription("task-db", entry)["deliveries"], [])
+
+    def test_empty_paginated_database_does_not_fall_back_to_stale_jsonl(self):
+        self.configure_history_mode()
+        snapshot = self.bridge.latest_task_turn("task-db")
+        self.assertEqual(snapshot["status"], "none")
+        self.assertEqual(snapshot["history_backend"], "database")
+        self.assertEqual(self.bridge.new_task_subscription(self.task)["history_backend"], "database")
+
+    def test_legacy_history_retains_jsonl_authority(self):
+        self.configure_history_mode("legacy")
+        self.add_turn("new", 30)
+        self.assertEqual(self.bridge.latest_task_turn("task-db")["turn_id"], "old")
+
+    def test_old_schema_without_history_mode_remains_compatible(self):
+        path = Path(self.directory.name) / "old-state.sqlite"
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY)")
+        self.bridge.state_db_path = lambda: path
+        self.assertEqual(self.bridge.task_history_backend("task-db"), "rollout")
+
+    def test_catalog_checks_database_history_once_for_all_tasks(self):
+        self.add_turn("new", 30)
+        rows = [{"id": f"task-{i}", "preview": "existing", "rollout_path": "", "task_name": "Task", "project_id": "", "cwd": ""} for i in range(40)]
+        rows.append({**rows[0], "id": "task-db"})
+        self.bridge._read_tasks_by_archive_state = lambda _archived: rows
+        self.bridge.desktop_projects = lambda: []
+        self.bridge.desktop_project_names = lambda: {}
+        with mock.patch.object(self.bridge.sqlite3, "connect", wraps=sqlite3.connect) as connect:
+            tasks = self.bridge.recent_tasks("ou_admin")
+        self.assertEqual([task["id"] for task in tasks], ["task-db"])
+        self.assertEqual(connect.call_count, 1)
+
     def test_missing_jsonl_with_database_history_remains_available(self):
         self.add_turn("turn-1", 10)
         self.assertTrue(self.bridge.task_record_is_available({

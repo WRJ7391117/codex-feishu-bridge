@@ -671,10 +671,12 @@ private final class BridgeController: @unchecked Sendable {
 @MainActor
 private final class SparkleUpdateCoordinator: NSObject, SPUUpdaterDelegate {
     private static let legacyPreferenceKey = "automaticAppUpdatesEnabled"
+    private static let activationCheckMinimumInterval: TimeInterval = 60
     private static let bridgeActivityCheckMinimumInterval: TimeInterval = 6 * 60 * 60
 
     private let bridge: BridgeController
     private var pendingInstallationHandlers: [() -> Void] = []
+    private var lastActivationCheckAt: Date?
     private var lastObservedBridgeEventAt: Date?
     private var lastObservedUpdateSafe: Bool?
     private var bridgeStateWatcher: DispatchSourceFileSystemObject?
@@ -728,6 +730,21 @@ private final class SparkleUpdateCoordinator: NSObject, SPUUpdaterDelegate {
 
     func checkForUpdates() {
         controller.checkForUpdates(nil)
+    }
+
+    func checkForUpdatesAfterActivation() {
+        let now = Date()
+        guard controller.updater.canCheckForUpdates,
+              !controller.updater.sessionInProgress,
+              lastActivationCheckAt.map({
+                  now.timeIntervalSince($0) >= Self.activationCheckMinimumInterval
+              }) ?? true,
+              controller.updater.lastUpdateCheckDate.map({
+                  now.timeIntervalSince($0)
+                    >= Self.activationCheckMinimumInterval
+              }) ?? true else { return }
+        lastActivationCheckAt = now
+        controller.updater.checkForUpdatesInBackground()
     }
 
     func waitForBridgeToBecomeIdle() {
@@ -933,6 +950,10 @@ private final class BridgeViewModel: ObservableObject {
 
     func checkForUpdates() {
         updater.checkForUpdates()
+    }
+
+    func checkForUpdatesAfterActivation() {
+        updater.checkForUpdatesAfterActivation()
     }
 
     func delayApplicationTerminationForPendingUpdate(
@@ -3690,7 +3711,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        model.checkForUpdatesAfterActivation()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        model.checkForUpdatesAfterActivation()
         showMainWindow()
         return true
     }

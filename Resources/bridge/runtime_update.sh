@@ -11,7 +11,7 @@ runtime_status="${HOME}/.codex/feishu-bridge/runtime-status.json"
 control_hook="${HOME}/.codex/hooks/feishu_bridge_control.sh"
 log_dir="${HOME}/.codex/log"
 lock_file="${log_dir}/feishu-bridge-app-update.lock"
-runtime_files=(bridge.py control.sh diagnose.sh uninstall.sh lark-cli promlight-helper)
+runtime_files=(bridge.py codex_app_server.py codex_event_observer.py control.sh diagnose.sh uninstall.sh lark-cli promlight-helper)
 backup_dir=""
 lock_acquired=0
 

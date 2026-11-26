@@ -36,6 +36,9 @@ BRIDGE_RESOURCE_DIR = Path(__file__).resolve().parent
 if str(BRIDGE_RESOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(BRIDGE_RESOURCE_DIR))
 
+from codex_app_server import AppServerClient, AppServerError
+from codex_event_observer import SharedEventObserver
+
 try:
     from workflow_notifications import (  # noqa: E402
         AGENT_MESH_WORKFLOW_ID,
@@ -522,6 +525,7 @@ _identity_refresh_pending: dict[str, tuple[str, dict[str, str] | None, float]] =
 _queued_card_refresh_pending: dict[str, float] = {}
 _active_runs_lock = threading.RLock()
 _active_runs: dict[str, dict[str, Any]] = {}
+_codex_reconcile_lock = threading.RLock()
 _result_delivery_locks_lock = threading.Lock()
 _result_delivery_locks: dict[str, Any] = {}
 _last_feishu_event_at = 0.0
@@ -533,6 +537,13 @@ _codex_usage_refreshing = False
 _task_usage_cache_lock = threading.Lock()
 _task_usage_cache: dict[tuple[str, str, int, str], tuple[float, dict[str, Any]]] = {}
 TASK_USAGE_CACHE_SECONDS = 300
+_task_db_failure_lock = threading.Lock()
+_task_db_failure_count = 0
+_task_db_retry_after = 0.0
+_task_db_last_warning = 0.0
+_shared_codex_observer: Any = None
+_shared_target_signature: Any = None
+_shared_target_ids: set[str] = set()
 
 
 class DesktopUnavailableError(RuntimeError):
@@ -542,6 +553,12 @@ class DesktopUnavailableError(RuntimeError):
 
 
 def desktop_unavailable_message(reason: str) -> str:
+    if reason == "ipc-not-listening":
+        return (
+            "Codex Desktop 的桥接接口未运行，可能已被新版桌面端移除。"
+            "这条消息尚未提交。可选择“使用备用 CLI”继续同一个 Task；"
+            "运行期间桌面版可能无法实时显示内容。"
+        )
     explanations = {
         "ipc-socket-missing": "Codex Desktop 当前没有提供桥接连接",
         "task-record-missing": "桥接暂时找不到这个 Task 的本地记录",
@@ -757,6 +774,8 @@ def save_state(state: dict[str, Any]) -> None:
                 os.close(directory_descriptor)
         finally:
             temporary.unlink(missing_ok=True)
+    if _shared_codex_observer is not None:
+        _shared_codex_observer.wake()
 
 
 def promlight_state(state: dict[str, Any]) -> dict[str, Any]:
@@ -1759,12 +1778,27 @@ def retry_sqlite_read(operation: Callable[[], Any]) -> Any:
     for attempt in range(len(SQLITE_READ_RETRY_DELAYS) + 1):
         try:
             return operation()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
             if attempt >= len(SQLITE_READ_RETRY_DELAYS):
+                note_task_database_failure(exc, "catalog-or-lookup")
                 raise
-            log(f"task database read retry attempt={attempt + 1}")
             time.sleep(SQLITE_READ_RETRY_DELAYS[attempt])
     raise RuntimeError("unreachable")
+
+
+def note_task_database_failure(exc: BaseException, stage: str) -> None:
+    global _task_db_failure_count, _task_db_retry_after, _task_db_last_warning
+    now = time.monotonic()
+    with _task_db_failure_lock:
+        _task_db_failure_count = min(5, _task_db_failure_count + 1)
+        delay = min(30, 2 ** _task_db_failure_count)
+        _task_db_retry_after = now + delay
+        warn = not _task_db_last_warning or now - _task_db_last_warning >= 30
+        if warn:
+            _task_db_last_warning = now
+    if warn:
+        code = getattr(exc, "sqlite_errorname", type(exc).__name__)
+        log(f"task database unavailable stage={stage} code={code} retry_seconds={delay}")
 
 
 def _read_tasks_by_archive_state(archived: bool) -> list[sqlite3.Row]:
@@ -1842,7 +1876,7 @@ def _read_tasks_by_archive_state(archived: bool) -> list[sqlite3.Row]:
     )
 
 
-def task_record_is_available(row: sqlite3.Row) -> bool:
+def task_record_is_available(row: sqlite3.Row, history_ids: set[str] | None = None) -> bool:
     keys = row.keys()
     preview = str(row["preview"] or "").strip() if "preview" in keys else ""
     if not preview:
@@ -1852,7 +1886,10 @@ def task_record_is_available(row: sqlite3.Row) -> bool:
     )
     return bool(
         rollout_path and Path(rollout_path).expanduser().is_file()
-    ) or database_task_exists(str(row["id"]))
+    ) or (
+        str(row["id"]) in history_ids
+        if history_ids is not None else database_task_exists(str(row["id"]))
+    )
 
 
 def tasks_by_archive_state(
@@ -1864,6 +1901,11 @@ def tasks_by_archive_state(
     projects = desktop_projects()
     names_by_id = {project["id"]: project["name"] for project in projects}
     names_by_root = {project["root"]: project["name"] for project in projects}
+    history_ids = database_task_ids([
+        str(row["id"]) for row in rows
+        if str(row["preview"] or "").strip()
+        and not (row["rollout_path"] and Path(str(row["rollout_path"])).expanduser().is_file())
+    ])
     tasks = [
         {
             "id": str(row["id"]),
@@ -1880,7 +1922,7 @@ def tasks_by_archive_state(
             ),
         }
         for row in rows
-        if task_record_is_available(row)
+        if task_record_is_available(row, history_ids)
     ]
     return [task for task in tasks if user_can_access_task(user_id, task)]
 
@@ -1995,16 +2037,37 @@ def rollout_path_for_task(thread_id: str) -> Path | None:
     return Path(str(row[0])) if row and row[0] else None
 
 
+def task_history_backend(thread_id: str) -> str:
+    path = state_db_path()
+    if not path.is_file():
+        return "rollout"
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(threads)")}
+        if "history_mode" not in columns:
+            return "rollout"
+        row = connection.execute("SELECT history_mode FROM threads WHERE id = ?", (thread_id,)).fetchone()
+    return "database" if row and row[0] == "paginated" else "rollout"
+
+
 def database_task_exists(thread_id: str) -> bool:
-    if not THREAD_HISTORY_DB.is_file():
-        return False
+    return thread_id in database_task_ids([thread_id])
+
+
+def database_task_ids(thread_ids: list[str]) -> set[str]:
+    if not thread_ids or not THREAD_HISTORY_DB.is_file():
+        return set()
     connection = sqlite3.connect(
         f"file:{THREAD_HISTORY_DB}?mode=ro", uri=True, timeout=2
     )
     try:
-        return connection.execute(
-            "SELECT 1 FROM thread_turns WHERE thread_id = ? LIMIT 1", (thread_id,)
-        ).fetchone() is not None
+        existing: set[str] = set()
+        for offset in range(0, len(thread_ids), 500):
+            chunk = thread_ids[offset:offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            existing.update(row[0] for row in connection.execute(
+                f"SELECT DISTINCT thread_id FROM thread_turns WHERE thread_id IN ({placeholders})", chunk
+            ))
+        return existing
     finally:
         connection.close()
 
@@ -2086,6 +2149,12 @@ def database_task_turns(
 
 
 def latest_task_turn(thread_id: str) -> dict[str, Any]:
+    if task_history_backend(thread_id) == "database":
+        turns = database_task_turns(thread_id, latest=True)
+        return turns[0] if turns else {
+            "status": "none", "turn_id": "", "message": "", "images": [],
+            "cursor_offset": 0, "history_backend": "database",
+        }
     snapshot = latest_rollout_turn(rollout_path_for_task(thread_id))
     if snapshot.get("status") != "none":
         return snapshot
@@ -2099,6 +2168,12 @@ def advance_task_turn(
     cursor_offset: int,
     existing_images: list[str] | None = None,
 ) -> dict[str, Any]:
+    if task_history_backend(thread_id) == "database":
+        turns = database_task_turns(thread_id, turn_id=turn_id)
+        return turns[0] if turns else {
+            "status": "missing", "turn_id": turn_id, "message": "", "images": [],
+            "cursor_offset": cursor_offset, "history_backend": "database",
+        }
     snapshot = advance_rollout_turn(
         rollout_path_for_task(thread_id), turn_id, cursor_offset, existing_images
     )
@@ -2453,8 +2528,8 @@ def rollout_cli_version(rollout_path: Path | None) -> str:
     return str(payload.get("cli_version") or "").strip()
 
 
-def cli_resume_preflight(rollout_path: Path | None) -> tuple[bool, str]:
-    task_version = rollout_cli_version(rollout_path)
+def cli_resume_preflight(rollout_path: Path | None, *, task_version: str = "") -> tuple[bool, str]:
+    task_version = task_version or rollout_cli_version(rollout_path)
     if not task_version:
         return (
             False,
@@ -2477,26 +2552,6 @@ def cli_resume_preflight(rollout_path: Path | None) -> tuple[bool, str]:
             "请在 Mac 打开 Codex Desktop 后重试。",
         )
     return True, ""
-
-
-def codex_resume_failure_message(stderr: str) -> str:
-    normalized = stderr.lower()
-    if any(
-        marker in normalized
-        for marker in (
-            "failed to read thread",
-            "thread-store internal error",
-            "does not start with session metadata",
-        )
-    ):
-        return (
-            "Codex Desktop 当前未连接，且备用 CLI 无法读取这个 task。"
-            "请在 Mac 打开 Codex Desktop 后重试；无需重新选择 task。"
-        )
-    return (
-        "没有成功发送到 Codex。请确认 Mac 上的 Codex Desktop 已打开后重试。"
-        "详细原因已记录到桥接日志。"
-    )
 
 
 def idempotency_key(message_id: str, kind: str) -> str:
@@ -2609,73 +2664,51 @@ def codex_app_server_requests(
     ],
     timeout: float = 15,
 ) -> list[dict[str, Any]]:
-    process = subprocess.Popen(
-        [codex_cli_executable(), "app-server", "--listen", "stdio://"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    if process.stdin is None or process.stdout is None:
-        process.terminate()
-        raise RuntimeError("Codex app-server 无法建立输入输出连接。")
-
-    def send(payload: dict[str, Any]) -> None:
-        process.stdin.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
-        process.stdin.flush()
-
-    def receive(request_id: int) -> dict[str, Any]:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([process.stdout], [], [], 0.5)
-            if not ready:
-                if process.poll() is not None:
-                    break
-                continue
-            line = process.stdout.readline()
-            if not line:
-                break
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict) and payload.get("id") == request_id:
-                if payload.get("error"):
-                    raise RuntimeError("Codex app-server 拒绝了请求。")
-                result = payload.get("result")
-                return result if isinstance(result, dict) else {}
-        raise RuntimeError("等待 Codex app-server 响应超时。")
-
-    try:
-        send(
-            {
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "clientInfo": {
-                        "name": "codex-feishu-bridge",
-                        "title": "DeepOri Bridge",
-                        "version": "1",
-                    }
-                },
-            }
-        )
-        receive(1)
-        send({"method": "initialized", "params": {}})
+    with codex_app_server_client() as client:
+        client.initialize(timeout=timeout)
         results: list[dict[str, Any]] = []
-        for request_id, (method, params) in enumerate(requests, start=2):
+        for method, params in requests:
             resolved_params = params(results) if callable(params) else params
-            send({"id": request_id, "method": method, "params": resolved_params})
-            results.append(receive(request_id))
+            result = client.request(method, resolved_params, timeout=timeout)
+            results.append(result if isinstance(result, dict) else {})
         return results
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=3)
+
+
+def codex_app_server_client() -> AppServerClient:
+    return AppServerClient(
+        codex_cli_executable(),
+        shared_daemon=(HOME / ".codex/app-server-control/app-server-control.sock").exists(),
+    )
+
+
+def prepare_shared_codex_connection() -> dict[str, Any]:
+    """Select the Desktop-supported local daemon without changing permissions."""
+    executable = codex_cli_executable()
+    version = version_tuple(executable_version(executable))
+    if version is None or version < (0, 171, 0):
+        return {"available": False, "backend": "desktop"}
+    environment = os.environ.copy()
+    for key in (
+        "CODEX_APP_TOOLS_PIPE_PATH", "CODEX_APP_TOOLS_CALLER_HOST_ID",
+        "CODEX_THREAD_ID", "CODEX_TURN_ID", "CODEX_CLI_PATH",
+        "CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY",
+    ):
+        environment.pop(key, None)
+    started = subprocess.run(
+        [executable, "app-server", "daemon", "start"],
+        capture_output=True, text=True, timeout=30, env=environment,
+    )
+    if started.returncode != 0:
+        raise RuntimeError("无法启动 Codex 共享本地服务，请运行诊断。")
+    selected = subprocess.run(
+        ["/bin/launchctl", "setenv", "CODEX_APP_SERVER_USE_LOCAL_DAEMON", "1"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if selected.returncode != 0:
+        raise RuntimeError("无法配置 Codex Desktop 的共享连接，请运行诊断。")
+    with codex_app_server_client() as client:
+        client.initialize(timeout=10)
+    return {"available": True, "backend": "shared-app-server"}
 
 
 def codex_task_settings(thread_id: str) -> dict[str, Any]:
@@ -7428,6 +7461,10 @@ def build_queued_card(
             status = f"全局并发已满（{active}/{maximum}），有空闲位置后自动执行"
         elif reason == "desktop_task_busy":
             status = "Codex Desktop 中的这个 Task 仍在运行，15 秒后自动重试"
+        elif reason == "desktop_connection_migration":
+            status = "请重开一次 Codex Desktop 以完成共享连接切换；消息已保留，连接恢复后自动继续"
+        elif reason == "unconfirmed_previous":
+            status = "上一条消息的最终状态尚未确认，本条已保留，确认后自动继续"
         else:
             status = "同一 Task 正在运行，将按发送顺序自动执行"
     attachment_count = len(entry.get("image_keys") or []) + len(
@@ -7595,7 +7632,7 @@ def build_approval_card(run: dict[str, Any], approval: dict[str, Any]) -> dict[s
 def completed_approval_card(
     run: dict[str, Any],
     approval: dict[str, Any],
-    approved: bool,
+    approved: bool | None,
 ) -> dict[str, Any]:
     card = build_approval_card(run, approval)
     card["header"]["template"] = "green" if approved else "grey"
@@ -7606,7 +7643,7 @@ def completed_approval_card(
         ),
         {
             "tag": "text_tag",
-            "text": {"tag": "plain_text", "content": "已允许" if approved else "已拒绝"},
+            "text": {"tag": "plain_text", "content": "已处理" if approved is None else "已允许" if approved else "已拒绝"},
             "color": "green" if approved else "neutral",
         }
     ]
@@ -7615,7 +7652,7 @@ def completed_approval_card(
             "tag": "markdown",
             "content": (
                 f"{task_identity_markdown(run['task'])}\n\n"
-                + ("本次请求已允许。" if approved else "本次请求已拒绝。")
+                + ("本次请求已在其他客户端处理。" if approved is None else "本次请求已允许。" if approved else "本次请求已拒绝。")
             ),
         }
     ]
@@ -9992,7 +10029,7 @@ def task_subscriptions_card_for_state(
             tasks = recent_tasks(user_id)
         except (OSError, sqlite3.Error) as exc:
             tasks = []
-            log(f"task subscription catalog unavailable error={type(exc).__name__}")
+            note_task_database_failure(exc, "subscription-catalog")
         subscriptions = user_task_subscriptions(state, user_id)
         previous_subscription_ids = set(subscriptions)
         valid_ids = {task["id"] for task in tasks}
@@ -10002,10 +10039,7 @@ def task_subscriptions_card_for_state(
             try:
                 retained_task = task_by_id(task_id, user_id)
             except (OSError, sqlite3.Error) as exc:
-                log(
-                    "task subscription lookup unavailable "
-                    f"error={type(exc).__name__}"
-                )
+                note_task_database_failure(exc, "subscription-lookup")
                 continue
             if retained_task is None:
                 subscriptions.pop(task_id, None)
@@ -10174,6 +10208,10 @@ def update_task_subscription_checkpoint(
 
 
 def poll_task_subscriptions() -> bool:
+    global _task_db_failure_count
+    if time.monotonic() < _task_db_retry_after:
+        return False
+    database_failed = False
     with _state_lock:
         state = load_state()
         subscriptions = task_subscriptions(state)
@@ -10191,7 +10229,6 @@ def poll_task_subscriptions() -> bool:
             for task_id, entry in values.items()
             if isinstance(entry, dict)
         ]
-        turn_owners = dict(state.get("bridge_turn_owners", {}))
     tasks_by_user: dict[str, dict[str, dict[str, str]]] = {}
     for user_id in dict.fromkeys(user_id for user_id, _task_id, _entry in pending):
         try:
@@ -10200,7 +10237,8 @@ def poll_task_subscriptions() -> bool:
             }
         except (OSError, sqlite3.Error) as exc:
             tasks_by_user[user_id] = {}
-            log(f"task subscription catalog unavailable error={type(exc).__name__}")
+            database_failed = True
+            note_task_database_failure(exc, "subscription-catalog")
     rollout_paths: dict[str, Path | None] = {}
     scan_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
     did_work = False
@@ -10210,10 +10248,8 @@ def poll_task_subscriptions() -> bool:
             try:
                 task = task_by_id(task_id, user_id)
             except (OSError, sqlite3.Error) as exc:
-                log(
-                    "task subscription lookup unavailable "
-                    f"error={type(exc).__name__}"
-                )
+                database_failed = True
+                note_task_database_failure(exc, "subscription-lookup")
                 continue
         if task is None:
             with _state_lock:
@@ -10229,7 +10265,8 @@ def poll_task_subscriptions() -> bool:
             try:
                 rollout_paths[task_id] = rollout_path_for_task(task_id)
             except sqlite3.Error as exc:
-                log(f"task subscription rollout unavailable error={type(exc).__name__}")
+                database_failed = True
+                note_task_database_failure(exc, "subscription-history")
                 continue
         cursor_offset = int(entry.get("cursor_offset") or 0)
         active_turn_id = str(entry.get("active_turn_id") or "")
@@ -10237,11 +10274,11 @@ def poll_task_subscriptions() -> bool:
         checkpoint = (cursor_offset, active_turn_id, existing_images)
         scan_key = (
             task_id, cursor_offset, active_turn_id, existing_images,
-            str(entry.get("history_backend") or "rollout"),
+            task_history_backend(task_id), str(entry.get("history_backend") or "rollout"),
         )
         if scan_key not in scan_cache:
             path = rollout_paths[task_id]
-            if entry.get("history_backend") == "database" or (
+            if scan_key[4] == "database" or entry.get("history_backend") == "database" or (
                 (path is None or not path.is_file()) and database_task_exists(task_id)
             ):
                 scan_cache[scan_key] = scan_database_subscription(task_id, entry)
@@ -10255,7 +10292,8 @@ def poll_task_subscriptions() -> bool:
         delivery_failed = False
         for delivery in scan.get("deliveries", []):
             turn_id = str(delivery.get("turn_id") or "")
-            owner = str(turn_owners.get(turn_id) or "")
+            with _state_lock:
+                owner = str(load_state().get("bridge_turn_owners", {}).get(turn_id) or "")
             if owner != user_id and not deliver_task_subscription_result(
                 user_id,
                 task,
@@ -10295,6 +10333,9 @@ def poll_task_subscriptions() -> bool:
                 list(final_checkpoint[2]),
                 str(scan.get("history_backend") or "rollout"),
             )
+    if not database_failed:
+        with _task_db_failure_lock:
+            _task_db_failure_count = 0
     return did_work
 
 
@@ -10457,7 +10498,16 @@ def confirm_desktop_sync(
     log("card handled action=confirm_desktop_sync result=no-result")
 
 
-def retry_desktop_result_subscriptions(now: float | None = None) -> bool:
+def retry_desktop_result_subscriptions(
+    now: float | None = None, *, force: bool = False, only_user_id: str | None = None,
+) -> bool:
+    with _codex_reconcile_lock:
+        return _retry_desktop_result_subscriptions(now, force=force, only_user_id=only_user_id)
+
+
+def _retry_desktop_result_subscriptions(
+    now: float | None = None, *, force: bool = False, only_user_id: str | None = None,
+) -> bool:
     timestamp = time.time() if now is None else now
     with _state_lock:
         state = load_state()
@@ -10467,7 +10517,8 @@ def retry_desktop_result_subscriptions(now: float | None = None) -> bool:
                 (user_id, dict(value))
                 for user_id, value in subscriptions.items()
                 if isinstance(value, dict)
-                and float(value.get("next_check_at") or 0) <= timestamp
+                and (only_user_id is None or user_id == only_user_id)
+                and (force or float(value.get("next_check_at") or 0) <= timestamp)
             ),
             None,
         )
@@ -10523,8 +10574,19 @@ def retry_desktop_result_subscriptions(now: float | None = None) -> bool:
     return True
 
 
-def retry_recoverable_runs(now: float | None = None) -> bool:
+def retry_recoverable_runs(
+    now: float | None = None, *, force: bool = False, only_turn_id: str | None = None,
+) -> bool:
+    with _codex_reconcile_lock:
+        return _retry_recoverable_runs(now, force=force, only_turn_id=only_turn_id)
+
+
+def _retry_recoverable_runs(
+    now: float | None = None, *, force: bool = False, only_turn_id: str | None = None,
+) -> bool:
     timestamp = time.time() if now is None else now
+    with _active_runs_lock:
+        active_sources = {str(run.get("source_message_id") or "") for run in _active_runs.values()}
     with _state_lock:
         state = load_state()
         selected = next(
@@ -10532,7 +10594,9 @@ def retry_recoverable_runs(now: float | None = None) -> bool:
                 (turn_id, dict(value))
                 for turn_id, value in recoverable_runs(state).items()
                 if isinstance(value, dict)
-                and float(value.get("next_check_at") or 0) <= timestamp
+                and (only_turn_id is None or turn_id == only_turn_id)
+                and str(value.get("source_message_id") or "") not in active_sources
+                and (force or float(value.get("next_check_at") or 0) <= timestamp)
             ),
             None,
         )
@@ -10564,6 +10628,21 @@ def retry_recoverable_runs(now: float | None = None) -> bool:
             "images": list(recovery.get("images") or []),
         }
     else:
+        if turn_id.startswith("pending:"):
+            try:
+                resolved_id = reconcile_pending_submission(turn_id, recovery)
+            finally:
+                with _state_lock:
+                    state = load_state()
+                    current = recoverable_runs(state).get(turn_id)
+                    if isinstance(current, dict):
+                        current["next_check_at"] = timestamp + 30
+                        save_state(state)
+            if not resolved_id:
+                return True
+            turn_id = resolved_id
+            with _state_lock:
+                recovery = dict(recoverable_runs(load_state())[turn_id])
         snapshot = advance_task_turn(
             task_id,
             turn_id,
@@ -11360,6 +11439,25 @@ def initialize_desktop_connection(connection: socket.socket) -> str:
     return client_id
 
 
+def desktop_connection_status() -> dict[str, Any]:
+    if not DESKTOP_IPC_SOCKET.exists():
+        return {"available": False, "reason": "ipc-socket-missing"}
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(2)
+            connection.connect(str(DESKTOP_IPC_SOCKET))
+            initialize_desktop_connection(connection)
+    except ConnectionRefusedError:
+        return {"available": False, "reason": "ipc-not-listening"}
+    except socket.timeout:
+        return {"available": False, "reason": "ipc-timeout"}
+    except (ConnectionError, OSError):
+        return {"available": False, "reason": "ipc-connect-failed"}
+    except (RuntimeError, ValueError, KeyError):
+        return {"available": False, "reason": "ipc-initialize-failed"}
+    return {"available": True, "reason": ""}
+
+
 def desktop_task_state_once(thread_id: str, timeout: float = 8) -> dict[str, Any]:
     if not DESKTOP_IPC_SOCKET.exists():
         raise RuntimeError("Codex Desktop 当前不可用。")
@@ -11401,6 +11499,16 @@ def desktop_task_state_once(thread_id: str, timeout: float = 8) -> dict[str, Any
 
 
 def desktop_task_state(thread_id: str) -> dict[str, Any]:
+    if not desktop_connection_status()["available"]:
+        settings = app_server_task_operation(thread_id)
+        with _state_lock:
+            pending = load_state().get("pending_task_settings", {}).get(thread_id, {})
+        return {"latestThreadSettings": {
+            "model": settings.get("model"),
+            "effort": settings.get("reasoningEffort"),
+            "serviceTier": settings.get("serviceTier"),
+            **pending,
+        }}
     try:
         return desktop_task_state_once(thread_id)
     except (ConnectionError, FileNotFoundError, OSError, socket.timeout, RuntimeError):
@@ -11482,6 +11590,15 @@ def update_desktop_task_settings(
         settings["serviceTier"] = service_tier
     if not settings:
         raise ValueError("missing task settings")
+    run = active_run_for_task(thread_id)
+    if (run is not None and run.get("app_server_client") is not None) or not desktop_connection_status()["available"]:
+        if service_tier == "default":
+            settings["serviceTier"] = None
+        with _state_lock:
+            state = load_state()
+            state.setdefault("pending_task_settings", {}).setdefault(thread_id, {}).update(settings)
+            save_state(state)
+        return
     desktop_task_request(
         thread_id,
         "thread-follower-update-thread-settings",
@@ -11490,7 +11607,25 @@ def update_desktop_task_settings(
     )
 
 
+def consume_pending_task_settings(thread_id: str, submitted: dict[str, Any]) -> None:
+    if not submitted:
+        return
+    with _state_lock:
+        state = load_state()
+        entries = state.get("pending_task_settings", {})
+        pending = entries.get(thread_id, {})
+        for key, value in submitted.items():
+            if key in pending and pending[key] == value:
+                del pending[key]
+        if not pending:
+            entries.pop(thread_id, None)
+        save_state(state)
+
+
 def compact_desktop_task(thread_id: str) -> None:
+    if not desktop_connection_status()["available"]:
+        app_server_task_operation(thread_id, "thread/compact/start")
+        return
     desktop_task_request(
         thread_id,
         "thread-follower-compact-thread",
@@ -11498,6 +11633,45 @@ def compact_desktop_task(thread_id: str) -> None:
         version=1,
         timeout_ms=60000,
     )
+
+
+def app_server_task_operation(
+    thread_id: str,
+    method: str = "",
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    run = active_run_for_task(thread_id)
+    if run is not None:
+        client = run.get("app_server_client")
+        if client is None or method == "thread/compact/start":
+            raise RuntimeError("当前 Task 正在准备或运行，请稍后重试。")
+        if not method:
+            return dict(run.get("app_server_settings") or {})
+        return client.request(method, {"threadId": thread_id, **(params or {})}) or {}
+    with codex_app_server_client() as client:
+        client.initialize()
+        resumed = client.request("thread/resume", {"threadId": thread_id, "excludeTurns": True})
+        if resumed.get("thread", {}).get("id") != thread_id:
+            raise RuntimeError("Codex 未恢复原 Task，本次操作未执行。")
+        if not method:
+            return resumed
+        result = client.request(method, {"threadId": thread_id, **(params or {})}) or {}
+        if method == "thread/compact/start":
+            deadline = time.monotonic() + 60
+            while True:
+                event = client.next_event(timeout=max(0, deadline - time.monotonic()))
+                data = event.get("params") or {}
+                if data.get("threadId") != thread_id:
+                    continue
+                if event.get("method") == "thread/compacted":
+                    break
+                if event.get("method") == "turn/completed":
+                    if data.get("turn", {}).get("status") != "completed":
+                        raise RuntimeError("上下文压缩未完成。")
+                    break
+                if "id" in event:
+                    client.respond_error(event["id"], "Compaction cannot grant additional permissions.")
+        return result
 
 
 def begin_desktop_following(
@@ -11532,12 +11706,17 @@ def set_desktop_following(
 
 def set_run_ipc(
     run: dict[str, Any],
-    connection: socket.socket,
+    connection: Any,
     client_id: str,
 ) -> None:
     with _active_runs_lock:
-        run["ipc_connection"] = connection
-        run["ipc_client_id"] = client_id
+        if isinstance(connection, AppServerClient):
+            run["app_server_client"] = connection
+            run["backend"] = "app-server"
+        else:
+            run["ipc_connection"] = connection
+            run["ipc_client_id"] = client_id
+            run["backend"] = "desktop"
     request_run_interrupt(run)
 
 
@@ -11619,6 +11798,16 @@ def send_run_ipc_request(
 
 
 def interrupt_desktop_turn(run: dict[str, Any]) -> bool:
+    client = run.get("app_server_client")
+    if client is not None:
+        try:
+            client.request("turn/interrupt", {
+                "threadId": str(run["task"]["id"]),
+                "turnId": str(run.get("turn_id") or ""),
+            }, timeout=10)
+        except (AppServerError, OSError, RuntimeError):
+            return False
+        return True
     try:
         response = send_run_ipc_request(
             run,
@@ -11657,7 +11846,7 @@ def request_run_interrupt(run: dict[str, Any]) -> bool:
             or not cancel_event.is_set()
             or run.get("interrupt_started")
             or not run.get("turn_id")
-            or not run.get("ipc_connection")
+            or not (run.get("ipc_connection") or run.get("app_server_client"))
         ):
             return False
         run["interrupt_started"] = True
@@ -11674,6 +11863,22 @@ def respond_desktop_approval(
     approval: dict[str, Any],
     approved: bool,
 ) -> bool:
+    client = run.get("app_server_client")
+    if client is not None:
+        request_id = approval.get("protocol_request_id")
+        if request_id is None or approval.get("type") not in {"command", "file", "permission"}:
+            return False
+        response = (
+            {"permissions": approval.get("params", {}).get("permissions", {}) if approved else {},
+             "scope": "turn"}
+            if approval["type"] == "permission"
+            else {"decision": "accept" if approved else "decline"}
+        )
+        try:
+            client.respond(request_id, response)
+        except (AppServerError, OSError, RuntimeError):
+            return False
+        return True
     try:
         method, params = approval_response_request(
             str(run["task"]["id"]),
@@ -11737,6 +11942,13 @@ def respond_subscription_approval(
     approval: dict[str, Any],
     approved: bool,
 ) -> bool:
+    run = active_run_for_task(task_id)
+    if run is not None and run.get("app_server_client") is not None:
+        return respond_desktop_approval(run, approval, approved)
+    if _shared_codex_observer is not None:
+        client = _shared_codex_observer.client
+        if client is not None:
+            return respond_desktop_approval({"app_server_client": client}, approval, approved)
     try:
         method, params = approval_response_request(task_id, approval, approved)
         params = {key: value for key, value in params.items() if key != "conversationId"}
@@ -12316,6 +12528,14 @@ def claim_active_run(run: dict[str, Any]) -> bool:
             run["queue_reason"] = "same_task"
             run["active_run_count"] = len(running)
             return False
+        with _state_lock:
+            if any(
+                isinstance(entry, dict) and str(entry.get("task", {}).get("id") or "") == thread_id
+                for entry in recoverable_runs(load_state()).values()
+            ):
+                run["queue_reason"] = "unconfirmed_previous"
+                run["active_run_count"] = len(running)
+                return False
         if len(running) >= MAX_CONCURRENT_RUNS:
             run["queue_reason"] = "global_limit"
             run["active_run_count"] = len(running)
@@ -12378,6 +12598,7 @@ def persist_recoverable_run(run: dict[str, Any]) -> bool:
     entry = {
         "run_id": str(run.get("run_id") or ""),
         "turn_id": turn_id,
+        "backend": str(run.get("backend") or "desktop"),
         "user_id": user_id,
         "chat_id": str(run.get("chat_id") or ""),
         "source_message_id": str(run.get("source_message_id") or ""),
@@ -12392,6 +12613,7 @@ def persist_recoverable_run(run: dict[str, Any]) -> bool:
         "created_at": time.time(),
         "started_at": float(run.get("started_at") or time.time()),
         "attachment_count": int(run.get("attachment_count") or 0),
+        "submitted_settings": dict(run.get("submitted_settings") or {}),
         "timeline": [
             {
                 "kind": str(item.get("kind") or "")[:40],
@@ -12404,6 +12626,8 @@ def persist_recoverable_run(run: dict[str, Any]) -> bool:
         ],
         "next_check_at": 0,
     }
+    if turn_id.startswith("pending:"):
+        entry["previous_turn_id"] = str(snapshot.get("turn_id") or "")
     if same_turn and snapshot.get("status") in {"completed", "failed"}:
         entry["terminal_status"] = str(snapshot.get("status") or "")
         entry["terminal_message"] = str(snapshot.get("message") or "")
@@ -12610,6 +12834,11 @@ def start_next_queued_input(task_id: str, now: float | None = None) -> bool:
             return False
         with _state_lock:
             state = load_state()
+            if any(
+                isinstance(entry, dict) and str(entry.get("task", {}).get("id") or "") == task_id
+                for entry in recoverable_runs(state).values()
+            ):
+                return False
             entries = pending_inputs(state)
             selected_index = next(
                 (
@@ -12676,6 +12905,7 @@ def run_timeline_kind(status: str, outcome: str | None) -> tuple[str, str]:
         return outcome, labels[outcome]
     mappings = (
         ("附件", "input", "读取飞书附件"),
+        ("本机 Codex 已接收", "submitted", "已提交到本机 Codex"),
         ("已接收", "submitted", "已提交到 Codex Desktop"),
         ("分析任务", "reasoning", "分析任务"),
         ("使用工具", "tool", "执行工具"),
@@ -12790,7 +13020,7 @@ def approval_from_request(request: dict[str, Any]) -> dict[str, Any] | None:
     protocol_request_id = request.get("id")
     if protocol_request_id is None:
         protocol_request_id = request.get("requestId")
-    request_id = str(protocol_request_id or "")
+    request_id = str(protocol_request_id) if protocol_request_id is not None else ""
     method = str(request.get("method") or "")
     params = request.get("params") if isinstance(request.get("params"), dict) else {}
     if not request_id:
@@ -13025,6 +13255,166 @@ def task_subscription_approval_observer_loop() -> None:
         connection.close()
 
 
+def shared_codex_targets() -> set[str]:
+    global _shared_target_signature, _shared_target_ids
+    with _state_lock:
+        state = load_state()
+        pairs = {
+            (user_id, task_id)
+            for user_id, values in task_subscriptions(state).items()
+            if authorized_user(user_id) and isinstance(values, dict)
+            for task_id in values
+        }
+        for user_id, entry in desktop_result_subscriptions(state).items():
+            if authorized_user(user_id) and isinstance(entry, dict):
+                pairs.add((user_id, str(entry.get("task_id") or "")))
+        for entry in recoverable_runs(state).values():
+            if isinstance(entry, dict) and authorized_user(str(entry.get("user_id") or "")):
+                pairs.add((str(entry["user_id"]), str(entry.get("task", {}).get("id") or "")))
+        for lamp in promlight_state(state)["lamps"].values():
+            owner = str(lamp.get("owner_open_id") or "") if isinstance(lamp, dict) else ""
+            if authorized_user(owner):
+                pairs.update((owner, str(task_id)) for task_id in lamp.get("task_ids", []))
+    signature = tuple(sorted(pairs))
+    if signature == _shared_target_signature:
+        return set(_shared_target_ids)
+    targets = {task_id for user_id, task_id in pairs if task_id and task_by_id(task_id, user_id) is not None}
+    _shared_target_signature = signature
+    _shared_target_ids = targets
+    return set(targets)
+
+
+def record_shared_submission_turn(task_id: str, turn: dict[str, Any]) -> None:
+    client_ids = {
+        str(item.get("clientId") or "") for item in turn.get("items", [])
+        if isinstance(item, dict) and item.get("type") == "userMessage"
+    }
+    with _state_lock:
+        state = load_state()
+        pending = recoverable_runs(state)
+        matched = [
+            key for key, entry in pending.items()
+            if turn.get("id") and key.startswith("pending:") and key[8:] in client_ids
+            and isinstance(entry, dict)
+            and str(entry.get("task", {}).get("id") or "") == task_id
+        ]
+        for key in matched:
+            entry = pending.pop(key)
+            entry["turn_id"] = str(turn["id"])
+            entry["next_check_at"] = 0
+            pending.setdefault(entry["turn_id"], entry)
+            owners = state.setdefault("bridge_turn_owners", {})
+            owners[entry["turn_id"]] = str(entry.get("user_id") or "")
+            turns = state.setdefault("bridge_turns", [])
+            if entry["turn_id"] not in turns:
+                turns.append(entry["turn_id"])
+            state["bridge_turns"] = turns[-200:]
+        if matched:
+            save_state(state)
+    if matched:
+        consume_pending_task_settings(task_id, entry.get("submitted_settings") or {})
+
+
+def reconcile_pending_submission(turn_id: str, recovery: dict[str, Any]) -> str:
+    task_id = str(recovery["task"]["id"])
+    client_id = turn_id[8:]
+    previous = str(recovery.get("previous_turn_id") or "")
+    cutoff = float(recovery.get("created_at") or 0) - 2
+    cursor = None
+    with codex_app_server_client() as client:
+        client.initialize()
+        while True:
+            page = client.request("thread/turns/list", {
+                "threadId": task_id, "itemsView": "full", "limit": 10,
+                "sortDirection": "desc", "cursor": cursor,
+            })
+            for turn in page.get("data", []):
+                if any(
+                    isinstance(item, dict) and item.get("type") == "userMessage"
+                    and item.get("clientId") == client_id
+                    for item in turn.get("items", [])
+                ):
+                    record_shared_submission_turn(task_id, turn)
+                    return str(turn["id"])
+                if turn.get("id") == previous or (turn.get("startedAt") and turn["startedAt"] < cutoff):
+                    return ""
+            cursor = page.get("nextCursor")
+            if not cursor:
+                return ""
+
+
+def handle_shared_codex_event(frame: dict[str, Any]) -> None:
+    params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+    task_id = str(params.get("threadId") or "")
+    if task_id not in _shared_target_ids:
+        return
+    method = frame.get("method")
+    turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+    if method == "serverRequest/resolved":
+        handle_shared_request_resolved(params)
+        return
+    if method in {"turn/started", "turn/completed"}:
+        record_shared_submission_turn(task_id, turn)
+        run = active_run_for_task(task_id)
+        if run is not None:
+            expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "feishu:" + str(run["source_message_id"])))
+            if any(isinstance(item, dict) and item.get("type") == "userMessage" and item.get("clientId") == expected for item in turn.get("items", [])):
+                remember_bridge_turn(str(turn.get("id") or ""), str(run["user_id"]))
+        status = "running" if method == "turn/started" else "idle" if turn.get("status") in {"completed", "interrupted"} else "error"
+        schedule_promlight_task_status(task_id, status, "app-server", True, turn_id=str(turn.get("id") or ""))
+    if "id" in frame:
+        approval = approval_from_request(frame)
+        if approval is not None:
+            target = subscribed_approval_targets().get(task_id)
+            if target is not None:
+                publish_subscription_approval(target["task"], approval, set(target["users"]))
+
+
+def reconcile_shared_codex_results() -> None:
+    with _codex_reconcile_lock:
+        _reconcile_shared_codex_results()
+
+
+def _reconcile_shared_codex_results() -> None:
+    if time.monotonic() < _task_db_retry_after:
+        raise RuntimeError("Task database is temporarily unavailable")
+    with _state_lock:
+        pending = [
+            (turn_id, dict(entry))
+            for turn_id, entry in recoverable_runs(load_state()).items()
+            if turn_id.startswith("pending:") and isinstance(entry, dict)
+            and authorized_user(str(entry.get("user_id") or ""))
+        ]
+    for turn_id, recovery in pending:
+        task_id = str(recovery.get("task", {}).get("id") or "")
+        if task_by_id(task_id, str(recovery["user_id"])) is not None:
+            reconcile_pending_submission(turn_id, recovery)
+    poll_task_subscriptions()
+    poll_promlight_task_statuses()
+    with _state_lock:
+        desktop_users = list(desktop_result_subscriptions(load_state()))
+    for user_id in desktop_users:
+        retry_desktop_result_subscriptions(force=True, only_user_id=user_id)
+    with _state_lock:
+        recovery_ids = list(recoverable_runs(load_state()))
+    for turn_id in recovery_ids:
+        retry_recoverable_runs(force=True, only_turn_id=turn_id)
+    if time.monotonic() < _task_db_retry_after:
+        raise RuntimeError("Task database is temporarily unavailable")
+
+
+def observe_codex_events() -> None:
+    global _shared_codex_observer
+    if not (HOME / ".codex/app-server-control/app-server-control.sock").exists():
+        task_subscription_approval_observer_loop()
+        return
+    _shared_codex_observer = SharedEventObserver(
+        codex_app_server_client, shared_codex_targets, handle_shared_codex_event,
+        reconcile_shared_codex_results, STATE_PATH, _shutdown_event, _update_quiesce_requested,
+    )
+    _shared_codex_observer.run()
+
+
 def publish_approval(run: dict[str, Any], approval: dict[str, Any]) -> None:
     request_id = str(approval["request_id"])
     task_id = str(run.get("task", {}).get("id") or "")
@@ -13092,7 +13482,8 @@ def handle_approval_action(
         return
     token = str(event.get("token") or "")
     effective_approved = (
-        existing_resolution == "approved" if existing_resolution else approved
+        None if existing_resolution == "handled_elsewhere"
+        else existing_resolution == "approved" if existing_resolution else approved
     )
     card = completed_approval_card(run, approval, effective_approved)
     if token:
@@ -13110,6 +13501,8 @@ def handle_approval_action(
         run,
         "仍有授权请求等待处理"
         if has_pending
+        else "人工门已在其他客户端处理"
+        if effective_approved is None
         else "已允许一次，Codex 继续运行"
         if effective_approved
         else "已拒绝请求，等待 Codex 处理",
@@ -13121,7 +13514,7 @@ def handle_approval_action(
 def settle_matching_active_approval(
     task_id: str,
     request_id: str,
-    approved: bool,
+    approved: bool | None,
 ) -> None:
     run = active_run_for_task(task_id)
     if run is None:
@@ -13142,10 +13535,30 @@ def settle_matching_active_approval(
         patch_card(message_id, card)
     set_run_progress(
         run,
-        "仍有授权请求等待处理" if has_pending else "人工门已由订阅用户处理",
+        "仍有授权请求等待处理" if has_pending else "人工门已在其他客户端处理" if approved is None else "人工门已由订阅用户处理",
         "approval" if has_pending else "running",
         force=True,
     )
+
+
+def handle_shared_request_resolved(params: dict[str, Any]) -> None:
+    task_id = str(params.get("threadId") or "")
+    protocol_id = params.get("requestId")
+    if not task_id or protocol_id is None:
+        return
+    request_id = str(protocol_id)
+    with _approval_resolution_lock:
+        with _state_lock:
+            entry = subscription_approval_entries(load_state()).get(
+                subscription_approval_key(task_id, request_id)
+            )
+        run = active_run_for_task(task_id)
+        approval = run.get("approvals", {}).get(request_id) if run is not None else None
+        if isinstance(entry, dict):
+            finalize_subscription_approval(entry["task"], entry["approval"], "handled_elsewhere")
+        elif isinstance(approval, dict) and run is not None:
+            finalize_subscription_approval(run["task"], approval, "handled_elsewhere")
+        settle_matching_active_approval(task_id, request_id, None)
 
 
 def handle_subscription_approval_action(
@@ -13382,28 +13795,6 @@ def wait_for_desktop_turn(
     )
 
 
-def rollout_images_since(rollout_path: Path | None, start_offset: int) -> list[str]:
-    if rollout_path is None or not rollout_path.is_file():
-        return []
-    images: list[str] = []
-    with rollout_path.open("r", encoding="utf-8") as handle:
-        handle.seek(start_offset)
-        for line in handle:
-            try:
-                payload = json.loads(line).get("payload")
-            except (AttributeError, json.JSONDecodeError):
-                continue
-            if not isinstance(payload, dict) or payload.get("type") != "image_generation_end":
-                continue
-            image = normalized_image_reference(
-                str(payload.get("saved_path") or ""),
-                trusted_local=True,
-            )
-            if image is not None and image not in images:
-                images.append(image)
-    return images
-
-
 def frontmost_application_bundle_id() -> str:
     try:
         result = subprocess.run(
@@ -13603,7 +13994,11 @@ def run_codex_via_desktop(
                 "为避免重复执行，本条不会再次提交。请在桌面版查看该 task。",
                 [],
             )
-        reason = "ipc-timeout" if isinstance(exc, socket.timeout) else "ipc-connect-failed"
+        reason = (
+            "ipc-not-listening" if isinstance(exc, ConnectionRefusedError)
+            else "ipc-timeout" if isinstance(exc, socket.timeout)
+            else "ipc-connect-failed"
+        )
         log(f"desktop unavailable reason={reason}")
         return "unavailable", reason, []
     except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -13624,6 +14019,172 @@ def run_codex_via_desktop(
             )
         log("desktop unavailable reason=ipc-initialize-failed")
         return "unavailable", "ipc-initialize-failed", []
+
+
+def run_codex_via_app_server(
+    thread_id: str,
+    prompt: str,
+    *,
+    on_started: Callable[[], None] | None = None,
+    input_images: list[str] | None = None,
+    input_files: list[dict[str, str]] | None = None,
+    on_turn_started: Callable[[str], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_approval: Callable[[dict[str, Any]], None] | None = None,
+    cancel_event: threading.Event | None = None,
+    cancel_confirmed: threading.Event | None = None,
+    on_ipc_ready: Callable[[Any, str], None] | None = None,
+) -> tuple[bool, str, list[str]]:
+    """Continue the original Task using the public, event-driven protocol."""
+    submitted = False
+    turn_id = ""
+    pending_submission_id = ""
+    run = active_run_for_task(thread_id)
+    final_items: dict[str, str] = {}
+    other_items: dict[str, str] = {}
+    images: list[str] = []
+    try:
+        with codex_app_server_client() as client:
+            client.initialize()
+            stored = client.request("thread/read", {"threadId": thread_id, "includeTurns": False})
+            thread = stored.get("thread", {})
+            if thread.get("id") != thread_id:
+                raise RuntimeError("Codex 返回了其他 Task，本条消息未提交。")
+            if thread.get("status", {}).get("type") == "active":
+                return False, "当前 task 正在运行，请稍后重试。", []
+            compatible, message = cli_resume_preflight(None, task_version=str(thread.get("cliVersion") or ""))
+            if not compatible:
+                return False, message, []
+            resumed = client.request("thread/resume", {"threadId": thread_id, "excludeTurns": True})
+            if resumed.get("thread", {}).get("id") != thread_id:
+                raise RuntimeError("Codex 未恢复原 Task，本条消息未提交。")
+            if run is not None:
+                run["app_server_settings"] = resumed
+            if on_ipc_ready is not None:
+                on_ipc_ready(client, "app-server")
+            if cancel_event is not None and cancel_event.is_set():
+                if cancel_confirmed is not None:
+                    cancel_confirmed.set()
+                return False, "已按你的要求停止运行。", []
+            request = {"threadId": thread_id, "input": codex_turn_input(
+                prompt, input_images or [], input_files or []
+            )}
+            with _state_lock:
+                settings = dict(load_state().get("pending_task_settings", {}).get(thread_id, {}))
+            request.update(settings)
+            if run is not None:
+                run["submitted_settings"] = settings
+                request["clientUserMessageId"] = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, "feishu:" + str(run["source_message_id"])
+                ))
+                pending_submission_id = "pending:" + request["clientUserMessageId"]
+                persist_recoverable_run({**run, "turn_id": pending_submission_id})
+            submitted = True
+            started = client.request("turn/start", request)
+            turn_id = str(started.get("turn", {}).get("id") or "")
+            if not turn_id:
+                raise RuntimeError("Codex 已接收请求，但没有返回本轮标识。")
+            if on_turn_started is not None:
+                on_turn_started(turn_id)
+            if run is not None:
+                resumed.update({"reasoningEffort" if key == "effort" else key: value for key, value in settings.items()})
+            consume_pending_task_settings(thread_id, settings)
+            if pending_submission_id:
+                remove_recoverable_run(pending_submission_id)
+            if on_started is not None:
+                on_started()
+            deadline = time.monotonic() + 3600
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("等待本机 Codex 完成超时。")
+                event = client.next_event(timeout=remaining)
+                params = event.get("params") if isinstance(event.get("params"), dict) else {}
+                if params.get("threadId") not in {None, thread_id}:
+                    continue
+                if params.get("turnId") not in {None, turn_id}:
+                    continue
+                method = str(event.get("method") or "")
+                if method == "serverRequest/resolved":
+                    handle_shared_request_resolved(params)
+                    continue
+                if "id" in event:
+                    approval = approval_from_request(event)
+                    if approval is not None and on_approval is not None:
+                        on_approval(approval)
+                    else:
+                        client.respond_error(event["id"], "This interaction is not supported by Feishu Bridge.")
+                        if on_progress is not None:
+                            on_progress("已拒绝桥接暂不支持的交互，等待 Codex 继续")
+                    continue
+                item = params.get("item") if isinstance(params.get("item"), dict) else {}
+                if method == "item/completed":
+                    item_id = str(item.get("id") or "")
+                    if item.get("type") == "agentMessage" and item_id:
+                        target = final_items if item.get("phase") in {None, "final_answer"} else other_items
+                        target[item_id] = str(item.get("text") or "")
+                    elif item.get("type") == "imageGeneration" and item.get("savedPath"):
+                        image = normalized_image_reference(str(item["savedPath"]), trusted_local=True)
+                        if image and image not in images:
+                            images.append(image)
+                if on_progress is not None:
+                    status = {
+                        "reasoning": "正在分析任务", "agentMessage": "正在整理回复",
+                        "contextCompaction": "正在压缩上下文",
+                        "collabAgentToolCall": "正在协调 Agent",
+                        "subAgentActivity": "正在协调 Agent",
+                        "commandExecution": "正在使用工具", "fileChange": "正在使用工具",
+                        "mcpToolCall": "正在使用工具", "dynamicToolCall": "正在使用工具",
+                        "webSearch": "正在使用工具", "imageGeneration": "正在使用工具",
+                    }.get(str(item.get("type") or ""))
+                    if status and method in {"item/started", "item/completed"}:
+                        on_progress(status)
+                if method != "turn/completed":
+                    continue
+                turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+                if str(turn.get("id") or "") != turn_id:
+                    continue
+                # Terminal items are authoritative even if no separate item event was sent.
+                for item in turn.get("items", []):
+                    if isinstance(item, dict) and item.get("type") == "agentMessage":
+                        target = final_items if item.get("phase") in {None, "final_answer"} else other_items
+                        target[str(item.get("id") or len(target))] = str(item.get("text") or "")
+                    elif isinstance(item, dict) and item.get("type") == "imageGeneration" and item.get("savedPath"):
+                        image = normalized_image_reference(str(item["savedPath"]), trusted_local=True)
+                        if image and image not in images:
+                            images.append(image)
+                if turn.get("status") == "interrupted":
+                    if cancel_event is not None and cancel_event.is_set() and cancel_confirmed is not None:
+                        cancel_confirmed.set()
+                    return False, "本轮运行已停止。", []
+                if turn.get("status") != "completed":
+                    return False, "本机 Codex 没有完成这条消息；Task 和历史已保留，可重试或在桌面版查看。", []
+                text = "\n\n".join(value.strip() for value in (final_items or other_items).values() if value.strip())
+                return True, text or "Codex 已完成，但没有返回文字结果。", images
+    except AppServerError as exc:
+        error = json.dumps(exc.server_error, ensure_ascii=False).lower() if exc.server_error else ""
+        if not turn_id and (exc.server_error or not exc.request_sent):
+            submitted = False
+        if not turn_id and exc.server_error and any(
+            marker in error for marker in ("active turn", "already running", "busy", "another process", "in use", "writer")
+        ):
+            if "writer" in error and run is not None:
+                run["desktop_connection_migration"] = True
+            return False, "当前 task 正在运行，请稍后重试。", []
+        log(f"app-server run failed submitted={submitted} confirmed={bool(turn_id)} error={type(exc).__name__}")
+    except (OSError, RuntimeError, ValueError, sqlite3.Error, queue.Empty) as exc:
+        log(f"app-server run failed submitted={submitted} confirmed={bool(turn_id)} error={type(exc).__name__}")
+    finally:
+        if pending_submission_id and not submitted:
+            remove_recoverable_run(pending_submission_id)
+        if run is not None:
+            run.pop("app_server_client", None)
+    if submitted:
+        if run is not None:
+            run["submission_uncertain"] = True
+        return False, "本机 Codex 的运行连接中断，尚未确认最终状态；为避免重复执行，本条不会再次提交。请查看当前 Task。", []
+    return False, "无法恢复本机 Codex Task，本条消息尚未提交。请运行 Bridge 诊断并检查桌面端内置 CLI。", []
+
 
 def run_codex(
     thread_id: str,
@@ -13696,116 +14257,25 @@ def run_codex(
             return True, desktop_result, desktop_images
         if desktop_status == "failed":
             return False, desktop_result, []
+        if desktop_result in {"ipc-socket-missing", "ipc-not-listening"}:
+            return run_codex_via_app_server(
+                thread_id, prompt,
+                on_started=lambda: notify_started("本机 Codex 已接收，正在后台运行"),
+                input_images=input_images, input_files=input_files,
+                on_turn_started=on_turn_started, on_progress=on_progress,
+                on_approval=on_approval, cancel_event=cancel_event,
+                cancel_confirmed=cancel_confirmed, on_ipc_ready=on_ipc_ready,
+            )
         raise DesktopUnavailableError(desktop_result or "unknown")
     log("cli fallback explicitly confirmed by user")
-
-    environment = os.environ.copy()
-    environment["CODEX_FEISHU_BRIDGE"] = "1"
-    rollout_path = rollout_path_for_task(thread_id)
-    compatible, compatibility_message = cli_resume_preflight(rollout_path)
-    if not compatible:
-        log(f"codex resume preflight blocked cli={CODEX_CLI}")
-        return False, compatibility_message, []
-    rollout_offset = (
-        rollout_path.stat().st_size
-        if rollout_path and rollout_path.is_file()
-        else 0
+    return run_codex_via_app_server(
+        thread_id, prompt,
+        on_started=lambda: notify_started("本机 Codex 已接收，正在后台运行"),
+        input_images=input_images, input_files=input_files,
+        on_turn_started=on_turn_started, on_progress=on_progress,
+        on_approval=on_approval, cancel_event=cancel_event,
+        cancel_confirmed=cancel_confirmed, on_ipc_ready=on_ipc_ready,
     )
-    with tempfile.TemporaryDirectory(prefix="codex-feishu-") as directory:
-        output_path = Path(directory) / "last-message.txt"
-        command = [
-            CODEX_CLI,
-            "exec",
-            "resume",
-            "--skip-git-repo-check",
-            "--output-last-message",
-            str(output_path),
-        ]
-        for image in input_images or []:
-            command.extend(["--image", str(Path(image).resolve())])
-        command.extend([thread_id, "-"])
-        cli_prompt = prompt
-        if input_files:
-            attachment_lines = [
-                f"- {attachment['label']}: {Path(attachment['path']).resolve()}"
-                for attachment in input_files
-            ]
-            cli_prompt = (
-                f"{prompt.rstrip()}\n\n"
-                "本轮消息包含以下已下载到本机临时目录的飞书附件，请直接读取：\n"
-                + "\n".join(attachment_lines)
-            ).strip()
-        try:
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=environment,
-            )
-        except OSError as exc:
-            log(f"codex resume start failed error={type(exc).__name__}")
-            return False, "无法启动本机 Codex CLI，详细原因已记录到桥接日志。", []
-        notify_started("正在通过备用 Codex CLI 启动")
-        deadline = time.monotonic() + 3600
-        last_progress = 0.0
-        stdout = ""
-        stderr = ""
-        first_communicate = True
-        while True:
-            if cancel_event is not None and cancel_event.is_set():
-                process.terminate()
-                try:
-                    stdout, stderr = process.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    stdout, stderr = process.communicate()
-                if cancel_confirmed is not None:
-                    cancel_confirmed.set()
-                return False, "已按你的要求停止运行。", []
-            now = time.monotonic()
-            if now >= deadline:
-                process.terminate()
-                try:
-                    process.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.communicate()
-                return (
-                    False,
-                    "等待超过 60 分钟，已停止备用 Codex CLI。请在桌面版中查看 task。",
-                    [],
-                )
-            if on_progress is not None and now - last_progress >= 10:
-                on_progress("正在通过备用 Codex CLI 运行")
-                last_progress = now
-            try:
-                stdout, stderr = process.communicate(
-                    input=cli_prompt if first_communicate else None,
-                    timeout=0.5,
-                )
-                break
-            except subprocess.TimeoutExpired:
-                first_communicate = False
-                continue
-        if process.returncode != 0:
-            error = " ".join(stderr.strip().split())[-2000:] or "(empty)"
-            log(f"codex resume failed code={process.returncode} stderr={error}")
-            return (
-                False,
-                codex_resume_failure_message(stderr),
-                [],
-            )
-        try:
-            final_message = output_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            final_message = ""
-        return (
-            True,
-            final_message or "Codex 已完成，但没有返回文字结果。",
-            rollout_images_since(rollout_path, rollout_offset),
-        )
 
 
 def processed_event_seen(
@@ -13897,7 +14367,7 @@ def queue_busy_run(
     )
     entry["available_at"] = time.time() + 15
     entry["ready"] = True
-    entry["queue_reason"] = "desktop_task_busy"
+    entry["queue_reason"] = "desktop_connection_migration" if run.get("desktop_connection_migration") else "desktop_task_busy"
     entry["is_current_task"] = run.get("is_current_task") is not False
     entry["max_concurrent_runs"] = MAX_CONCURRENT_RUNS
     with _state_lock:
@@ -14168,8 +14638,11 @@ def process_message_run(
             set_run_progress(run, delivery_status, "completed", force=True)
     finally:
         task_id = str(run["task"]["id"])
-        remove_recoverable_run(str(run.get("turn_id") or ""))
+        if not run.get("submission_uncertain"):
+            remove_recoverable_run(str(run.get("turn_id") or ""))
         remove_active_run(str(run["run_id"]))
+        if run.get("submission_uncertain") and _shared_codex_observer is not None:
+            _shared_codex_observer.request_reconciliation()
         try:
             update_current_status_card(
                 str(run["user_id"]),
@@ -16338,7 +16811,7 @@ def event_consumer_exit_code(consumers: list[subprocess.Popen[str]]) -> int | No
     return None
 
 
-def diagnostic_report() -> dict[str, Any]:
+def diagnostic_report(*, check_desktop: bool = False) -> dict[str, Any]:
     try:
         config_permissions = CONFIG_PATH.stat().st_mode & 0o777 == 0o600
     except OSError:
@@ -16359,9 +16832,22 @@ def diagnostic_report() -> dict[str, Any]:
         "desktop_catalog_db": DESKTOP_CATALOG_DB.is_file(),
         "workflow_configuration": workflow_configuration_valid(),
     }
+    desktop = desktop_connection_status() if check_desktop else None
+    connection = None
+    if desktop is not None:
+        connection = {**desktop, "backend": "desktop"}
+        if not desktop["available"] and (HOME / ".codex/app-server-control/app-server-control.sock").exists():
+            try:
+                with codex_app_server_client() as client:
+                    client.initialize(timeout=5)
+                connection = {"available": True, "reason": "", "backend": "shared-app-server"}
+            except (OSError, RuntimeError):
+                connection = {"available": False, "reason": "shared-service-unavailable", "backend": "shared-app-server"}
+        checks["codex_connection"] = bool(connection["available"])
     return {
         "ok": all(checks.values()),
         "checks": checks,
+        **({"desktop": desktop, "codex_connection": connection} if desktop is not None else {}),
         "paths": {
             "config": str(CONFIG_PATH),
             "state": str(STATE_PATH),
@@ -16503,19 +16989,20 @@ def maintenance_loop(events: queue.Queue[dict[str, Any]]) -> None:
             except Exception as exc:
                 log(f"pending input loop failed: {type(exc).__name__}: {exc}")
             next_input_retry = now + 1
-        if now >= next_desktop_sync_retry:
+        shared_connected = _shared_codex_observer is not None and _shared_codex_observer.connected
+        if not shared_connected and now >= next_desktop_sync_retry:
             try:
                 retry_desktop_result_subscriptions(now)
             except Exception as exc:
                 log(f"desktop sync loop failed: {type(exc).__name__}: {exc}")
             next_desktop_sync_retry = now + 1
-        if now >= next_restart_recovery_retry:
+        if not shared_connected and now >= next_restart_recovery_retry:
             try:
                 retry_recoverable_runs(now)
             except Exception as exc:
                 log(f"restart recovery loop failed: {type(exc).__name__}: {exc}")
             next_restart_recovery_retry = now + 1
-        if now >= next_task_subscription_poll:
+        if not shared_connected and now >= next_task_subscription_poll:
             try:
                 poll_task_subscriptions()
                 poll_promlight_task_statuses()
@@ -16591,6 +17078,13 @@ def start_event_intake(events: queue.Queue[dict[str, Any]]) -> bool:
 def main() -> int:
     global _quiesced_update_nonce, _update_quiesce_producers_closed
 
+    if sys.argv[1:] == ["--prepare-codex-connection"]:
+        try:
+            print(json.dumps(prepare_shared_codex_connection(), ensure_ascii=False))
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            print("Codex 共享服务连接失败，请运行 Bridge 诊断。")
+            return 1
+        return 0
     if sys.argv[1:] == ["--promlight-status-json"]:
         with _state_lock:
             state = load_state()
@@ -16668,7 +17162,7 @@ def main() -> int:
         print(remove_access_requests(set(payload)))
         return 0
     if sys.argv[1:] == ["--diagnose-json"]:
-        report = diagnostic_report()
+        report = diagnostic_report(check_desktop=True)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["ok"] else 1
     if sys.argv[1:] == ["--self-test"]:
@@ -16685,6 +17179,11 @@ def main() -> int:
     report = diagnostic_report()
     if not report["ok"]:
         log("bridge refused to start: " + json.dumps(report, ensure_ascii=False))
+        return 2
+    try:
+        prepare_shared_codex_connection()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        log(f"shared Codex connection preparation failed error={type(exc).__name__}")
         return 2
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
@@ -16705,7 +17204,7 @@ def main() -> int:
         name="codex-feishu-promlight",
     )
     approval_observer_thread = threading.Thread(
-        target=task_subscription_approval_observer_loop,
+        target=observe_codex_events,
         daemon=True,
         name="codex-feishu-subscription-approvals",
     )

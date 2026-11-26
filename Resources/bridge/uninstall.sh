@@ -101,6 +101,8 @@ fi
     "${legacy_plist}" \
     "${HOME}/.codex/hooks/feishu_bridge_control.sh" \
     "${support_dir}/bridge.py" \
+    "${support_dir}/codex_app_server.py" \
+    "${support_dir}/codex_event_observer.py" \
     "${support_dir}/control.sh" \
     "${support_dir}/diagnose.sh" \
     "${support_dir}/uninstall.sh" \

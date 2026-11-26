@@ -860,6 +860,8 @@ class InstallerSafetyTests(unittest.TestCase):
         package.mkdir()
         for name in (
             "feishu_codex_bridge.py",
+            "codex_app_server.py",
+            "codex_event_observer.py",
             "control.sh",
             "diagnose.sh",
             "uninstall.sh",
@@ -1159,6 +1161,8 @@ class InstallerSafetyTests(unittest.TestCase):
         preflight = source[preflight_start:runtime_start]
         for required in (
             "feishu_codex_bridge.py",
+            "codex_app_server.py",
+            "codex_event_observer.py",
             "control.sh",
             "diagnose.sh",
             "uninstall.sh",
@@ -2952,12 +2956,12 @@ class ReleaseVersionTests(unittest.TestCase):
     def test_release_version_and_build_are_unique(self):
         with (ROOT / "Resources/Info.plist").open("rb") as handle:
             info = plistlib.load(handle)
-        self.assertEqual(info["CFBundleShortVersionString"], "1.11.20")
-        self.assertEqual(info["CFBundleVersion"], "100")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.11.21")
+        self.assertEqual(info["CFBundleVersion"], "101")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         release_notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-        self.assertIn("1.11.20 (build 100)", readme)
-        self.assertIn("1.11.20 (build 100", release_notes)
+        self.assertIn("1.11.21 (build 101)", readme)
+        self.assertIn("1.11.21 (build 101", release_notes)
 
 
 class AppPromLightHomeTests(unittest.TestCase):

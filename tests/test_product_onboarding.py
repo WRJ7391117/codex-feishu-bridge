@@ -675,6 +675,8 @@ struct BotSetupFlowTestRunner {
             bridge = home / "bridge.py"
             config = home / "config.json"
             bridge.write_bytes(BRIDGE_SOURCE.read_bytes())
+            for name in ("codex_app_server.py", "codex_event_observer.py"):
+                (home / name).write_bytes((BRIDGE_SOURCE.parent / name).read_bytes())
             config.write_text("{}\n", encoding="utf-8")
             result = subprocess.run(
                 [sys.executable, str(bridge), "--diagnose-json"],

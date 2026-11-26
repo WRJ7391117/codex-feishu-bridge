@@ -41,6 +41,10 @@ def load_bridge():
 class RuntimeCompatibilityTests(unittest.TestCase):
     def setUp(self):
         self.bridge = load_bridge()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.bridge.STATE_PATH = Path(directory.name) / "state.json"
+        self.bridge.log = mock.Mock()
 
     def test_corrupt_or_insecure_bridge_state_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -212,13 +216,6 @@ class RuntimeCompatibilityTests(unittest.TestCase):
                     self.assertFalse(allowed)
                     self.assertIn("无需删除或重新选择", message)
 
-    def test_thread_store_failure_has_actionable_message(self):
-        message = self.bridge.codex_resume_failure_message(
-            "thread-store internal error: failed to read thread"
-        )
-        self.assertIn("打开 Codex Desktop", message)
-        self.assertIn("无需重新选择", message)
-
     def test_run_codex_does_not_silently_invoke_cli(self):
         self.bridge.run_codex_via_desktop = lambda *args, **kwargs: (
             "unavailable",
@@ -231,6 +228,110 @@ class RuntimeCompatibilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.reason, "no-client-found")
         self.assertIn("尚未提交", str(raised.exception))
         popen.assert_not_called()
+
+    def test_stale_desktop_socket_is_not_reported_as_connected(self):
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        connection.connect.side_effect = ConnectionRefusedError(61, "Connection refused")
+        with tempfile.TemporaryDirectory() as directory:
+            self.bridge.DESKTOP_IPC_SOCKET = Path(directory) / "ipc.sock"
+            self.bridge.DESKTOP_IPC_SOCKET.touch()
+            with mock.patch.object(self.bridge.socket, "socket", return_value=connection):
+                status = self.bridge.desktop_connection_status()
+
+        self.assertEqual(status, {"available": False, "reason": "ipc-not-listening"})
+
+    def test_desktop_diagnostic_requires_successful_handshake(self):
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        with tempfile.TemporaryDirectory() as directory:
+            self.bridge.DESKTOP_IPC_SOCKET = Path(directory) / "ipc.sock"
+            self.bridge.DESKTOP_IPC_SOCKET.touch()
+            with mock.patch.object(
+                self.bridge.socket, "socket", return_value=connection
+            ), mock.patch.object(
+                self.bridge, "initialize_desktop_connection", return_value="client"
+            ) as initialize:
+                status = self.bridge.desktop_connection_status()
+
+        self.assertEqual(status, {"available": True, "reason": ""})
+        initialize.assert_called_once_with(connection)
+
+    def test_desktop_diagnostic_rejects_failed_handshake(self):
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        with tempfile.TemporaryDirectory() as directory:
+            self.bridge.DESKTOP_IPC_SOCKET = Path(directory) / "ipc.sock"
+            self.bridge.DESKTOP_IPC_SOCKET.touch()
+            with mock.patch.object(
+                self.bridge.socket, "socket", return_value=connection
+            ), mock.patch.object(
+                self.bridge, "initialize_desktop_connection", side_effect=RuntimeError
+            ):
+                status = self.bridge.desktop_connection_status()
+
+        self.assertEqual(status, {"available": False, "reason": "ipc-initialize-failed"})
+
+    def test_diagnostic_reports_disconnected_desktop_separately_from_local_setup(self):
+        with mock.patch.object(
+            self.bridge,
+            "desktop_connection_status",
+            return_value={"available": False, "reason": "ipc-not-listening"},
+            create=True,
+        ) as probe:
+            static = self.bridge.diagnostic_report()
+            probe.assert_not_called()
+            with mock.patch.object(self.bridge, "codex_app_server_client", side_effect=RuntimeError):
+                report = self.bridge.diagnostic_report(check_desktop=True)
+
+        self.assertNotIn("codex_connection", static["checks"])
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["checks"]["codex_connection"])
+        self.assertEqual(report["desktop"]["reason"], "ipc-not-listening")
+
+    def test_connection_refusal_does_not_submit_or_offer_pointless_automatic_retries(self):
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        connection.connect.side_effect = ConnectionRefusedError(61, "Connection refused")
+        self.bridge.rollout_path_for_task = lambda thread_id: None
+        self.bridge.database_task_exists = lambda thread_id: True
+        with tempfile.TemporaryDirectory() as directory:
+            self.bridge.DESKTOP_IPC_SOCKET = Path(directory) / "ipc.sock"
+            self.bridge.DESKTOP_IPC_SOCKET.touch()
+            with mock.patch.object(
+                self.bridge.socket, "socket", return_value=connection
+            ), mock.patch.object(
+                self.bridge, "send_ipc_message"
+            ) as send, mock.patch.object(self.bridge.time, "sleep") as sleep:
+                result = self.bridge.run_codex_via_desktop("task-id", "hello")
+
+        self.assertEqual(result, ("unavailable", "ipc-not-listening", []))
+        connection.connect.assert_called_once()
+        send.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_connection_error_after_submission_never_becomes_retryable(self):
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        self.bridge.rollout_path_for_task = lambda thread_id: None
+        self.bridge.database_task_exists = lambda thread_id: True
+        self.bridge.task_working_directory = lambda thread_id: ""
+        with tempfile.TemporaryDirectory() as directory:
+            self.bridge.DESKTOP_IPC_SOCKET = Path(directory) / "ipc.sock"
+            self.bridge.DESKTOP_IPC_SOCKET.touch()
+            with mock.patch.object(
+                self.bridge.socket, "socket", return_value=connection
+            ), mock.patch.object(
+                self.bridge, "initialize_desktop_connection", return_value="client"
+            ), mock.patch.object(
+                self.bridge, "send_ipc_message", side_effect=ConnectionRefusedError
+            ), mock.patch.object(self.bridge.time, "sleep") as sleep:
+                result = self.bridge.run_codex("task-id", "hello")
+
+        self.assertFalse(result[0])
+        self.assertIn("不会再次提交", result[1])
+        connection.connect.assert_called_once()
+        sleep.assert_not_called()
 
     def test_no_client_found_activates_task_then_submits_once(self):
         self.bridge.run_codex_via_desktop = mock.Mock(
@@ -299,8 +400,7 @@ class RuntimeCompatibilityTests(unittest.TestCase):
 
     def test_explicit_cli_fallback_skips_desktop(self):
         self.bridge.run_codex_via_desktop = mock.Mock()
-        self.bridge.rollout_path_for_task = lambda thread_id: None
-        self.bridge.cli_resume_preflight = lambda rollout: (False, "blocked")
+        self.bridge.run_codex_via_app_server = mock.Mock(return_value=(False, "blocked", []))
 
         success, message, images = self.bridge.run_codex(
             "task-id",
