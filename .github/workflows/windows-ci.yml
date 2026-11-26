@@ -1,0 +1,59 @@
+name: Windows candidate verification
+
+on:
+  push:
+    branches: ['main', 'windows/**', 'codex/**']
+    paths: ['windows/**', '.github/workflows/windows-ci.yml', '.gitattributes']
+  pull_request:
+    paths: ['windows/**', '.github/workflows/windows-ci.yml', '.gitattributes']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: windows/FeishuEventSidecar/go.mod
+          cache-dependency-path: windows/FeishuEventSidecar/go.sum
+      - name: Prepare canonical Go test directory
+        shell: pwsh
+        run: |
+          # The runner's default TEMP may use RUNNER~1. Production attestation
+          # intentionally rejects executable path aliases; use a long-path test
+          # build directory without weakening that check or skipping the test.
+          $goTestDirectory = Join-Path $env:RUNNER_TEMP 'deepori-go-build'
+          New-Item -ItemType Directory -Path $goTestDirectory -Force | Out-Null
+          "GOTMPDIR=$((Resolve-Path -LiteralPath $goTestDirectory).Path)" >> $env:GITHUB_ENV
+      - name: Go protocol tests
+        working-directory: windows/FeishuEventSidecar
+        run: go test ./...
+      - name: Isolated protocol and safety tests
+        run: dotnet run --project windows/DeepOriBridge.ProtocolTests/DeepOriBridge.ProtocolTests.csproj -c Release -- --skip-credential-locker-integration --skip-installed-skill-check
+      - name: Windows PowerShell 5.1 setup examples
+        shell: powershell
+        run: ./windows/scripts/Test-SetupSkillExamples.ps1
+      - name: Release build (unsigned runtime disabled)
+        run: dotnet build windows/DeepOriBridge/DeepOriBridge.csproj -c Release -p:Platform=x64 -p:ContinuousIntegrationBuild=true -p:BridgeDeveloperBuild=false -p:BridgeLocalPreviewSensitiveRuntime=false
+      - name: Stage isolated portable candidate (no upload)
+        shell: pwsh
+        run: |
+          $candidate = Join-Path $env:RUNNER_TEMP 'bridge-portable-candidate'
+          ./windows/scripts/Publish-PortablePreview.ps1 -OutputDirectory $candidate
+          dotnet run --no-build --project windows/DeepOriBridge.ProtocolTests/DeepOriBridge.ProtocolTests.csproj -c Release -- --portable-payload-check (Join-Path $candidate 'DeepOriBridge-Windows-x64-preview')
+          if ($LASTEXITCODE -ne 0) { throw 'Portable payload verification failed.' }
+      - name: Release boundary
+        shell: pwsh
+        run: |
+          'Verification only. This job does not sign, install, upload binaries or publish a Release.' >> $env:GITHUB_STEP_SUMMARY
+          'Real Credential Locker, multi-lamp hardware and clean-install acceptance remain manual gates.' >> $env:GITHUB_STEP_SUMMARY

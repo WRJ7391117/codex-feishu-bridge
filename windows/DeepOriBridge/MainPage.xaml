@@ -1,0 +1,316 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="DeepOriBridge.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Loaded="OnLoaded"
+    Unloaded="OnUnloaded"
+    AutomationProperties.AutomationId="DeepOriBridge.Home.Page"
+    mc:Ignorable="d">
+
+    <Grid AutomationProperties.AutomationId="DeepOriBridge.Home.Page" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup x:Name="WindowWidthStates">
+                <VisualState x:Name="Compact">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="0" />
+                    </VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="ContentGrid.Padding" Value="16,20,16,32" />
+                        <Setter Target="HeaderBeta.Visibility" Value="Collapsed" />
+                        <Setter Target="BridgeCommands.(Grid.Row)" Value="1" />
+                        <Setter Target="BridgeCommands.(Grid.Column)" Value="0" />
+                        <Setter Target="BridgeCommands.(Grid.ColumnSpan)" Value="3" />
+                        <Setter Target="BridgeCommands.HorizontalAlignment" Value="Right" />
+                        <Setter Target="BridgeCommands.Margin" Value="0,12,0,0" />
+                        <Setter Target="FeishuMetric.(Grid.ColumnSpan)" Value="5" />
+                        <Setter Target="CodexMetric.(Grid.Row)" Value="1" />
+                        <Setter Target="CodexMetric.(Grid.Column)" Value="0" />
+                        <Setter Target="CodexMetric.(Grid.ColumnSpan)" Value="5" />
+                        <Setter Target="LastCheckedMetric.(Grid.Row)" Value="2" />
+                        <Setter Target="LastCheckedMetric.(Grid.Column)" Value="0" />
+                        <Setter Target="LastCheckedMetric.(Grid.ColumnSpan)" Value="5" />
+                        <Setter Target="DashboardDividerOne.Visibility" Value="Collapsed" />
+                        <Setter Target="DashboardDividerTwo.Visibility" Value="Collapsed" />
+                        <Setter Target="PromLightBadge.Visibility" Value="Collapsed" />
+                        <Setter Target="ConfigurationCard.(Grid.Row)" Value="0" />
+                        <Setter Target="ConfigurationCard.(Grid.Column)" Value="0" />
+                        <Setter Target="DiagnosticsCard.(Grid.Row)" Value="1" />
+                        <Setter Target="DiagnosticsCard.(Grid.Column)" Value="0" />
+                        <Setter Target="NavigationSecondaryColumn.Width" Value="0" />
+                        <Setter Target="BotSetupAction.(Grid.Row)" Value="1" />
+                        <Setter Target="BotSetupAction.(Grid.Column)" Value="1" />
+                        <Setter Target="BotSetupAction.Margin" Value="0,12,0,0" />
+                        <Setter Target="SetupWizardAction.(Grid.Row)" Value="1" />
+                        <Setter Target="SetupWizardAction.(Grid.Column)" Value="1" />
+                        <Setter Target="SetupWizardAction.Margin" Value="0,12,0,0" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Medium">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="600" />
+                    </VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="ContentGrid.Padding" Value="24,24,24,40" />
+                        <Setter Target="HeaderBeta.Visibility" Value="Collapsed" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Wide">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="900" />
+                    </VisualState.StateTriggers>
+                </VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+
+        <ScrollViewer x:Name="RootScrollViewer" HorizontalScrollBarVisibility="Disabled">
+            <Grid x:Name="ContentGrid" MaxWidth="1040" Padding="28,24,28,40" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="20">
+                    <Grid x:Name="HeaderGrid" ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Image
+                            Width="64"
+                            Height="64"
+                            AutomationProperties.Name="DeepOri Bridge 应用图标"
+                            Source="ms-appx:///Assets/Square150x150Logo.scale-200.png"
+                            Stretch="Uniform" />
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="5">
+                            <TextBlock AutomationProperties.AutomationId="DeepOriBridge.Home.Page" Style="{StaticResource BridgePageTitleStyle}" Text="DeepOri Bridge" />
+                            <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="通过飞书继续 Windows 上已有的 Codex Task · for Windows" />
+                        </StackPanel>
+                        <TextBlock x:Name="HeaderBeta" Grid.Column="2" VerticalAlignment="Center" Style="{StaticResource BridgeSecondaryTextStyle}" Text="Windows Beta" />
+                    </Grid>
+
+                    <Expander x:Name="GettingStartedExpander" HorizontalAlignment="Stretch" IsExpanded="True" Header="首次设置与连接向导" AutomationProperties.Name="首次设置与连接向导">
+                        <StackPanel Spacing="14">
+                            <StackPanel Spacing="4">
+                                <TextBlock FontSize="22" FontWeight="SemiBold" Text="开始使用" />
+                                <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="请按顺序完成：先准备飞书机器人，再进入首次连接向导。" />
+                            </StackPanel>
+
+                            <Grid ColumnSpacing="14" RowDefinitions="Auto,Auto">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Border Width="34" Height="34" VerticalAlignment="Center" Background="{ThemeResource AccentFillColorSecondaryBrush}" CornerRadius="17">
+                                    <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="SemiBold" Text="1" />
+                                </Border>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                                    <TextBlock FontWeight="SemiBold" Text="添加飞书机器人" />
+                                    <TextBlock x:Name="BotSetupStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="创建企业自建应用并启用机器人能力，然后取得 App ID 和 App Secret。" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button x:Name="BotSetupAction" Grid.Column="2" AutomationProperties.Name="添加飞书机器人" Click="OnOpenFeishuPlatformClicked" Content="打开飞书开放平台" />
+                            </Grid>
+
+                            <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+                            <Grid ColumnSpacing="14" RowDefinitions="Auto,Auto">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Border Width="34" Height="34" VerticalAlignment="Center" Background="{ThemeResource AccentFillColorSecondaryBrush}" CornerRadius="17">
+                                    <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="SemiBold" Text="2" />
+                                </Border>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                                    <TextBlock FontWeight="SemiBold" Text="首次连接向导" />
+                                    <TextBlock x:Name="FirstConnectionStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="在 Bridge 中安全验证凭据，再选择 Codex 自动配置或四步手动配置。" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button x:Name="SetupWizardAction" Grid.Column="2" AutomationProperties.Name="进入首次连接向导" Click="OnOpenSetupClicked" Content="进入向导" Style="{StaticResource AccentButtonStyle}" />
+                            </Grid>
+                        </StackPanel>
+                    </Expander>
+
+                    <Border Style="{StaticResource BridgeCardStyle}">
+                        <Grid x:Name="RuntimeCardGrid" ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Border Width="52" Height="52" Background="{ThemeResource AccentFillColorSecondaryBrush}" CornerRadius="26">
+                                <FontIcon HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="25" Glyph="&#xE930;" />
+                            </Border>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
+                                <TextBlock x:Name="RuntimeStatusText" Style="{StaticResource BridgeSectionTitleStyle}" Text="DeepOri Bridge 已关闭" />
+                                <TextBlock x:Name="RuntimeDetailText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="飞书消息不会进入 Codex。" />
+                            </StackPanel>
+                            <CommandBar x:Name="BridgeCommands" Grid.Column="2" VerticalAlignment="Center" Background="Transparent" DefaultLabelPosition="Right">
+                                <AppBarButton x:Name="StartButton" Click="OnStartClicked" Label="立即开启" Icon="Play" IsEnabled="False" />
+                                <AppBarButton x:Name="StopButton" Click="OnStopClicked" Label="停止运行…" Icon="Stop" IsEnabled="False" Visibility="Collapsed" />
+                                <AppBarButton x:Name="RefreshButton" AutomationProperties.Name="刷新状态" Click="OnRefreshClicked" IsEnabled="False" Icon="Refresh" Label="刷新状态" />
+                            </CommandBar>
+                        </Grid>
+                    </Border>
+
+                    <InfoBar x:Name="OverallStatus" IsClosable="False" IsOpen="True" Message="正在检查这台 Windows 电脑…" Severity="Informational" Title="正在准备" />
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="运行看板" />
+                        <Border Style="{StaticResource BridgeCardStyle}">
+                            <Grid x:Name="DashboardGrid" ColumnSpacing="0" RowSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel x:Name="FeishuMetric" HorizontalAlignment="Center" Spacing="5">
+                                    <FontIcon Foreground="{ThemeResource TextFillColorSecondaryBrush}" Glyph="&#xE968;" />
+                                    <TextBlock x:Name="FeishuEventStatusText" Style="{StaticResource BridgeMetricValueStyle}" Text="未连接" />
+                                    <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="飞书连接" />
+                                </StackPanel>
+                                <Rectangle x:Name="DashboardDividerOne" Grid.Column="1" Width="1" Height="48" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
+                                <StackPanel x:Name="CodexMetric" Grid.Column="2" HorizontalAlignment="Center" Spacing="5">
+                                    <FontIcon Foreground="{ThemeResource TextFillColorSecondaryBrush}" Glyph="&#xE756;" />
+                                    <TextBlock x:Name="CodexVersionText" Style="{StaticResource BridgeMetricValueStyle}" Text="检查中…" />
+                                    <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="Codex Desktop" />
+                                </StackPanel>
+                                <Rectangle x:Name="DashboardDividerTwo" Grid.Column="3" Width="1" Height="48" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
+                                <StackPanel x:Name="LastCheckedMetric" Grid.Column="4" HorizontalAlignment="Center" Spacing="5">
+                                    <FontIcon Foreground="{ThemeResource TextFillColorSecondaryBrush}" Glyph="&#xE823;" />
+                                    <TextBlock x:Name="LastCheckedText" Style="{StaticResource BridgeMetricValueStyle}" Text="尚未检查" />
+                                    <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="最近检查" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <TextBlock x:Name="FeishuEventCountText" Margin="8,0,0,0" Style="{StaticResource BridgeSecondaryTextStyle}" Text="尚未收到飞书消息。" />
+                        <TextBlock x:Name="FeishuReplyStatusText" Margin="8,0,0,0" Style="{StaticResource BridgeSecondaryTextStyle}" Text="尚无自动回复结果。" />
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="Codex 用量" VerticalAlignment="Center" TextWrapping="Wrap" />
+                            <Button x:Name="CodexUsageRefreshButton" Grid.Column="1" IsEnabled="False"
+                                    Click="OnCodexUsageRefreshClicked" AutomationProperties.Name="刷新额度"
+                                    ToolTipService.ToolTip="立即重新读取 Codex 额度，不会重置额度或启动 Task。">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon Glyph="&#xE72C;" FontSize="16" />
+                                    <TextBlock x:Name="CodexUsageRefreshLabel" Text="刷新额度" />
+                                </StackPanel>
+                            </Button>
+                        </Grid>
+                        <Border Style="{StaticResource BridgeCardStyle}">
+                            <StackPanel Spacing="10">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="20" Glyph="&#xE9D9;" />
+                                    <TextBlock x:Name="CodexUsageStatusText" Grid.Column="1" AutomationProperties.Name="Codex 用量状态" Style="{StaticResource BridgeSecondaryTextStyle}" Text="正在等待已验证的 Codex 连接…" TextWrapping="Wrap" />
+                                </Grid>
+                                <StackPanel x:Name="CodexUsageItems" AutomationProperties.Name="Codex 用量窗口列表" Spacing="10" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="提示灯" />
+                            <Expander IsExpanded="False" HorizontalAlignment="Stretch" AutomationProperties.Name="管理 PromLight 提示灯">
+                                <Expander.Header>
+                                    <Grid MinHeight="48" ColumnSpacing="14">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Border Width="44" Height="44" Background="{ThemeResource AccentFillColorSecondaryBrush}" CornerRadius="10">
+                                            <FontIcon HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="21" Glyph="&#xEA80;" />
+                                        </Border>
+                                        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
+                                            <TextBlock FontWeight="SemiBold" Text="管理提示灯" />
+                                            <TextBlock x:Name="PromLightStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="正在读取这台 Windows 电脑上的 PromLight…" />
+                                        </StackPanel>
+                                        <TextBlock x:Name="PromLightBadge" Grid.Column="2" VerticalAlignment="Center" Style="{StaticResource BridgeSecondaryTextStyle}" Text="本机真机" />
+                                    </Grid>
+                                </Expander.Header>
+                                <StackPanel Padding="0,14,0,4" Spacing="12">
+                                    <ComboBox x:Name="PromLightOwnerSelector" Header="管理使用者（仅显示已授权账号）" HorizontalAlignment="Stretch" SelectionChanged="OnPromLightOwnerChanged" IsEnabled="False" />
+                                    <ComboBox x:Name="PromLightLampSelector" Header="这位使用者的提示灯" HorizontalAlignment="Stretch" SelectionChanged="OnPromLightLampChanged" IsEnabled="False" />
+                                    <ComboBox x:Name="PromLightDeviceSelector" Header="绑定新灯：选择已发现的物理设备" HorizontalAlignment="Stretch" IsEnabled="False" />
+                                    <TextBox x:Name="PromLightNameInput" Header="提示灯名称" Text="PromLight" MaxLength="40" IsEnabled="False" />
+                                    <CommandBar Background="Transparent" DefaultLabelPosition="Right">
+                                        <AppBarButton x:Name="PromLightBindButton" Label="绑定所选设备" Click="OnPromLightBindClicked" IsEnabled="False" />
+                                        <AppBarButton x:Name="PromLightImportButton" Label="导入旧灯关联" Click="OnPromLightImportClicked" IsEnabled="False" />
+                                        <AppBarButton x:Name="PromLightRenameButton" Label="保存名称" Click="OnPromLightRenameClicked" IsEnabled="False" />
+                                        <AppBarButton x:Name="PromLightDefaultButton" Label="设为默认灯" Click="OnPromLightDefaultClicked" IsEnabled="False" />
+                                        <AppBarButton x:Name="PromLightUnbindButton" Label="解绑此灯" Click="OnPromLightUnbindClicked" IsEnabled="False" />
+                                    </CommandBar>
+                                    <TextBlock x:Name="PromLightTasksText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="每盏灯的 Task 独立管理；飞书中可以逐个关联或取消关联。" />
+                                    <InfoBar IsClosable="False" IsOpen="True" Message="只会跟随你明确关联的 Task；多个 Task 按错误、等待人工、运行中、空闲的优先级聚合。" Severity="Informational" Title="自动提示灯" />
+                                    <TextBlock x:Name="PromLightHardwareText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="设备信息尚未读取。" />
+                                    <CommandBar Background="Transparent" DefaultLabelPosition="Right" IsOpen="False">
+                                        <AppBarButton x:Name="PromLightDetectButton" Click="OnPromLightDetectClicked" Icon="Refresh" IsEnabled="False" Label="刷新设备" />
+                                        <AppBarButton x:Name="PromLightAssociateCurrentButton" Click="OnPromLightAssociateCurrentClicked" Icon="Link" IsEnabled="False" Label="关联当前 Task" />
+                                        <AppBarSeparator />
+                                        <AppBarButton x:Name="PromLightIdleButton" Click="OnPromLightIdleClicked" IsEnabled="False" Label="空闲" />
+                                        <AppBarButton x:Name="PromLightRunningButton" Click="OnPromLightRunningClicked" IsEnabled="False" Label="运行中" />
+                                        <AppBarButton x:Name="PromLightHumanGateButton" Click="OnPromLightHumanGateClicked" IsEnabled="False" Label="等待人工" />
+                                        <AppBarButton x:Name="PromLightErrorButton" Click="OnPromLightErrorClicked" IsEnabled="False" Label="错误" />
+                                    </CommandBar>
+                                    <TextBlock x:Name="PromLightWriteText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="尚未提交灯效。" />
+                                </StackPanel>
+                            </Expander>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="设置与管理" />
+                        <Grid x:Name="NavigationCardsGrid" ColumnSpacing="12" RowSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition x:Name="NavigationPrimaryColumn" Width="*" />
+                            <ColumnDefinition x:Name="NavigationSecondaryColumn" Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                            <Border x:Name="ConfigurationCard" Style="{StaticResource BridgeCardStyle}">
+                                <StackPanel Spacing="10">
+                                    <FontIcon HorizontalAlignment="Left" Glyph="&#xE713;" />
+                                    <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="配置桥接" />
+                                    <TextBlock x:Name="FeishuOwnerStatusText" Style="{StaticResource BridgeSecondaryTextStyle}" Text="查看连接、owner 白名单与人工确认测试工具。" />
+                                    <Button AutomationProperties.Name="打开桥接配置" Click="OnOpenConfigurationClicked" Content="管理连接" />
+                                </StackPanel>
+                            </Border>
+                            <Border x:Name="DiagnosticsCard" Grid.Column="1" Style="{StaticResource BridgeCardStyle}">
+                                <StackPanel Spacing="10">
+                                    <FontIcon HorizontalAlignment="Left" Glyph="&#xE9D9;" />
+                                    <TextBlock Style="{StaticResource BridgeSectionTitleStyle}" Text="运行诊断" />
+                                    <TextBlock Style="{StaticResource BridgeSecondaryTextStyle}" Text="核验 Codex 路径、app-server、数据库文件头与 Windows IPC。" />
+                                    <Button AutomationProperties.Name="打开运行诊断" Click="OnOpenDiagnosticsClicked" Content="查看诊断" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </StackPanel>
+
+                    <TextBlock Margin="4,4,4,0" Style="{StaticResource BridgeSecondaryTextStyle}" Text="关闭窗口会停止桥接；意外退出会尝试恢复。尚不支持托盘或开机自启动。当前为 Windows 本机开发预览版。" />
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+</Page>

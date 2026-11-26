@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- Also exclude the default folders when a verifier overrides obj/bin. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/obj/**;**/bin/**;**/AppPackages/**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

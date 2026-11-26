@@ -1,0 +1,2 @@
+# Managed skill hashes cover exact bytes; keep identical on Windows and CI.
+windows/DeepOriBridge/Assets/CodexSkills/** text eol=lf

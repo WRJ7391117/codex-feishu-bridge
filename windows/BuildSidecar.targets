@@ -1,0 +1,21 @@
+<Project>
+  <PropertyGroup>
+    <BridgeSidecarOutputDir>$([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)', 'sidecar', '$(Configuration)', '$(Platform)'))</BridgeSidecarOutputDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(BridgeSidecarOutputDir)\FeishuSidecarBuildAttestation.g.cs" />
+    <Content Include="$(BridgeSidecarOutputDir)\feishu-event-sidecar.exe" Link="Tools\feishu-event-sidecar.exe" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
+    <Content Include="$(BridgeSidecarOutputDir)\feishu-event-sidecar.manifest.json" Link="Tools\feishu-event-sidecar.manifest.json" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
+  </ItemGroup>
+  <Target Name="BuildFeishuEventSidecar" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
+    <MakeDir Directories="$(BridgeSidecarOutputDir)" />
+    <Exec Command="go build -trimpath -ldflags=&quot;-s -w&quot; -o &quot;$(BridgeSidecarOutputDir)\feishu-event-sidecar.exe&quot; ." WorkingDirectory="$(MSBuildThisFileDirectory)FeishuEventSidecar" />
+    <GetFileHash Files="$(BridgeSidecarOutputDir)\feishu-event-sidecar.exe" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="_FeishuSidecarHash" />
+    </GetFileHash>
+    <WriteLinesToFile File="$(BridgeSidecarOutputDir)\feishu-event-sidecar.manifest.json"
+      Lines="{&quot;protocol_version&quot;:1,&quot;file_name&quot;:&quot;feishu-event-sidecar.exe&quot;,&quot;sha256&quot;:&quot;%(_FeishuSidecarHash.FileHash)&quot;}" Overwrite="true" Encoding="UTF-8" />
+    <WriteLinesToFile File="$(BridgeSidecarOutputDir)\FeishuSidecarBuildAttestation.g.cs"
+      Lines="namespace DeepOriBridge.Services%3B internal static class FeishuSidecarBuildAttestation { internal const string ExpectedSha256 = &quot;%(_FeishuSidecarHash.FileHash)&quot;%3B }" Overwrite="true" Encoding="UTF-8" />
+  </Target>
+</Project>
