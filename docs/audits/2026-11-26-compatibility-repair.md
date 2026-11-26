@@ -1,8 +1,8 @@
 # 2026-11-26 compatibility repair
 
-Scope: restore the Feishu → original Codex Task → Feishu path for the current Desktop generation. This document records candidate evidence and remaining release gates; it does not claim that `1.11.21` is published or installed.
+Scope: restore the Feishu → original Codex Task → Feishu path for the current Desktop generation. Source repair began on 2026-11-26; release and installation verification completed on 2026-11-27. Desktop-process migration and real Feishu acceptance remain pending.
 
-Candidate identity: `1.11.21 (build 101)`.
+Released and installed identity: `1.11.21 (build 101)`, tag `v1.11.21`, source commit `05ec7a5`.
 
 ## Confirmed causes
 
@@ -37,22 +37,30 @@ These checks establish the local protocol and source behavior. They are not a re
 
 ## Explicitly not yet verified
 
-- [ ] The currently installed App is still `1.11.20 (build 100)` and its installed runtime differs from the candidate. The current Desktop/Bridge process has not migrated to the new shared observer.
+- [ ] The existing Desktop process has not been safely quit and reopened to join the shared daemon. Bridge runtime is upgraded and its shared connection passes diagnosis. The current coordinating Task is still hosted by that old Desktop process and was not force-terminated.
 - [ ] No real Feishu message has traversed the `1.11.21` candidate from Bot ingress through the original Desktop Task to the final Bot reply.
 - [ ] Approval, stop, media delivery, restart recovery, and duplicate suppression have not been accepted end to end through real Feishu on the installed candidate.
-- [ ] The current host cannot complete the Swift build because its Command Line Tools lack the existing SwiftUI macro plugin; the standard macOS CI build is required.
-- [ ] No `1.11.21` Universal package, CI run, tag, GitHub Release, signed appcast, or installed-runtime verification exists yet.
-- [ ] Sparkle discovery and installation from the installed `1.11.20` App to `1.11.21` have not been exercised.
+
+The local Command Line Tools macro limitation is covered by successful standard macOS CI and Release builds; no App workaround or deployment-target change was introduced.
+
+## Publication and installation evidence (2026-11-27)
+
+- [CI run 45842707782](https://github.com/WRJ7391117/codex-feishu-bridge/actions/runs/45842707782) passed every step, including Swift type-check, Universal build, signature, architectures, linkage, and ZIP digest.
+- [Release run 45906753388](https://github.com/WRJ7391117/codex-feishu-bridge/actions/runs/45906753388) published [v1.11.21](https://github.com/WRJ7391117/codex-feishu-bridge/releases/tag/v1.11.21) from the same fixed commit.
+- Independent artifact audit: 10/10 checks pass. All four assets match GitHub digests. ZIP SHA-256 is `19e33d1917bab924f722b38abafb324a1cbca43a4cce68997a39cac1c1502ac1`, length `30581634`. The appcast Ed25519 signature verifies with the old installed App's public key. Bundle identity, version/build, Universal binaries, deep/strict ad-hoc signature, Sparkle linkage, and both modules pass.
+- With Bridge idle, the installed `1.11.20` App was safely quit and reopened. Its startup hook automatically downloaded and replaced it with `1.11.21 (101)`. LaunchServices needed one open retry; no manual update click, fallback installer, or bundle overwrite was used.
+- Installed App binary and bundled runtime match the released ZIP. Installed `bridge.py` and both public modules match reviewed source. LaunchAgent is running, all three event consumers have fresh ready markers, and one persistent public proxy connection is present.
+- Installed diagnostic checks all pass with backend `shared-app-server`. Configuration hash is unchanged and both authorized users remain configured. This does not prove that the old Desktop writer has migrated or that a real Feishu message has completed.
 
 ## Release acceptance checklist
 
 - [x] Final full regression and independent source review pass.
-- [ ] macOS CI builds the Universal App and verifies ad-hoc deep signature, both architectures, Sparkle linkage, archive digest, and appcast XML.
-- [ ] Release contains exactly the ZIP, SHA-256 file, `update.json`, and signed `appcast.xml`, all matching `1.11.21 (build 101)` and tag `v1.11.21`.
-- [ ] Sparkle upgrades the installed `1.11.20` App without interrupting active Bridge work.
-- [ ] Installed App and runtime both match `1.11.21`; LaunchAgent and three event consumers are healthy after migration.
+- [x] macOS CI builds the Universal App and verifies ad-hoc deep signature, both architectures, Sparkle linkage, archive digest, and appcast XML.
+- [x] Release contains exactly the ZIP, SHA-256 file, `update.json`, and signed `appcast.xml`, all matching `1.11.21 (build 101)` and tag `v1.11.21`.
+- [x] Sparkle upgrades the installed `1.11.20` App while Bridge is idle; active-work deferral is covered by source tests rather than an intentionally interrupted real Task.
+- [x] Installed App and runtime both match `1.11.21`; LaunchAgent, three consumers, and public shared-service diagnosis pass. Desktop-process migration remains a separate step.
 - [ ] Real Feishu E2E proves the original Task is reused and covers final reply, one-time approval, stop, and representative attachments without duplicate execution.
-- [ ] Restart recovery and result-delivery retries do not rerun Codex.
+- [x] Source regressions prove pending/confirmed recovery and delivery retries do not rerun Codex; real Feishu restart acceptance remains pending above.
 
 Desktop live visibility and ownership must be checked against the migrated shared connection. They are not inferred from an independent CLI run, source tests, or the current unmodified Desktop process.
 

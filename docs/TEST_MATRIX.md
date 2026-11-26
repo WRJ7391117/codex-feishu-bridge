@@ -1,15 +1,15 @@
 # DeepOri Bridge test matrix
 
-Status: `1.11.21 (build 101)` pre-release verification
+Status: `1.11.21 (build 101)` published and installed; Desktop restart and real Feishu acceptance pending
 
-Updated: 2026-11-26
+Updated: 2026-11-27
 
-“Pass locally” below means source tests or bounded local protocol checks passed. It does not mean the candidate was published, installed, or accepted through a real Feishu round trip.
+"Pass locally" means source or bounded local protocol evidence. Publication and installation are recorded separately; real Feishu acceptance remains pending.
 
 | Surface | Target | Current evidence | Status |
 | --- | --- | --- | --- |
 | Source regression | isolated temporary HOME on macOS arm64 | all 540 Python tests pass; Python 3.9 product import and Shell syntax checks pass; independent review findings have been repaired and covered by regressions | Pass locally |
-| Shared app-server transport | current managed local daemon | Unix/WebSocket initialize and same-Task resume work against the real shared daemon; bounded two-client, approval, and stop checks passed without using the protected App Tools pipe | Pass locally; current installed runtime not migrated |
+| Shared app-server transport | current managed local daemon | real two-client observation, joining while a turn is running, one-time approval, stop, and model/effort/tier readback passed; installed runtime has a public proxy connection and passes shared-service diagnosis | Pass protocol and runtime; old Desktop process still needs restart |
 | Same-Task integrity | existing Codex Task | source and protocol checks retain the original Task ID and guard uncertain acknowledgements from replay | Pass locally; real Feishu E2E pending |
 | Event observation | subscribed Desktop Task | the shared connection consumes app-server events and uses state-file events to refresh targets; no Task-storage polling was added to the new path | Pass locally; restart E2E pending |
 | Paginated history | database and legacy JSONL | authoritative backend selection, stale-JSONL exclusion, subscription migration, and legacy fallback have regression coverage | Pass locally |
@@ -18,21 +18,21 @@ Updated: 2026-11-26
 | State concurrency | App plus background process | state locking and durable queue behavior have regression coverage | Pass locally |
 | Event durability | message/card/menu dispatch | failed dispatch is not acknowledged; persisted retries do not rerun Codex | Pass locally |
 | Runtime module manifest | install, update, rollback, and uninstall | `codex_app_server.py` and `codex_event_observer.py` are included in installer preflight/staging, runtime backup/restore, uninstall, and packaging fixtures | Pass locally |
-| Automatic update discovery | Sparkle 2.9.6 | checks are event-driven at App launch, new Bridge activity, and App activation/reopen; activation is rate-limited and guarded against overlapping sessions; no scheduled update timer is configured | Pass locally; real `1.11.20` to `1.11.21` upgrade pending |
-| Idle update installation | active runs, queues, and pending delivery | existing quiesce, nonce acknowledgement, safe-install, and rollback paths remain covered | Pass locally; candidate install pending |
-| App compiler | macOS 13 deployment target | the current host reaches Swift compilation but its Command Line Tools lack the `SwiftUIMacros` plugin used by existing SwiftUI `@State` declarations | Blocked locally; CI required |
-| Universal package | arm64 + x86_64 | release workflow builds the App, bundled `lark-cli`, PromLight helper, and Sparkle framework for both architectures | Candidate package not built |
-| Package integrity | ZIP, SHA-256, and appcast | workflow verifies the archive digest, signed appcast XML, version/build, download URL, length, and Sparkle signature | Candidate assets pending |
-| Code signature | current Release path | workflow requires deep/strict verification and an ad-hoc signature; Developer ID notarization is outside the current release contract | Pending candidate CI |
-| Installed App | current Mac | installed App is `1.11.20 (build 100)`; source is `1.11.21 (build 101)` | Not synchronized |
-| Installed runtime | current Mac | installed `bridge.py` differs from the `1.11.21` candidate; the running Desktop/Bridge path has not migrated to the new shared observer | Not synchronized |
+| Automatic update discovery | Sparkle 2.9.6 | safe relaunch of the installed `1.11.20` App automatically discovered, downloaded, and replaced it with `1.11.21`; no manual update click or bundle copy was used | Pass actual upgrade |
+| Idle update installation | active runs, queues, and pending delivery | actual idle Sparkle replacement synchronized runtime; LaunchAgent is running with three fresh event-ready markers; config digest stayed unchanged | Pass idle install; active-work deferral remains source-tested |
+| App compiler | macOS 13 deployment target | standard macOS CI type-check and release builds pass; the local Command Line Tools macro limitation remains host-specific | Pass CI |
+| Universal package | arm64 + x86_64 | independent audit verifies both architectures for App, bundled CLI, PromLight helper, and Sparkle framework | Pass released package |
+| Package integrity | ZIP, SHA-256, and appcast | all four assets match GitHub digests; appcast version/build/tag URL/length match; Ed25519 verifies with the installed old App's public key | Pass released assets |
+| Code signature | current Release path | released and installed App pass deep/strict ad-hoc verification; no Developer ID notarization is claimed | Pass current contract |
+| Installed App | current Mac | `1.11.21 (build 101)` binary and bundled runtime files match the published archive | Synchronized |
+| Installed runtime | current Mac | `bridge.py` and both public modules match reviewed source; three consumers, LaunchAgent, and shared-service diagnosis pass; two authorized users and config are preserved | Synchronized; Desktop restart pending |
 | Real Feishu acceptance | authorized user and real Bot | no post-change Feishu message, approval, stop, final reply, or media round trip has been accepted on `1.11.21` | Not tested |
 | Public/private boundary | release payload | private workflow components remain excluded from the public App payload and example configuration | Pass locally |
 | Apple Silicon clean account | macOS 13+ | no clean-account install evidence for this candidate | Not tested |
 | Intel Mac | macOS 13+ | CI can build x86_64; no real Intel launch evidence | Not tested |
 | Gatekeeper | ad-hoc Release download | documented Finder right-click Open path | Not tested on another Mac |
-| GitHub CI | macOS runner | `v1.11.20` workflows passed; `1.11.21` has not run on CI | Pending |
-| GitHub tag and Release | public repository | tag/version immutability gates and four-asset publication workflow are present; `v1.11.21` is not published | Pending |
+| GitHub CI | macOS runner | commit `05ec7a5` passed CI run `45842707782` and Release run `45906753388` | Pass |
+| GitHub tag and Release | public repository | immutable `v1.11.21` points to `05ec7a5`; four audited assets are published | Published |
 
 ## `1.11.21` release gates
 
